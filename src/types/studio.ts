@@ -32,6 +32,31 @@ export interface StudioState {
   activeCallId?: string;
   activeCallUserId?: string;
   activeCallUserName?: string;
+  autoScheduleEnabled?: boolean;
+  scheduleStartTime?: string;
+  scheduleEndTime?: string;
+  scheduleDays?: string;
+  scheduleTimezone?: string;
+  dndActive?: boolean;
+  dndUntilMs?: number;
+  dndScheduleEnabled?: boolean;
+  dndStartTime?: string;
+  dndEndTime?: string;
+  updatedAt: Timestamp;
+}
+
+export type CallPaymentStatus = 'authorized' | 'captured' | 'refunded';
+
+export interface CallPlan {
+  id: string;
+  name: string;
+  description: string;
+  durationMinutes: number;
+  priceCents: number;
+  currency: 'BRL';
+  active: boolean;
+  sortOrder: number;
+  createdAt: Timestamp;
   updatedAt: Timestamp;
 }
 
@@ -42,6 +67,11 @@ export interface CallRequest {
   userPhotoUrl?: string;
   topic: string;
   status: CallStatus;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
+  paymentStatus?: CallPaymentStatus;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -67,6 +97,21 @@ export interface PresencePeer {
   connectedAt: string;
 }
 
+export interface RoomParticipant {
+  uid: string;
+  displayName: string;
+  photoUrl: string;
+  role: StudioRole;
+  accessStatus: AccessStatus;
+  isAdmin: boolean;
+  joinedAt: string;
+  callId?: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
+}
+
 export type CallHistoryStatus = 'completed' | 'refunded';
 
 export interface CallHistoryRecord {
@@ -79,7 +124,26 @@ export interface CallHistoryRecord {
   amountCents: number;
   currency: 'BRL';
   status: CallHistoryStatus;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  rating?: number;
+  ratingComment?: string;
+  ratedAt?: Timestamp;
   endedAt: Timestamp;
   createdAt: Timestamp;
 }
 
+export type InterestMessageStatus = 'unread' | 'reviewed' | 'contacted';
+
+export interface InterestMessage {
+  id: string;
+  userId: string;
+  userName: string;
+  userPhotoUrl?: string;
+  preferredTime: string;
+  message: string;
+  status: InterestMessageStatus;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}

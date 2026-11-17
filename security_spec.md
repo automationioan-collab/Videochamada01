@@ -22,3 +22,9 @@
 10. **Terminal Call Re-Activation**: Viewer attempts `update` on `/callQueue/{id}` where `existing.status == 'rejected'` to set `status: 'in_call'`.
 11. **Backdated Timestamp Forgery**: Caller passes client `Date` for `createdAt` instead of `request.time`.
 12. **Orphaned Message Injection**: Caller creates a `/callMessages/{id}` referencing a non-existent `callId`.
+13. **Interest Message Impersonation / Pre-Marked Status**: Viewer attempts `create` on `/interestMessages/{id}` with `userId != callerUid`, `status: 'contacted'`, or while `accessStatus == 'blocked'`, or attempts to `list` other viewers' interest messages.
+14. **Non-Admin Operating Hours Tampering**: Non-admin viewer attempts `update` on `/studioState/main` to alter `autoScheduleEnabled`, `scheduleStartTime`, `scheduleEndTime`, `scheduleDays`, or `scheduleTimezone`, or admin passes malformed time strings outside `HH:mm`.
+15. **Do Not Disturb Queue Bypass**: Viewer attempts `create` on `/callQueue/{id}` while `studioState/main.dndActive == true` or `studioState/main.dndUntilMs > request.time.toMillis()`.
+16. **Predefined Plan Pricing Tampering**: Non-admin viewer attempts `create` on `/callPlans/{id}`, or attempts `create` on `/callQueue/{id}` without a valid active `planId` in `/callPlans`, with forged `planPriceCents` / `planDurationMinutes`, or with `paymentStatus != 'authorized'`.
+17. **Call Rating Integrity & Cross-User Spoofing**: Viewer B attempts `update` on `/callHistory/{id}` belonging to Viewer A, attempts to modify `amountCents`/`durationSeconds`/`status` alongside `rating`, passes `rating: 6` or `rating: 0`, or attempts to overwrite an already-rated record.
+18. **Group Room Chat Moderation**: Blocked or muted user attempts to `create` a `/callMessages/{id}` targeting `main_studio_room`, or attempts to spoof `senderUid != callerUid` or `callId != recipientUid` on room broadcasts.

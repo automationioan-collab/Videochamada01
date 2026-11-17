@@ -32,7 +32,25 @@ interface ConnectedPeer {
   connectedAt: string;
 }
 
+const MAIN_ROOM_ID = 'main_studio_room';
+
+interface RoomParticipantRecord {
+  uid: string;
+  displayName: string;
+  photoUrl: string;
+  role: string;
+  accessStatus: string;
+  isAdmin: boolean;
+  joinedAt: string;
+  callId?: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
+}
+
 const connectedPeers = new Map<string, ConnectedPeer>();
+const roomParticipants = new Map<string, RoomParticipantRecord>();
 
 function serializePeers() {
   return Array.from(connectedPeers.values()).map((peer) => ({
@@ -46,6 +64,10 @@ function serializePeers() {
   }));
 }
 
+function serializeRoomParticipants() {
+  return Array.from(roomParticipants.values());
+}
+
 function broadcastPresence() {
   const payload = JSON.stringify({
     type: 'presence:sync',
@@ -54,6 +76,35 @@ function broadcastPresence() {
   for (const peer of connectedPeers.values()) {
     if (peer.ws.readyState === WebSocket.OPEN) {
       peer.ws.send(payload);
+    }
+  }
+}
+
+function broadcastRoomSync() {
+  const payload = JSON.stringify({
+    type: 'room:sync',
+    roomId: MAIN_ROOM_ID,
+    participants: serializeRoomParticipants(),
+  });
+  for (const peer of connectedPeers.values()) {
+    if (peer.ws.readyState === WebSocket.OPEN) {
+      peer.ws.send(payload);
+    }
+  }
+}
+
+function notifyRoomParticipantsAndAdmins(
+  excludeUid: string | null,
+  message: Record<string, unknown>
+) {
+  const serialized = JSON.stringify(message);
+  for (const peer of connectedPeers.values()) {
+    if (peer.uid === excludeUid) continue;
+    if (
+      (roomParticipants.has(peer.uid) || peer.isAdmin) &&
+      peer.ws.readyState === WebSocket.OPEN
+    ) {
+      peer.ws.send(serialized);
     }
   }
 }
@@ -72,7 +123,28 @@ async function startServer() {
   app.use(express.json());
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, activePeers: connectedPeers.size });
+    res.json({
+      ok: true,
+      activePeers: connectedPeers.size,
+      roomParticipantCount: roomParticipants.size,
+    });
+  });
+
+  app.get('/api/studio/public-status', (_req, res) => {
+    const modelOnline = Array.from(connectedPeers.values()).some(
+      (p) => p.isAdmin
+    );
+    const modelInRoom = Array.from(roomParticipants.values()).some(
+      (p) => p.isAdmin
+    );
+    res.json({
+      ok: true,
+      roomId: MAIN_ROOM_ID,
+      modelOnline,
+      modelInRoom,
+      roomParticipantCount: roomParticipants.size,
+      activePeersCount: connectedPeers.size,
+    });
   });
 
   const server = http.createServer(app);
@@ -162,7 +234,7 @@ async function startServer() {
             role,
             accessStatus,
             isAdmin,
-            inCallWith: null,
+            inCallWith: roomParticipants.has(uid) ? `room:${MAIN_ROOM_ID}` : null,
             connectedAt: new Date().toISOString(),
           });
 
@@ -172,6 +244,13 @@ async function startServer() {
               uid,
               isAdmin,
               role,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'room:sync',
+              roomId: MAIN_ROOM_ID,
+              participants: serializeRoomParticipants(),
             })
           );
           broadcastPresence();
@@ -200,6 +279,84 @@ async function startServer() {
           ['active', 'vip', 'muted', 'blocked'].includes(data.accessStatus)
         ) {
           sender.accessStatus = data.accessStatus;
+          const roomRec = roomParticipants.get(sender.uid);
+          if (roomRec) {
+            roomRec.accessStatus = data.accessStatus;
+            broadcastRoomSync();
+          }
+        }
+        broadcastPresence();
+        return;
+      }
+
+      if (msgType === 'room:join') {
+        if (sender.accessStatus === 'blocked' && !sender.isAdmin) {
+          ws.send(
+            JSON.stringify({
+              type: 'moderation:effect',
+              action: 'blocked',
+              reason: 'Acesso suspenso pela moderação do estúdio.',
+            })
+          );
+          return;
+        }
+
+        const participant: RoomParticipantRecord = {
+          uid: sender.uid,
+          displayName: sender.displayName,
+          photoUrl: sender.photoUrl,
+          role: sender.role,
+          accessStatus: sender.accessStatus,
+          isAdmin: sender.isAdmin,
+          joinedAt: new Date().toISOString(),
+          ...(typeof data.callId === 'string' && data.callId
+            ? { callId: data.callId.slice(0, 128) }
+            : {}),
+          ...(typeof data.planId === 'string' && data.planId
+            ? { planId: data.planId.slice(0, 128) }
+            : {}),
+          ...(typeof data.planName === 'string' && data.planName
+            ? { planName: data.planName.slice(0, 80) }
+            : {}),
+          ...(typeof data.planDurationMinutes === 'number'
+            ? { planDurationMinutes: data.planDurationMinutes }
+            : {}),
+          ...(typeof data.planPriceCents === 'number'
+            ? { planPriceCents: data.planPriceCents }
+            : {}),
+        };
+
+        const alreadyInRoom = roomParticipants.has(sender.uid);
+        roomParticipants.set(sender.uid, participant);
+        sender.inCallWith = `room:${MAIN_ROOM_ID}`;
+
+        broadcastRoomSync();
+        if (!alreadyInRoom) {
+          notifyRoomParticipantsAndAdmins(sender.uid, {
+            type: 'room:peer_joined',
+            roomId: MAIN_ROOM_ID,
+            participant,
+          });
+        }
+        broadcastPresence();
+        return;
+      }
+
+      if (msgType === 'room:leave') {
+        const departed = roomParticipants.get(sender.uid);
+        if (departed) {
+          roomParticipants.delete(sender.uid);
+        }
+        if (sender.inCallWith === `room:${MAIN_ROOM_ID}`) {
+          sender.inCallWith = null;
+        }
+        broadcastRoomSync();
+        if (departed) {
+          notifyRoomParticipantsAndAdmins(sender.uid, {
+            type: 'room:peer_left',
+            roomId: MAIN_ROOM_ID,
+            participant: departed,
+          });
         }
         broadcastPresence();
         return;
@@ -237,7 +394,9 @@ async function startServer() {
           if (target) target.inCallWith = sender.uid;
           broadcastPresence();
         } else if (msgType === 'call:end' || msgType === 'call:reject') {
-          sender.inCallWith = null;
+          if (sender.inCallWith !== `room:${MAIN_ROOM_ID}`) {
+            sender.inCallWith = null;
+          }
           const target = connectedPeers.get(targetUid);
           if (target && target.inCallWith === sender.uid) {
             target.inCallWith = null;
@@ -263,6 +422,11 @@ async function startServer() {
         if (!targetUid || !action) return;
 
         const target = connectedPeers.get(targetUid);
+        const departedRoomPeer =
+          action === 'block' || action === 'kick_call'
+            ? roomParticipants.get(targetUid)
+            : undefined;
+
         if (target) {
           if (action === 'mute') target.accessStatus = 'muted';
           if (action === 'unmute') target.accessStatus = 'active';
@@ -279,6 +443,22 @@ async function startServer() {
           }
         }
 
+        const roomTarget = roomParticipants.get(targetUid);
+        if (roomTarget) {
+          if (action === 'mute') roomTarget.accessStatus = 'muted';
+          if (action === 'unmute') roomTarget.accessStatus = 'active';
+          if (action === 'vip') roomTarget.accessStatus = 'vip';
+        }
+
+        if (departedRoomPeer) {
+          roomParticipants.delete(targetUid);
+          notifyRoomParticipantsAndAdmins(targetUid, {
+            type: 'room:peer_left',
+            roomId: MAIN_ROOM_ID,
+            participant: departedRoomPeer,
+          });
+        }
+
         sendToUser(targetUid, {
           type: 'moderation:effect',
           action,
@@ -286,6 +466,7 @@ async function startServer() {
           byName: sender.displayName,
           reason: typeof data.reason === 'string' ? data.reason : '',
         });
+        broadcastRoomSync();
         broadcastPresence();
       }
     });
@@ -295,7 +476,15 @@ async function startServer() {
       if (authenticatedUid) {
         const current = connectedPeers.get(authenticatedUid);
         if (current && current.ws === ws) {
-          if (current.inCallWith) {
+          const departedRoomPeer = roomParticipants.get(authenticatedUid);
+          if (departedRoomPeer) {
+            roomParticipants.delete(authenticatedUid);
+          }
+
+          if (
+            current.inCallWith &&
+            current.inCallWith !== `room:${MAIN_ROOM_ID}`
+          ) {
             sendToUser(current.inCallWith, {
               type: 'call:end',
               fromUid: authenticatedUid,
@@ -307,6 +496,14 @@ async function startServer() {
             }
           }
           connectedPeers.delete(authenticatedUid);
+          if (departedRoomPeer) {
+            broadcastRoomSync();
+            notifyRoomParticipantsAndAdmins(authenticatedUid, {
+              type: 'room:peer_left',
+              roomId: MAIN_ROOM_ID,
+              participant: departedRoomPeer,
+            });
+          }
           broadcastPresence();
         }
       }

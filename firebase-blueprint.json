@@ -113,6 +113,52 @@
           "type": "string",
           "maxLength": 80
         },
+        "autoScheduleEnabled": {
+          "type": "boolean"
+        },
+        "scheduleStartTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "scheduleEndTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "scheduleDays": {
+          "type": "string",
+          "maxLength": 20,
+          "pattern": "^([0-6](,[0-6])*)?$"
+        },
+        "scheduleTimezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "dndActive": {
+          "type": "boolean"
+        },
+        "dndUntilMs": {
+          "type": "integer"
+        },
+        "dndScheduleEnabled": {
+          "type": "boolean"
+        },
+        "dndStartTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "dndEndTime": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 5,
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -154,6 +200,27 @@
         "status": {
           "type": "string",
           "enum": ["waiting", "accepted", "in_call", "ended", "rejected", "cancelled"]
+        },
+        "planId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "planName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "planDurationMinutes": {
+          "type": "integer"
+        },
+        "planPriceCents": {
+          "type": "integer"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["authorized", "captured", "refunded"]
         },
         "createdAt": {
           "type": "string",
@@ -282,6 +349,32 @@
           "type": "string",
           "enum": ["completed", "refunded"]
         },
+        "planId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "planName": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "planDurationMinutes": {
+          "type": "integer"
+        },
+        "rating": {
+          "type": "integer",
+          "description": "Participant video call quality score from 1 to 5 stars."
+        },
+        "ratingComment": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional participant comment on video and audio quality."
+        },
+        "ratedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the participant submitted the call rating."
+        },
         "endedAt": {
           "type": "string",
           "format": "date-time"
@@ -292,6 +385,105 @@
         }
       },
       "required": ["id", "callId", "userId", "userName", "modelUid", "durationSeconds", "amountCents", "currency", "status", "endedAt", "createdAt"]
+    },
+    "InterestMessage": {
+      "title": "InterestMessage",
+      "description": "Message left by a visitor while the model is offline or resting, expressing interest for when she returns.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "userPhotoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "preferredTime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": ["unread", "reviewed", "contacted"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "userName", "preferredTime", "message", "status", "createdAt", "updatedAt"]
+    },
+    "CallPlan": {
+      "title": "CallPlan",
+      "description": "Predefined paid video call plan configured by the model admin for charging all visitor calls.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "durationMinutes": {
+          "type": "integer"
+        },
+        "priceCents": {
+          "type": "integer"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["BRL"]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "sortOrder": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "name", "description", "durationMinutes", "priceCents", "currency", "active", "sortOrder", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -322,6 +514,14 @@
     "/callHistory/{recordId}": {
       "schema": { "$ref": "#/entities/CallHistoryRecord" },
       "description": "Completed call history records with duration, date, and finalized BRL transaction amount."
+    },
+    "/interestMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/InterestMessage" },
+      "description": "Interest messages left by visitors when the model is offline or resting."
+    },
+    "/callPlans/{planId}": {
+      "schema": { "$ref": "#/entities/CallPlan" },
+      "description": "Predefined paid video call plans managed by the model admin."
     }
   }
 }

@@ -68,7 +68,7 @@ service cloud.firestore {
 
     function isValidStudioState(data) {
       return data.keys().hasAll(['modelUid', 'modelName', 'isLive', 'callMode', 'headline', 'updatedAt']) &&
-        data.keys().hasOnly(['modelUid', 'modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'updatedAt']) &&
+        data.keys().hasOnly(['modelUid', 'modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'autoScheduleEnabled', 'scheduleStartTime', 'scheduleEndTime', 'scheduleDays', 'scheduleTimezone', 'dndActive', 'dndUntilMs', 'dndScheduleEnabled', 'dndStartTime', 'dndEndTime', 'updatedAt']) &&
         isValidId(data.modelUid) &&
         data.modelName is string && data.modelName.size() >= 1 && data.modelName.size() <= 80 &&
         data.isLive is bool &&
@@ -77,12 +77,37 @@ service cloud.firestore {
         data.updatedAt is timestamp &&
         (!('activeCallId' in data) || (data.activeCallId is string && data.activeCallId.size() <= 128)) &&
         (!('activeCallUserId' in data) || (data.activeCallUserId is string && data.activeCallUserId.size() <= 128)) &&
-        (!('activeCallUserName' in data) || (data.activeCallUserName is string && data.activeCallUserName.size() <= 80));
+        (!('activeCallUserName' in data) || (data.activeCallUserName is string && data.activeCallUserName.size() <= 80)) &&
+        (!('autoScheduleEnabled' in data) || data.autoScheduleEnabled is bool) &&
+        (!('scheduleStartTime' in data) || (data.scheduleStartTime is string && data.scheduleStartTime.size() == 5 && data.scheduleStartTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'))) &&
+        (!('scheduleEndTime' in data) || (data.scheduleEndTime is string && data.scheduleEndTime.size() == 5 && data.scheduleEndTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'))) &&
+        (!('scheduleDays' in data) || (data.scheduleDays is string && data.scheduleDays.size() <= 20 && data.scheduleDays.matches('^([0-6](,[0-6])*)?$'))) &&
+        (!('scheduleTimezone' in data) || (data.scheduleTimezone is string && data.scheduleTimezone.size() >= 1 && data.scheduleTimezone.size() <= 60)) &&
+        (!('dndActive' in data) || data.dndActive is bool) &&
+        (!('dndUntilMs' in data) || (data.dndUntilMs is int && data.dndUntilMs >= 0 && data.dndUntilMs <= 9999999999999)) &&
+        (!('dndScheduleEnabled' in data) || data.dndScheduleEnabled is bool) &&
+        (!('dndStartTime' in data) || (data.dndStartTime is string && data.dndStartTime.size() == 5 && data.dndStartTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'))) &&
+        (!('dndEndTime' in data) || (data.dndEndTime is string && data.dndEndTime.size() == 5 && data.dndEndTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')));
+    }
+
+    function isValidCallPlan(data) {
+      return data.keys().hasAll(['id', 'name', 'description', 'durationMinutes', 'priceCents', 'currency', 'active', 'sortOrder', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'description', 'durationMinutes', 'priceCents', 'currency', 'active', 'sortOrder', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 200 &&
+        data.durationMinutes is int && data.durationMinutes >= 1 && data.durationMinutes <= 240 &&
+        data.priceCents is int && data.priceCents >= 100 && data.priceCents <= 100000000 &&
+        data.currency == 'BRL' &&
+        data.active is bool &&
+        data.sortOrder is int && data.sortOrder >= 0 && data.sortOrder <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     function isValidCallRequest(data) {
       return data.keys().hasAll(['id', 'userId', 'userName', 'topic', 'status', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'userId', 'userName', 'userPhotoUrl', 'topic', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'userName', 'userPhotoUrl', 'topic', 'status', 'planId', 'planName', 'planDurationMinutes', 'planPriceCents', 'paymentStatus', 'createdAt', 'updatedAt']) &&
         isValidId(data.id) &&
         isValidId(data.userId) &&
         data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80 &&
@@ -90,7 +115,12 @@ service cloud.firestore {
         data.status in ['waiting', 'accepted', 'in_call', 'ended', 'rejected', 'cancelled'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp &&
-        (!('userPhotoUrl' in data) || (data.userPhotoUrl is string && data.userPhotoUrl.size() <= 500));
+        (!('userPhotoUrl' in data) || (data.userPhotoUrl is string && data.userPhotoUrl.size() <= 500)) &&
+        (!('planId' in data) || isValidId(data.planId)) &&
+        (!('planName' in data) || (data.planName is string && data.planName.size() >= 1 && data.planName.size() <= 60)) &&
+        (!('planDurationMinutes' in data) || (data.planDurationMinutes is int && data.planDurationMinutes >= 1 && data.planDurationMinutes <= 240)) &&
+        (!('planPriceCents' in data) || (data.planPriceCents is int && data.planPriceCents >= 100 && data.planPriceCents <= 100000000)) &&
+        (!('paymentStatus' in data) || data.paymentStatus in ['authorized', 'captured', 'refunded']);
     }
 
     function isValidCallMessage(data) {
@@ -115,7 +145,7 @@ service cloud.firestore {
 
     function isValidCallHistory(data) {
       return data.keys().hasAll(['id', 'callId', 'userId', 'userName', 'modelUid', 'durationSeconds', 'amountCents', 'currency', 'status', 'endedAt', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'callId', 'userId', 'userName', 'modelUid', 'durationSeconds', 'amountCents', 'currency', 'status', 'endedAt', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'callId', 'userId', 'userName', 'modelUid', 'durationSeconds', 'amountCents', 'currency', 'status', 'planId', 'planName', 'planDurationMinutes', 'rating', 'ratingComment', 'ratedAt', 'endedAt', 'createdAt']) &&
         isValidId(data.id) &&
         isValidId(data.callId) &&
         isValidId(data.userId) &&
@@ -125,8 +155,28 @@ service cloud.firestore {
         data.amountCents is int && data.amountCents >= 0 && data.amountCents <= 100000000 &&
         data.currency == 'BRL' &&
         data.status in ['completed', 'refunded'] &&
+        (!('planId' in data) || (data.planId is string && data.planId.size() <= 128)) &&
+        (!('planName' in data) || (data.planName is string && data.planName.size() <= 60)) &&
+        (!('planDurationMinutes' in data) || (data.planDurationMinutes is int && data.planDurationMinutes >= 1 && data.planDurationMinutes <= 240)) &&
+        (!('rating' in data) || (data.rating is int && data.rating >= 1 && data.rating <= 5)) &&
+        (!('ratingComment' in data) || (data.ratingComment is string && data.ratingComment.size() <= 300)) &&
+        (!('ratedAt' in data) || data.ratedAt is timestamp) &&
         data.endedAt is timestamp &&
         data.createdAt is timestamp;
+    }
+
+    function isValidInterestMessage(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'preferredTime', 'message', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'userName', 'userPhotoUrl', 'preferredTime', 'message', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.userId) &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80 &&
+        data.preferredTime is string && data.preferredTime.size() >= 1 && data.preferredTime.size() <= 80 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        data.status in ['unread', 'reviewed', 'contacted'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        (!('userPhotoUrl' in data) || (data.userPhotoUrl is string && data.userPhotoUrl.size() <= 500));
     }
 
     // --- Collection Rules ---
@@ -190,7 +240,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(userId);
     }
 
-    // 3. Studio State (Model availability & active call banner)
+    // 3. Studio State (Model availability, operating schedule, DND schedule, and active call banner)
     match /studioState/{stateId} {
       allow get: if isSignedIn() && isValidId(stateId) && stateId == 'main';
       allow list: if false;
@@ -202,11 +252,33 @@ service cloud.firestore {
         isValidStudioState(incoming()) &&
         incoming().modelUid == existing().modelUid &&
         incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'updatedAt']);
+        incoming().diff(existing()).affectedKeys().hasOnly(['modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'autoScheduleEnabled', 'scheduleStartTime', 'scheduleEndTime', 'scheduleDays', 'scheduleTimezone', 'dndActive', 'dndUntilMs', 'dndScheduleEnabled', 'dndStartTime', 'dndEndTime', 'updatedAt']);
       allow delete: if false;
     }
 
-    // 4. Call Queue (Video call requests and lifecycle)
+    // 4. Call Plans (Predefined paid video call plans managed by the model admin)
+    match /callPlans/{planId} {
+      allow get: if isSignedIn() && isValidId(planId);
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.active == true
+      );
+      allow create: if isAdmin() && isValidId(planId) &&
+        isValidCallPlan(incoming()) &&
+        incoming().id == planId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(planId) &&
+        isValidCallPlan(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().currency == existing().currency &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'durationMinutes', 'priceCents', 'active', 'sortOrder', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(planId);
+    }
+
+    // 5. Call Queue (Video call requests and lifecycle; requires valid active CallPlan & blocks creation when DND is active)
     match /callQueue/{requestId} {
       allow get: if isSignedIn() && isValidId(requestId) && (
         isAdmin() ||
@@ -221,26 +293,51 @@ service cloud.firestore {
         incoming().id == requestId &&
         incoming().userId == request.auth.uid &&
         incoming().status == 'waiting' &&
+        'planId' in incoming() &&
+        'planName' in incoming() &&
+        'planDurationMinutes' in incoming() &&
+        'planPriceCents' in incoming() &&
+        'paymentStatus' in incoming() &&
+        incoming().paymentStatus == 'authorized' &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked';
+        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked' &&
+        exists(/databases/$(database)/documents/callPlans/$(incoming().planId)) &&
+        get(/databases/$(database)/documents/callPlans/$(incoming().planId)).data.active == true &&
+        incoming().planName == get(/databases/$(database)/documents/callPlans/$(incoming().planId)).data.name &&
+        incoming().planDurationMinutes == get(/databases/$(database)/documents/callPlans/$(incoming().planId)).data.durationMinutes &&
+        incoming().planPriceCents == get(/databases/$(database)/documents/callPlans/$(incoming().planId)).data.priceCents &&
+        (
+          !exists(/databases/$(database)/documents/studioState/main) ||
+          (
+            (!('dndActive' in get(/databases/$(database)/documents/studioState/main).data) ||
+              get(/databases/$(database)/documents/studioState/main).data.dndActive == false) &&
+            (!('dndUntilMs' in get(/databases/$(database)/documents/studioState/main).data) ||
+              get(/databases/$(database)/documents/studioState/main).data.dndUntilMs <= request.time.toMillis())
+          )
+        );
       allow update: if isSignedIn() && isVerifiedUser() && isValidId(requestId) &&
         isValidCallRequest(incoming()) &&
         incoming().id == existing().id &&
         incoming().userId == existing().userId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
+        (!('planId' in existing()) || incoming().planId == existing().planId) &&
+        (!('planName' in existing()) || incoming().planName == existing().planName) &&
+        (!('planDurationMinutes' in existing()) || incoming().planDurationMinutes == existing().planDurationMinutes) &&
+        (!('planPriceCents' in existing()) || incoming().planPriceCents == existing().planPriceCents) &&
         (!(existing().status in ['ended', 'rejected', 'cancelled']) || isAdmin()) &&
         (
           (
             isAdmin() &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'paymentStatus', 'updatedAt'])
           ) ||
           (
             existing().userId == request.auth.uid &&
             (
               (existing().status == 'waiting' && incoming().status == 'cancelled') ||
+              (existing().status == 'waiting' && incoming().status == 'in_call') ||
               (existing().status == 'accepted' && incoming().status == 'in_call') ||
               (existing().status == 'in_call' && incoming().status == 'ended')
             ) &&
@@ -250,15 +347,17 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(requestId);
     }
 
-    // 5. Call Messages (In-call live chat messages)
+    // 6. Call Messages (In-call 1-on-1 & shared group room chat messages)
     match /callMessages/{messageId} {
       allow get: if isSignedIn() && isValidId(messageId) && (
         isAdmin() ||
+        resource.data.recipientUid == 'main_studio_room' ||
         resource.data.senderUid == request.auth.uid ||
         resource.data.recipientUid == request.auth.uid
       );
       allow list: if isSignedIn() && (
         isTokenAdmin() ||
+        resource.data.recipientUid == 'main_studio_room' ||
         resource.data.senderUid == request.auth.uid ||
         resource.data.recipientUid == request.auth.uid
       );
@@ -267,7 +366,10 @@ service cloud.firestore {
         incoming().id == messageId &&
         incoming().senderUid == request.auth.uid &&
         incoming().createdAt == request.time &&
-        exists(/databases/$(database)/documents/callQueue/$(incoming().callId)) &&
+        (
+          (incoming().callId == 'main_studio_room' && incoming().recipientUid == 'main_studio_room') ||
+          exists(/databases/$(database)/documents/callQueue/$(incoming().callId))
+        ) &&
         exists(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'muted' &&
         get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked';
@@ -275,7 +377,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(messageId);
     }
 
-    // 6. Admins Registry
+    // 7. Admins Registry
     match /admins/{adminId} {
       allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
       allow list: if false;
@@ -287,7 +389,7 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // 7. Call History & Finalized Transactions
+    // 8. Call History, Finalized Transactions, and Post-Session Quality Ratings
     match /callHistory/{recordId} {
       allow get: if isSignedIn() && isValidId(recordId) && (
         isAdmin() ||
@@ -301,21 +403,77 @@ service cloud.firestore {
         isValidCallHistory(incoming()) &&
         incoming().id == recordId &&
         incoming().modelUid == request.auth.uid &&
+        !('rating' in incoming()) &&
+        !('ratingComment' in incoming()) &&
+        !('ratedAt' in incoming()) &&
         incoming().endedAt == request.time &&
         incoming().createdAt == request.time;
-      allow update: if isAdmin() && isValidId(recordId) &&
+      allow update: if isSignedIn() && isVerifiedUser() && isValidId(recordId) &&
         isValidCallHistory(incoming()) &&
         incoming().id == existing().id &&
         incoming().callId == existing().callId &&
         incoming().userId == existing().userId &&
+        incoming().userName == existing().userName &&
         incoming().modelUid == existing().modelUid &&
         incoming().durationSeconds == existing().durationSeconds &&
         incoming().amountCents == existing().amountCents &&
         incoming().currency == existing().currency &&
         incoming().endedAt == existing().endedAt &&
         incoming().createdAt == existing().createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+        (!('planId' in existing()) ? !('planId' in incoming()) : ('planId' in incoming() && incoming().planId == existing().planId)) &&
+        (!('planName' in existing()) ? !('planName' in incoming()) : ('planName' in incoming() && incoming().planName == existing().planName)) &&
+        (!('planDurationMinutes' in existing()) ? !('planDurationMinutes' in incoming()) : ('planDurationMinutes' in incoming() && incoming().planDurationMinutes == existing().planDurationMinutes)) &&
+        (
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status']) &&
+            (!('rating' in existing()) ? !('rating' in incoming()) : ('rating' in incoming() && incoming().rating == existing().rating)) &&
+            (!('ratingComment' in existing()) ? !('ratingComment' in incoming()) : ('ratingComment' in incoming() && incoming().ratingComment == existing().ratingComment)) &&
+            (!('ratedAt' in existing()) ? !('ratedAt' in incoming()) : ('ratedAt' in incoming() && incoming().ratedAt == existing().ratedAt))
+          ) ||
+          (
+            existing().userId == request.auth.uid &&
+            !('rating' in existing()) &&
+            incoming().status == existing().status &&
+            'rating' in incoming() &&
+            'ratedAt' in incoming() &&
+            incoming().ratedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'ratingComment', 'ratedAt'])
+          )
+        );
       allow delete: if false;
+    }
+
+    // 9. Offline Interest Messages (Visitor messages left while model is resting/offline)
+    match /interestMessages/{messageId} {
+      allow get: if isSignedIn() && isValidId(messageId) && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isSignedIn() && isVerifiedUser() && isValidId(messageId) &&
+        isValidInterestMessage(incoming()) &&
+        incoming().id == messageId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'unread' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked';
+      allow update: if isAdmin() && isValidId(messageId) &&
+        isValidInterestMessage(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().userName == existing().userName &&
+        incoming().preferredTime == existing().preferredTime &&
+        incoming().message == existing().message &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(messageId);
     }
   }
 }

@@ -1,25 +1,40 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Mic,
   MicOff,
   PhoneOff,
   Send,
+  Users,
   Video,
   VideoOff,
   Camera,
 } from 'lucide-react';
-import type { CallMessage, StudioProfile, StudioState } from '../types/studio';
+import type {
+  CallMessage,
+  RoomParticipant,
+  StudioProfile,
+  StudioState,
+} from '../types/studio';
 
 interface VideoCallStageProps {
   isAdmin: boolean;
+  isGroupRoom?: boolean;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
   studioState: StudioState | null;
   activeCallId: string | null;
   activePartnerName: string;
   activePartnerUid: string | null;
+  activePlan?: {
+    name: string;
+    durationMinutes: number;
+    priceCents: number;
+  } | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  remoteStreams?: Record<string, MediaStream>;
+  peerConnectionStates?: Record<string, RTCPeerConnectionState>;
+  roomParticipants?: RoomParticipant[];
   micEnabled: boolean;
   camEnabled: boolean;
   mediaError: string | null;
@@ -34,6 +49,11 @@ interface VideoCallStageProps {
   onSendMessage: (text: string) => Promise<void>;
 }
 
+const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
+  style: 'currency',
+  currency: 'BRL',
+});
+
 function formatDuration(totalSeconds: number) {
   const mins = Math.floor(totalSeconds / 60)
     .toString()
@@ -42,16 +62,98 @@ function formatDuration(totalSeconds: number) {
   return `${mins}:${secs}`;
 }
 
+interface RemoteVideoTileProps {
+  participant: RoomParticipant;
+  stream: MediaStream | undefined;
+  state: RTCPeerConnectionState | undefined;
+}
+
+const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({
+  participant,
+  stream,
+  state,
+}) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [hasLiveVideo, setHasLiveVideo] = useState(false);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (el && stream) {
+      el.srcObject = stream;
+    }
+    const updateTrackFlag = () => {
+      const live = Boolean(
+        stream?.getVideoTracks().some((t) => t.readyState === 'live')
+      );
+      setHasLiveVideo(live);
+    };
+    updateTrackFlag();
+    if (!stream) return;
+    stream.addEventListener('addtrack', updateTrackFlag);
+    stream.addEventListener('removetrack', updateTrackFlag);
+    return () => {
+      stream.removeEventListener('addtrack', updateTrackFlag);
+      stream.removeEventListener('removetrack', updateTrackFlag);
+    };
+  }, [stream]);
+
+  return (
+    <div className="relative w-full h-full min-h-[180px] rounded-lg overflow-hidden bg-[#101217] border border-white/10">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        className={`w-full h-full object-cover ${hasLiveVideo ? 'block' : 'hidden'}`}
+      />
+      {!hasLiveVideo && (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-4 text-center">
+          {participant.photoUrl ? (
+            <img
+              src={participant.photoUrl}
+              alt={participant.displayName}
+              referrerPolicy="no-referrer"
+              className="w-14 h-14 rounded-full object-cover border border-white/15"
+            />
+          ) : (
+            <div className="w-14 h-14 rounded-full bg-[#1B1E26] border border-white/15 flex items-center justify-center font-display text-xl text-[#C9A46B]">
+              {participant.displayName.slice(0, 1).toUpperCase()}
+            </div>
+          )}
+          <p className="text-xs font-medium text-[#C8CCD4]">
+            {state === 'connected'
+              ? 'Áudio conectado'
+              : 'Conectando vídeo...'}
+          </p>
+        </div>
+      )}
+      <div className="absolute inset-x-0 bottom-0 px-3 py-2 bg-gradient-to-t from-[#0B0C0F]/95 to-transparent flex items-center justify-between gap-2 text-xs">
+        <span className="font-medium text-[#F3EFE6] truncate">
+          {participant.displayName}
+        </span>
+        <span className="text-[11px] font-mono tabular-nums text-[#E2C799] shrink-0">
+          {participant.isAdmin ? 'Modelo' : 'Visitante'}
+          {state === 'connected' ? ' · Ao vivo' : ''}
+        </span>
+      </div>
+    </div>
+  );
+};
+
 export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   isAdmin,
+  isGroupRoom = false,
   myProfile,
   modelProfile,
   studioState,
   activeCallId,
   activePartnerName,
   activePartnerUid,
+  activePlan,
   localStream,
   remoteStream,
+  remoteStreams = {},
+  peerConnectionStates = {},
+  roomParticipants = [],
   micEnabled,
   camEnabled,
   mediaError,
@@ -77,7 +179,17 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   const hasRemoteVideo =
     Boolean(remoteStream) &&
     remoteStream!.getVideoTracks().some((t) => t.readyState === 'live');
-  const inActiveCall = Boolean(activeCallId && activePartnerUid);
+  const inActiveCall = Boolean(activeCallId && (activePartnerUid || isGroupRoom));
+
+  const otherRoomParticipants = useMemo(
+    () => roomParticipants.filter((p) => p.uid !== myProfile?.uid),
+    [myProfile?.uid, roomParticipants]
+  );
+
+  const totalRoomCount = Math.max(
+    inActiveCall && isGroupRoom ? 1 : 0,
+    roomParticipants.length
+  );
 
   useEffect(() => {
     if (localVideoRef.current) {
@@ -113,22 +225,58 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
     }
   };
 
+  const planTotalSeconds = activePlan ? activePlan.durationMinutes * 60 : 0;
+  const remainingSeconds = activePlan
+    ? Math.max(0, planTotalSeconds - elapsedSeconds)
+    : 0;
+
   const connectionLabel = (() => {
     if (!inActiveCall) return 'Sala em espera';
-    if (connectionState === 'connected')
-      return `Conectado · ${formatDuration(elapsedSeconds)}`;
+    if (isGroupRoom) {
+      const base = `${totalRoomCount} participante${totalRoomCount === 1 ? '' : 's'} na sala`;
+      if (connectionState === 'connected') {
+        return activePlan
+          ? `${base} · ${formatDuration(elapsedSeconds)} · Restante ${formatDuration(remainingSeconds)}`
+          : `${base} · ${formatDuration(elapsedSeconds)}`;
+      }
+      return otherRoomParticipants.length === 0
+        ? `${base} · Aguardando conexões`
+        : `${base} · Sincronizando vídeo`;
+    }
+    if (connectionState === 'connected') {
+      return activePlan
+        ? `Conectado · ${formatDuration(elapsedSeconds)} · Restante ${formatDuration(remainingSeconds)}`
+        : `Conectado · ${formatDuration(elapsedSeconds)}`;
+    }
     if (connectionState === 'connecting') return 'Estabelecendo vídeo...';
     if (connectionState === 'failed') return 'Falha na conexão WebRTC';
     return 'Aguardando participante';
   })();
+
+  const groupGridCols =
+    otherRoomParticipants.length <= 1
+      ? 'grid-cols-1'
+      : otherRoomParticipants.length <= 4
+        ? 'grid-cols-1 sm:grid-cols-2'
+        : 'grid-cols-2 lg:grid-cols-3';
 
   return (
     <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
       {/* Main Video Stage */}
       <div className="lg:col-span-8 flex flex-col bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
         <div className="relative aspect-video bg-[#0B0C0F] w-full overflow-hidden">
-          {/* Remote stream or editorial studio cover */}
-          {hasRemoteVideo ? (
+          {isGroupRoom && otherRoomParticipants.length > 0 ? (
+            <div className={`w-full h-full p-3 pt-16 pb-16 sm:pb-3 grid gap-3 ${groupGridCols}`}>
+              {otherRoomParticipants.map((participant) => (
+                <RemoteVideoTile
+                  key={participant.uid}
+                  participant={participant}
+                  stream={remoteStreams[participant.uid]}
+                  state={peerConnectionStates[participant.uid]}
+                />
+              ))}
+            </div>
+          ) : !isGroupRoom && hasRemoteVideo ? (
             <video
               ref={remoteVideoRef}
               autoPlay
@@ -161,42 +309,54 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
           )}
 
           {/* Top overlay bar */}
-          <div className="absolute top-0 left-0 right-0 p-5 flex items-center justify-between gap-4">
+          <div className="absolute top-0 left-0 right-0 p-5 flex items-center justify-between gap-4 pointer-events-none">
             <div className="space-y-0.5">
               <p className="text-xs font-medium text-[#E2C799]">
-                {inActiveCall
-                  ? `Em chamada com ${activePartnerName}`
-                  : studioState?.modelName ||
-                    modelProfile?.displayName ||
-                    'Lorena Noir'}
+                {isGroupRoom
+                  ? `Sala Ao Vivo · ${studioState?.modelName || 'Lorena Noir'}`
+                  : inActiveCall
+                    ? `Em chamada com ${activePartnerName}`
+                    : studioState?.modelName ||
+                      modelProfile?.displayName ||
+                      'Lorena Noir'}
               </p>
               <p className="text-xs font-mono tabular-nums text-[#C8CCD4]">
                 {connectionLabel}
               </p>
             </div>
-            <div className="text-right text-xs text-[#C8CCD4]">
-              <span>
+            <div className="text-right text-xs text-[#C8CCD4] space-y-0.5">
+              {inActiveCall && activePlan && (
+                <p className="font-mono tabular-nums text-[#E2C799]">
+                  {activePlan.name} · {BRL_FORMATTER.format(activePlan.priceCents / 100)}
+                </p>
+              )}
+              <p>
                 {wsConnected ? 'Sinalização ativa' : 'Reconectando sinalização'}
-              </span>
+              </p>
             </div>
           </div>
 
-          {/* Standby center note when no remote video */}
-          {!hasRemoteVideo && (
+          {/* Standby center note when no remote participants / video */}
+          {((isGroupRoom && otherRoomParticipants.length === 0) ||
+            (!isGroupRoom && !hasRemoteVideo)) && (
             <div className="absolute bottom-6 left-6 right-52 space-y-1.5 pointer-events-none">
               <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#F3EFE6]">
-                {inActiveCall
-                  ? `Conectando vídeo com ${activePartnerName}`
-                  : isAdmin
-                    ? 'Câmera do Estúdio Pronta'
-                    : 'Sala Privada da Modelo'}
+                {isGroupRoom
+                  ? 'Sala Ao Vivo Aberta'
+                  : inActiveCall
+                    ? `Conectando vídeo com ${activePartnerName}`
+                    : isAdmin
+                      ? 'Câmera do Estúdio Pronta'
+                      : 'Sala Privada da Modelo'}
               </h2>
               <p className="text-xs sm:text-sm text-[#C8CCD4] max-w-lg">
-                {inActiveCall
-                  ? 'Aguardando fluxo de mídia do participante. Você pode conversar pelo chat ao lado.'
-                  : isAdmin
-                    ? 'Selecione um usuário online ou aceite alguém da fila para iniciar a videochamada.'
-                    : 'Ative sua prévia de câmera abaixo e aguarde a modelo aceitar sua solicitação.'}
+                {isGroupRoom
+                  ? 'Você já está conectado na videochamada ao vivo. Novos internautas e Lorena Noir aparecerão automaticamente neste painel.'
+                  : inActiveCall
+                    ? 'Aguardando fluxo de mídia do participante. Você pode conversar pelo chat ao lado.'
+                    : isAdmin
+                      ? 'Selecione um usuário online, aceite alguém da fila ou entre na sala ao vivo compartilhada.'
+                      : 'Entre na chamada ao vivo pelo botão da recepção para conectar sua câmera e conversar em grupo ou 1-para-1.'}
               </p>
             </div>
           )}

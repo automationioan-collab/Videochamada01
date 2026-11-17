@@ -1,39 +1,95 @@
 import React from 'react';
 
-export type WorkspaceTab = 'studio' | 'call' | 'users' | 'queue';
+export type WorkspaceTab = 'studio' | 'call' | 'users' | 'queue' | 'admin';
 
 interface HeaderProps {
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isAdminRoute: boolean;
   activeTab: WorkspaceTab;
   onSelectTab: (tab: WorkspaceTab) => void;
+  onNavigateRoute: (path: '/' | '/admin') => void;
   onLogin: () => void;
   onLogout: () => void;
-  userDisplayName?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   isAuthenticated,
   isAdmin,
+  isAdminRoute,
   activeTab,
   onSelectTab,
+  onNavigateRoute,
   onLogin,
   onLogout,
 }) => {
-  const navItems: Array<{ id: WorkspaceTab; label: string }> = isAuthenticated
-    ? isAdmin
-      ? [
-          { id: 'studio', label: 'Estúdio' },
-          { id: 'call', label: 'Videochamada' },
-          { id: 'users', label: 'Usuários' },
-          { id: 'queue', label: 'Fila' },
-        ]
-      : [
-          { id: 'studio', label: 'Estúdio' },
-          { id: 'call', label: 'Videochamada' },
-          { id: 'queue', label: 'Minha Fila' },
-        ]
-    : [];
+  const navItems: Array<{ label: string; active: boolean; onClick: () => void }> =
+    isAuthenticated
+      ? isAdmin
+        ? isAdminRoute
+          ? [
+              {
+                label: 'Administração',
+                active: true,
+                onClick: () => onNavigateRoute('/admin'),
+              },
+              {
+                label: 'Recepção Pública',
+                active: false,
+                onClick: () => {
+                  onNavigateRoute('/');
+                  onSelectTab('studio');
+                },
+              },
+              {
+                label: 'Usuários',
+                active: false,
+                onClick: () => {
+                  onNavigateRoute('/');
+                  onSelectTab('users');
+                },
+              },
+            ]
+          : [
+              {
+                label: 'Estúdio',
+                active: activeTab === 'studio',
+                onClick: () => onSelectTab('studio'),
+              },
+              {
+                label: 'Videochamada',
+                active: activeTab === 'call',
+                onClick: () => onSelectTab('call'),
+              },
+              {
+                label: 'Usuários',
+                active: activeTab === 'users',
+                onClick: () => onSelectTab('users'),
+              },
+              {
+                label: 'Administração',
+                active: false,
+                onClick: () => onNavigateRoute('/admin'),
+              },
+            ]
+        : [
+            {
+              label: 'Recepção',
+              active: activeTab === 'studio',
+              onClick: () => onSelectTab('studio'),
+            },
+            {
+              label: 'Videochamada',
+              active: activeTab === 'call',
+              onClick: () => onSelectTab('call'),
+            },
+            {
+              label: 'Minha Fila',
+              active: activeTab === 'queue',
+              onClick: () => onSelectTab('queue'),
+            },
+          ]
+      : [];
 
   return (
     <header className="sticky top-0 z-30 bg-[#0B0C0F]/95 backdrop-blur-sm border-b border-white/10">
@@ -41,7 +97,10 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Zone 1: Single-line Brand Wordmark */}
         <button
           type="button"
-          onClick={() => onSelectTab('studio')}
+          onClick={() => {
+            onNavigateRoute('/');
+            onSelectTab('studio');
+          }}
           className="font-display text-2xl font-semibold tracking-tight text-[#F3EFE6] whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9A46B] rounded"
         >
           Maison Aura
@@ -53,23 +112,20 @@ export const Header: React.FC<HeaderProps> = ({
             aria-label="Navegação principal"
             className="hidden md:flex items-center gap-7 text-sm font-medium"
           >
-            {navItems.map((item) => {
-              const active = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onSelectTab(item.id)}
-                  className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b ${
-                    active
-                      ? 'text-[#F3EFE6] border-[#C9A46B]'
-                      : 'text-[#9BA1AE] border-transparent hover:text-[#F3EFE6]'
-                  }`}
-                >
-                  {item.label}
-                </button>
-              );
-            })}
+            {navItems.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                onClick={item.onClick}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b ${
+                  item.active
+                    ? 'text-[#F3EFE6] border-[#C9A46B]'
+                    : 'text-[#9BA1AE] border-transparent hover:text-[#F3EFE6]'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
           </nav>
         ) : (
           <nav
@@ -78,22 +134,40 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <a
               href="#estudio"
+              onClick={() => {
+                if (isAdminRoute) onNavigateRoute('/');
+              }}
               className="hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0"
             >
               O Estúdio
             </a>
             <a
+              href="#galeria"
+              onClick={() => {
+                if (isAdminRoute) onNavigateRoute('/');
+              }}
+              className="hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0"
+            >
+              Galeria
+            </a>
+            <a
               href="#recursos"
+              onClick={() => {
+                if (isAdminRoute) onNavigateRoute('/');
+              }}
               className="hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0"
             >
               Como Funciona
             </a>
-            <a
-              href="#privacidade"
-              className="hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => onNavigateRoute(isAdminRoute ? '/' : '/admin')}
+              className={`hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isAdminRoute ? 'text-[#C9A46B]' : ''
+              }`}
             >
-              Privacidade
-            </a>
+              {isAdminRoute ? 'Área do Internauta' : 'Área da Modelo'}
+            </button>
           </nav>
         )}
 
@@ -125,21 +199,18 @@ export const Header: React.FC<HeaderProps> = ({
           aria-label="Navegação móvel"
           className="md:hidden flex items-center gap-4 px-6 pb-2.5 overflow-x-auto text-xs font-medium border-t border-white/5 pt-2"
         >
-          {navItems.map((item) => {
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSelectTab(item.id)}
-                className={`whitespace-nowrap shrink-0 cursor-pointer ${
-                  active ? 'text-[#C9A46B]' : 'text-[#9BA1AE]'
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
+          {navItems.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={item.onClick}
+              className={`whitespace-nowrap shrink-0 cursor-pointer ${
+                item.active ? 'text-[#C9A46B]' : 'text-[#9BA1AE]'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
         </nav>
       )}
     </header>

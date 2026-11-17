@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
-import type { PresencePeer, StudioProfile } from '../types/studio';
+import type {
+  PresencePeer,
+  RoomParticipant,
+  StudioProfile,
+} from '../types/studio';
 
 export interface SignalPayload {
   type:
@@ -20,6 +24,10 @@ export interface SignalPayload {
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
   reason?: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
 }
 
 export interface ModerationEffect {
@@ -34,12 +42,19 @@ export interface PresenceEvent {
   peer: PresencePeer;
 }
 
+export interface RoomEvent {
+  kind: 'peer_joined' | 'peer_left';
+  roomId: string;
+  participant: RoomParticipant;
+}
+
 interface UseWebSocketStudioOptions {
   user: User | null;
   profile: StudioProfile | null;
   onSignal: (signal: SignalPayload) => void;
   onModerationEffect: (effect: ModerationEffect) => void;
   onPresenceEvent?: (event: PresenceEvent) => void;
+  onRoomEvent?: (event: RoomEvent) => void;
 }
 
 export function useWebSocketStudio({
@@ -48,9 +63,13 @@ export function useWebSocketStudio({
   onSignal,
   onModerationEffect,
   onPresenceEvent,
+  onRoomEvent,
 }: UseWebSocketStudioOptions) {
   const [wsConnected, setWsConnected] = useState(false);
   const [peers, setPeers] = useState<PresencePeer[]>([]);
+  const [roomParticipants, setRoomParticipants] = useState<RoomParticipant[]>(
+    []
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatRef = useRef<number | null>(null);
@@ -66,6 +85,9 @@ export function useWebSocketStudio({
   const onPresenceEventRef = useRef(onPresenceEvent);
   onPresenceEventRef.current = onPresenceEvent;
 
+  const onRoomEventRef = useRef(onRoomEvent);
+  onRoomEventRef.current = onRoomEvent;
+
   const profileRef = useRef(profile);
   profileRef.current = profile;
 
@@ -73,6 +95,7 @@ export function useWebSocketStudio({
     if (!user) {
       setWsConnected(false);
       setPeers([]);
+      setRoomParticipants([]);
       hasInitialPresenceRef.current = false;
       previousPeersRef.current = new Map();
       if (wsRef.current) {
@@ -170,6 +193,26 @@ export function useWebSocketStudio({
           setPeers(nextPeers);
           return;
         }
+        if (type === 'room:sync' && Array.isArray(data.participants)) {
+          setRoomParticipants(data.participants as RoomParticipant[]);
+          return;
+        }
+        if (type === 'room:peer_joined' && data.participant) {
+          onRoomEventRef.current?.({
+            kind: 'peer_joined',
+            roomId: typeof data.roomId === 'string' ? data.roomId : 'main_studio_room',
+            participant: data.participant as RoomParticipant,
+          });
+          return;
+        }
+        if (type === 'room:peer_left' && data.participant) {
+          onRoomEventRef.current?.({
+            kind: 'peer_left',
+            roomId: typeof data.roomId === 'string' ? data.roomId : 'main_studio_room',
+            participant: data.participant as RoomParticipant,
+          });
+          return;
+        }
         if (
           type === 'call:ring' ||
           type === 'call:accept' ||
@@ -189,6 +232,7 @@ export function useWebSocketStudio({
 
       socket.onclose = () => {
         setWsConnected(false);
+        setRoomParticipants([]);
         hasInitialPresenceRef.current = false;
         if (heartbeatRef.current) {
           window.clearInterval(heartbeatRef.current);
@@ -243,6 +287,42 @@ export function useWebSocketStudio({
     return false;
   }, []);
 
+  const joinRoom = useCallback(
+    (meta?: {
+      roomId?: string;
+      callId?: string;
+      planId?: string;
+      planName?: string;
+      planDurationMinutes?: number;
+      planPriceCents?: number;
+    }) => {
+      return sendWs({
+        type: 'room:join',
+        roomId: meta?.roomId || 'main_studio_room',
+        ...(meta?.callId ? { callId: meta.callId } : {}),
+        ...(meta?.planId ? { planId: meta.planId } : {}),
+        ...(meta?.planName ? { planName: meta.planName } : {}),
+        ...(meta?.planDurationMinutes
+          ? { planDurationMinutes: meta.planDurationMinutes }
+          : {}),
+        ...(meta?.planPriceCents !== undefined
+          ? { planPriceCents: meta.planPriceCents }
+          : {}),
+      });
+    },
+    [sendWs]
+  );
+
+  const leaveRoom = useCallback(
+    (roomId = 'main_studio_room') => {
+      return sendWs({
+        type: 'room:leave',
+        roomId,
+      });
+    },
+    [sendWs]
+  );
+
   const sendModerationCommand = useCallback(
     (
       targetUid: string,
@@ -262,7 +342,10 @@ export function useWebSocketStudio({
   return {
     wsConnected,
     peers,
+    roomParticipants,
     sendWs,
+    joinRoom,
+    leaveRoom,
     sendModerationCommand,
   };
 }

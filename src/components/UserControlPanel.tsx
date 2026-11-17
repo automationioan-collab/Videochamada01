@@ -10,17 +10,24 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Star,
 } from 'lucide-react';
 import type {
   AccessStatus,
   CallHistoryRecord,
   CallHistoryStatus,
+  CallPlan,
+  InterestMessage,
+  InterestMessageStatus,
   PresencePeer,
   StudioCallMode,
   StudioProfile,
   StudioState,
 } from '../types/studio';
 import type { ModerationEffect } from '../hooks/useWebSocketStudio';
+import { CallPlansManager } from './CallPlansManager';
+import { DoNotDisturbPanel } from './DoNotDisturbPanel';
+import { InterestMessagesPanel } from './InterestMessagesPanel';
 import { RevenueDashboard } from './RevenueDashboard';
 
 interface UserControlPanelProps {
@@ -29,6 +36,8 @@ interface UserControlPanelProps {
   peers: PresencePeer[];
   studioState: StudioState | null;
   callHistory: CallHistoryRecord[];
+  interestMessages: InterestMessage[];
+  callPlans: CallPlan[];
   ratePerMinuteCents: number;
   onChangeRatePerMinuteCents: (cents: number) => void;
   onUpdateStudioState: (
@@ -37,6 +46,16 @@ interface UserControlPanelProps {
       isLive: boolean;
       callMode: StudioCallMode;
       headline: string;
+      autoScheduleEnabled: boolean;
+      scheduleStartTime: string;
+      scheduleEndTime: string;
+      scheduleDays: string;
+      scheduleTimezone: string;
+      dndActive: boolean;
+      dndUntilMs: number;
+      dndScheduleEnabled: boolean;
+      dndStartTime: string;
+      dndEndTime: string;
     }>
   ) => Promise<void>;
   onUpdateUserControl: (
@@ -53,17 +72,35 @@ interface UserControlPanelProps {
     displayName: string;
     photoUrl?: string;
   }) => Promise<void>;
+  onSavePlan: (input: {
+    id?: string;
+    name: string;
+    description: string;
+    durationMinutes: number;
+    priceCents: number;
+    active: boolean;
+    sortOrder: number;
+  }) => Promise<void>;
+  onDeletePlan: (planId: string) => Promise<void>;
   onRecordCallHistory: (input: {
     callId: string;
     userId: string;
     userName: string;
     durationSeconds: number;
     amountCents: number;
+    planId?: string;
+    planName?: string;
+    planDurationMinutes?: number;
   }) => Promise<void>;
   onUpdateCallHistoryStatus: (
     recordId: string,
     status: CallHistoryStatus
   ) => Promise<void>;
+  onUpdateInterestMessageStatus: (
+    messageId: string,
+    status: InterestMessageStatus
+  ) => Promise<void>;
+  onDeleteInterestMessage: (messageId: string) => Promise<void>;
 }
 
 type UserFilter = 'all' | 'online' | 'vip' | 'restricted';
@@ -108,14 +145,20 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
   peers,
   studioState,
   callHistory,
+  interestMessages,
+  callPlans,
   ratePerMinuteCents,
   onChangeRatePerMinuteCents,
   onUpdateStudioState,
   onUpdateUserControl,
   onSendModeration,
   onDirectCallUser,
+  onSavePlan,
+  onDeletePlan,
   onRecordCallHistory,
   onUpdateCallHistoryStatus,
+  onUpdateInterestMessageStatus,
+  onDeleteInterestMessage,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<UserFilter>('all');
@@ -198,11 +241,17 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
     let completedCount = 0;
     let totalDurationSeconds = 0;
     let netRevenueCents = 0;
+    let ratingSum = 0;
+    let ratingCount = 0;
     for (const rec of callHistory) {
       if (rec.status === 'completed') {
         completedCount += 1;
         totalDurationSeconds += rec.durationSeconds;
         netRevenueCents += rec.amountCents;
+      }
+      if (typeof rec.rating === 'number' && rec.rating >= 1) {
+        ratingSum += rec.rating;
+        ratingCount += 1;
       }
     }
     return {
@@ -210,6 +259,8 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
       completedCount,
       totalDurationSeconds,
       netRevenueCents,
+      ratingCount,
+      averageRating: ratingCount > 0 ? ratingSum / ratingCount : null,
     };
   }, [callHistory]);
 
@@ -278,7 +329,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
             <button
               type="button"
               onClick={() =>
-                void onUpdateStudioState({ isLive: !(studioState?.isLive ?? true) })
+                void onUpdateStudioState({
+                  isLive: !(studioState?.isLive ?? true),
+                  autoScheduleEnabled: false,
+                })
               }
               className={`px-4 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 studioState?.isLive
@@ -286,7 +340,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   : 'bg-[#1B1E26] border-white/15 text-[#9BA1AE]'
               }`}
             >
-              {studioState?.isLive ? 'Estúdio Ao Vivo' : 'Estúdio Pausado'}
+              {studioState?.isLive ? 'Estúdio Ao Vivo' : 'Modo Descanso (Offline)'}
             </button>
 
             <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
@@ -372,6 +426,12 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Scheduled Do Not Disturb Mode */}
+      <DoNotDisturbPanel
+        studioState={studioState}
+        onUpdateStudioState={onUpdateStudioState}
+      />
 
       {/* Real-Time Users Table */}
       <section className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
@@ -593,6 +653,13 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
       {/* Recharts Revenue & Call History Dashboard */}
       <RevenueDashboard callHistory={callHistory} />
 
+      {/* Predefined Paid Call Plans Manager */}
+      <CallPlansManager
+        plans={callPlans}
+        onSavePlan={onSavePlan}
+        onDeletePlan={onDeletePlan}
+      />
+
       {/* Admin Call History & Finalized Transactions Panel */}
       <section
         aria-labelledby="call-history-heading"
@@ -628,6 +695,14 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
               <p className="text-[11px] text-[#9BA1AE]">Receita Finalizada</p>
               <p className="text-xl font-semibold font-mono tabular-nums text-[#86EFAC]">
                 {BRL_FORMATTER.format(historyMetrics.netRevenueCents / 100)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] text-[#9BA1AE]">Avaliação Média</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#E2C799]">
+                {historyMetrics.averageRating !== null
+                  ? `${historyMetrics.averageRating.toFixed(1)}/5`
+                  : '—'}
               </p>
             </div>
           </div>
@@ -802,6 +877,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   <th className="py-3 px-4">Data e Hora</th>
                   <th className="py-3 px-4 text-right">Duração</th>
                   <th className="py-3 px-4 text-right">Valor Finalizado</th>
+                  <th className="py-3 px-4">Avaliação</th>
                   <th className="py-3 px-4">Transação</th>
                   <th className="py-3 px-5 text-right">Ação</th>
                 </tr>
@@ -819,8 +895,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                           <p className="font-medium text-[#F3EFE6] truncate max-w-[200px]">
                             {record.userName}
                           </p>
-                          <p className="text-[11px] font-mono text-[#727988] truncate max-w-[180px]">
-                            {record.callId}
+                          <p className="text-[11px] font-mono text-[#727988] truncate max-w-[220px]">
+                            {record.planName
+                              ? `${record.planName} · ${record.callId}`
+                              : record.callId}
                           </p>
                         </div>
                       </td>
@@ -835,6 +913,42 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
 
                       <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-right whitespace-nowrap font-medium text-[#E2C799]">
                         {BRL_FORMATTER.format(record.amountCents / 100)}
+                      </td>
+
+                      <td className="py-3.5 px-4 text-xs">
+                        {typeof record.rating === 'number' && record.rating > 0 ? (
+                          <div className="space-y-0.5 max-w-[200px]">
+                            <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-0.5">
+                                {[1, 2, 3, 4, 5].map((star) => (
+                                  <Star
+                                    key={star}
+                                    className={`w-3.5 h-3.5 ${
+                                      star <= (record.rating ?? 0)
+                                        ? 'fill-[#C9A46B] text-[#C9A46B]'
+                                        : 'text-[#3C4250]'
+                                    }`}
+                                  />
+                                ))}
+                              </div>
+                              <span className="font-mono tabular-nums text-[#E2C799]">
+                                {record.rating}/5
+                              </span>
+                            </div>
+                            {record.ratingComment && (
+                              <p
+                                title={record.ratingComment}
+                                className="text-[11px] text-[#9BA1AE] truncate"
+                              >
+                                "{record.ratingComment}"
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-[#727988] whitespace-nowrap">
+                            Não avaliada
+                          </span>
+                        )}
                       </td>
 
                       <td className="py-3.5 px-4 text-xs whitespace-nowrap">
@@ -870,6 +984,15 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           </div>
         )}
       </section>
+
+      {/* Offline Interest Messages */}
+      <InterestMessagesPanel
+        messages={interestMessages}
+        peers={peers}
+        onUpdateStatus={onUpdateInterestMessageStatus}
+        onDeleteMessage={onDeleteInterestMessage}
+        onDirectCallUser={onDirectCallUser}
+      />
     </div>
   );
 };

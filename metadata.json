@@ -1,0 +1,6 @@
+{
+  "name": "Maison Aura",
+  "description": "Estúdio privado com login, controle de usuários em tempo real e videochamada exclusiva com a modelo.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

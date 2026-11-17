@@ -1,0 +1,321 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Token-only admin check safe for list rules (no get/exists calls)
+    function isTokenAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'automation.ioan@gmail.com';
+    }
+
+    // Full admin check for single-doc reads and writes
+    function isAdmin() {
+      return isTokenAdmin() ||
+        (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // --- Validation Blueprints ---
+    function isValidStudioProfile(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'accessStatus', 'isOnline', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'photoUrl', 'role', 'accessStatus', 'isOnline', 'notes', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.role in ['model', 'moderator', 'viewer'] &&
+        data.accessStatus in ['active', 'vip', 'muted', 'blocked'] &&
+        data.isOnline is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 300));
+    }
+
+    function isValidPrivateUserInfo(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudioState(data) {
+      return data.keys().hasAll(['modelUid', 'modelName', 'isLive', 'callMode', 'headline', 'updatedAt']) &&
+        data.keys().hasOnly(['modelUid', 'modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'updatedAt']) &&
+        isValidId(data.modelUid) &&
+        data.modelName is string && data.modelName.size() >= 1 && data.modelName.size() <= 80 &&
+        data.isLive is bool &&
+        data.callMode in ['open', 'queue_only', 'paused'] &&
+        data.headline is string && data.headline.size() >= 1 && data.headline.size() <= 140 &&
+        data.updatedAt is timestamp &&
+        (!('activeCallId' in data) || (data.activeCallId is string && data.activeCallId.size() <= 128)) &&
+        (!('activeCallUserId' in data) || (data.activeCallUserId is string && data.activeCallUserId.size() <= 128)) &&
+        (!('activeCallUserName' in data) || (data.activeCallUserName is string && data.activeCallUserName.size() <= 80));
+    }
+
+    function isValidCallRequest(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'topic', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'userName', 'userPhotoUrl', 'topic', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.userId) &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80 &&
+        data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 160 &&
+        data.status in ['waiting', 'accepted', 'in_call', 'ended', 'rejected', 'cancelled'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        (!('userPhotoUrl' in data) || (data.userPhotoUrl is string && data.userPhotoUrl.size() <= 500));
+    }
+
+    function isValidCallMessage(data) {
+      return data.keys().hasAll(['id', 'callId', 'senderUid', 'senderName', 'senderRole', 'recipientUid', 'text', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'callId', 'senderUid', 'senderName', 'senderRole', 'recipientUid', 'text', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.callId) &&
+        isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 80 &&
+        data.senderRole in ['model', 'moderator', 'viewer'] &&
+        isValidId(data.recipientUid) &&
+        data.text is string && data.text.size() >= 1 && data.text.size() <= 500 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCallHistory(data) {
+      return data.keys().hasAll(['id', 'callId', 'userId', 'userName', 'modelUid', 'durationSeconds', 'amountCents', 'currency', 'status', 'endedAt', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'callId', 'userId', 'userName', 'modelUid', 'durationSeconds', 'amountCents', 'currency', 'status', 'endedAt', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.callId) &&
+        isValidId(data.userId) &&
+        isValidId(data.modelUid) &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80 &&
+        data.durationSeconds is int && data.durationSeconds >= 0 && data.durationSeconds <= 86400 &&
+        data.amountCents is int && data.amountCents >= 0 && data.amountCents <= 100000000 &&
+        data.currency == 'BRL' &&
+        data.status in ['completed', 'refunded'] &&
+        data.endedAt is timestamp &&
+        data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. Studio Profiles (Public room metadata & access controls; zero PII)
+    match /studioProfiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.uid == request.auth.uid ||
+        resource.data.role == 'model'
+      );
+      allow create: if isSignedIn() && isVerifiedUser() && isValidId(userId) &&
+        isValidStudioProfile(incoming()) &&
+        userId == request.auth.uid &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (
+          (isTokenAdmin() && incoming().role == 'model' && incoming().accessStatus == 'vip') ||
+          (!isTokenAdmin() && incoming().role == 'viewer' && incoming().accessStatus == 'active')
+        );
+      allow update: if isSignedIn() && isVerifiedUser() && isValidId(userId) &&
+        isValidStudioProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'role', 'accessStatus', 'isOnline', 'notes', 'updatedAt'])
+          ) ||
+          (
+            isOwner(userId) &&
+            incoming().role == existing().role &&
+            incoming().accessStatus == existing().accessStatus &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'isOnline', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // 2. Private User Info (Strict PII isolation)
+    match /users/{userId}/private/info {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if false;
+      allow create: if isSignedIn() && isVerifiedUser() && isValidId(userId) &&
+        isOwner(userId) &&
+        isValidPrivateUserInfo(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().email == request.auth.token.email &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && isVerifiedUser() && isValidId(userId) &&
+        (isOwner(userId) || isAdmin()) &&
+        isValidPrivateUserInfo(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // 3. Studio State (Model availability & active call banner)
+    match /studioState/{stateId} {
+      allow get: if isSignedIn() && isValidId(stateId) && stateId == 'main';
+      allow list: if false;
+      allow create: if isAdmin() && isValidId(stateId) && stateId == 'main' &&
+        isValidStudioState(incoming()) &&
+        incoming().modelUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(stateId) && stateId == 'main' &&
+        isValidStudioState(incoming()) &&
+        incoming().modelUid == existing().modelUid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['modelName', 'isLive', 'callMode', 'headline', 'activeCallId', 'activeCallUserId', 'activeCallUserName', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 4. Call Queue (Video call requests and lifecycle)
+    match /callQueue/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isSignedIn() && isVerifiedUser() && isValidId(requestId) &&
+        isValidCallRequest(incoming()) &&
+        incoming().id == requestId &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'waiting' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked';
+      allow update: if isSignedIn() && isVerifiedUser() && isValidId(requestId) &&
+        isValidCallRequest(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (!(existing().status in ['ended', 'rejected', 'cancelled']) || isAdmin()) &&
+        (
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            existing().userId == request.auth.uid &&
+            (
+              (existing().status == 'waiting' && incoming().status == 'cancelled') ||
+              (existing().status == 'accepted' && incoming().status == 'in_call') ||
+              (existing().status == 'in_call' && incoming().status == 'ended')
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(requestId);
+    }
+
+    // 5. Call Messages (In-call live chat messages)
+    match /callMessages/{messageId} {
+      allow get: if isSignedIn() && isValidId(messageId) && (
+        isAdmin() ||
+        resource.data.senderUid == request.auth.uid ||
+        resource.data.recipientUid == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.senderUid == request.auth.uid ||
+        resource.data.recipientUid == request.auth.uid
+      );
+      allow create: if isSignedIn() && isVerifiedUser() && isValidId(messageId) &&
+        isValidCallMessage(incoming()) &&
+        incoming().id == messageId &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/callQueue/$(incoming().callId)) &&
+        exists(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'muted' &&
+        get(/databases/$(database)/documents/studioProfiles/$(request.auth.uid)).data.accessStatus != 'blocked';
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(messageId);
+    }
+
+    // 6. Admins Registry
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if false;
+      allow create: if isTokenAdmin() && isValidId(adminId) &&
+        adminId == request.auth.uid &&
+        isValidAdminUser(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 7. Call History & Finalized Transactions
+    match /callHistory/{recordId} {
+      allow get: if isSignedIn() && isValidId(recordId) && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        isTokenAdmin() ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isAdmin() && isValidId(recordId) &&
+        isValidCallHistory(incoming()) &&
+        incoming().id == recordId &&
+        incoming().modelUid == request.auth.uid &&
+        incoming().endedAt == request.time &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(recordId) &&
+        isValidCallHistory(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().callId == existing().callId &&
+        incoming().userId == existing().userId &&
+        incoming().modelUid == existing().modelUid &&
+        incoming().durationSeconds == existing().durationSeconds &&
+        incoming().amountCents == existing().amountCents &&
+        incoming().currency == existing().currency &&
+        incoming().endedAt == existing().endedAt &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if false;
+    }
+  }
+}

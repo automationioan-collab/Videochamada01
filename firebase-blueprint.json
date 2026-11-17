@@ -1,0 +1,327 @@
+{
+  "entities": {
+    "StudioProfile": {
+      "title": "StudioProfile",
+      "description": "Public studio profile and real-time moderation state for an authenticated participant or model (zero PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "role": {
+          "type": "string",
+          "enum": ["model", "moderator", "viewer"]
+        },
+        "accessStatus": {
+          "type": "string",
+          "enum": ["active", "vip", "muted", "blocked"]
+        },
+        "isOnline": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "role", "accessStatus", "isOnline", "createdAt", "updatedAt"]
+    },
+    "PrivateUserInfo": {
+      "title": "PrivateUserInfo",
+      "description": "Isolated PII document storing user email strictly restricted to owner and admin.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "StudioState": {
+      "title": "StudioState",
+      "description": "Live status and active video call metadata for the model's studio room.",
+      "type": "object",
+      "properties": {
+        "modelUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "modelName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isLive": {
+          "type": "boolean"
+        },
+        "callMode": {
+          "type": "string",
+          "enum": ["open", "queue_only", "paused"]
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "activeCallId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "activeCallUserId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "activeCallUserName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["modelUid", "modelName", "isLive", "callMode", "headline", "updatedAt"]
+    },
+    "CallRequest": {
+      "title": "CallRequest",
+      "description": "Video call request and session lifecycle record between a user and the studio model.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "userPhotoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "accepted", "in_call", "ended", "rejected", "cancelled"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "userName", "topic", "status", "createdAt", "updatedAt"]
+    },
+    "CallMessage": {
+      "title": "CallMessage",
+      "description": "Real-time text message exchanged inside an active video call session.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "senderRole": {
+          "type": "string",
+          "enum": ["model", "moderator", "viewer"]
+        },
+        "recipientUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "callId", "senderUid", "senderName", "senderRole", "recipientUid", "text", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Verified studio admin/model privilege marker document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "CallHistoryRecord": {
+      "title": "CallHistoryRecord",
+      "description": "Finalized video call history entry with duration, timestamp, and transaction amount in BRL cents.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "modelUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "durationSeconds": {
+          "type": "integer"
+        },
+        "amountCents": {
+          "type": "integer"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["BRL"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "refunded"]
+        },
+        "endedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "callId", "userId", "userName", "modelUid", "durationSeconds", "amountCents", "currency", "status", "endedAt", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/studioProfiles/{userId}": {
+      "schema": { "$ref": "#/entities/StudioProfile" },
+      "description": "Studio member profiles and live access control status."
+    },
+    "/users/{userId}/private/info": {
+      "schema": { "$ref": "#/entities/PrivateUserInfo" },
+      "description": "PII-isolated account metadata restricted to owner and studio admin."
+    },
+    "/studioState/{stateId}": {
+      "schema": { "$ref": "#/entities/StudioState" },
+      "description": "Live studio availability and active video call banner."
+    },
+    "/callQueue/{requestId}": {
+      "schema": { "$ref": "#/entities/CallRequest" },
+      "description": "Real-time queue of user video call requests to the model."
+    },
+    "/callMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/CallMessage" },
+      "description": "Messages scoped to an active call session."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Trusted admin UID registry."
+    },
+    "/callHistory/{recordId}": {
+      "schema": { "$ref": "#/entities/CallHistoryRecord" },
+      "description": "Completed call history records with duration, date, and finalized BRL transaction amount."
+    }
+  }
+}

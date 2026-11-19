@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MotionConfig } from 'motion/react';
 import { PhoneCall, PhoneOff, ShieldAlert, Users, Video } from 'lucide-react';
 import { CallQueuePanel } from './components/CallQueuePanel';
 import { Header, type WorkspaceTab } from './components/Header';
@@ -9,6 +10,8 @@ import {
   RatingSystem,
   type EndedSessionContext,
 } from './components/RatingSystem';
+import { SalaDeEspera } from './components/SalaDeEspera';
+import { TechAmbientField } from './components/TechEffects';
 import {
   ToastOverlay,
   type StudioToast,
@@ -25,8 +28,20 @@ import {
   type RoomEvent,
   type SignalPayload,
 } from './hooks/useWebSocketStudio';
-import { isDndActiveNow, isWithinOperatingHours } from './lib/schedule';
-import type { CallPlan, CallRequest } from './types/studio';
+import {
+  isAudioSoundEnabled,
+  playNotificationDing,
+  setAudioSoundEnabled,
+  unlockAudioContext,
+} from './lib/audio';
+import { installMediaProtection } from './lib/mediaProtection';
+import {
+  getHolidayForDate,
+  isDndActiveNow,
+  isWithinOperatingHours,
+  serializeSchedulePeriodsDigest,
+} from './lib/schedule';
+import type { CallEntryIntent, CallPlan, CallRequest } from './types/studio';
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -60,11 +75,14 @@ export default function App() {
     user,
     authLoading,
     authError,
+    listenerError,
     isAdmin,
     myProfile,
     modelProfile,
     allProfiles,
     studioState,
+    studioConfig,
+    galleryItems,
     callQueue,
     callMessages,
     callHistory,
@@ -73,14 +91,22 @@ export default function App() {
     loginWithGoogle,
     logout,
     updateStudioState,
+    saveStudioConfig,
+    saveGalleryItem,
+    deleteGalleryItem,
+    restoreDefaultGallery,
     updateUserControl,
+    deleteUserProfile,
     requestVideoCall,
     updateCallStatus,
+    deleteCallRequest,
     saveCallPlan,
     deleteCallPlan,
     sendCallMessage,
     recordCallHistory,
     updateCallHistoryStatus,
+    updateCallHistoryRecord,
+    deleteCallHistoryRecord,
     submitCallRating,
     sendInterestMessage,
     updateInterestMessageStatus,
@@ -91,6 +117,21 @@ export default function App() {
   const [currentPath, setCurrentPath] = useState<string>(() =>
     typeof window !== 'undefined' ? window.location.pathname : '/'
   );
+  const [highContrastAdmin, setHighContrastAdmin] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return (
+        window.localStorage.getItem('maison_aura_admin_high_contrast') ===
+        'true'
+      );
+    } catch {
+      return false;
+    }
+  });
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
+    isAudioSoundEnabled()
+  );
+  const [entryIntent, setEntryIntent] = useState<CallEntryIntent>('group');
   const [activeSession, setActiveSession] = useState<ActiveCallSession | null>(
     null
   );
@@ -112,9 +153,66 @@ export default function App() {
   const elapsedSecondsRef = useRef<number>(0);
   const sendWsRef = useRef<(payload: unknown) => void>(() => {});
   const pendingPublicJoinRef = useRef<boolean>(false);
+  const pendingEntryIntentRef = useRef<CallEntryIntent>('group');
   const roomStartedAtMapRef = useRef<Map<string, number>>(new Map());
+  const seenQueueIdsRef = useRef<Set<string>>(new Set());
+  const queueInitializedRef = useRef<boolean>(false);
+  const myUidRef = useRef<string | null>(null);
+  myUidRef.current = user?.uid ?? null;
   const activeSessionRef = useRef<ActiveCallSession | null>(null);
   activeSessionRef.current = activeSession;
+
+  const toggleHighContrastAdmin = useCallback(() => {
+    setHighContrastAdmin((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(
+            'maison_aura_admin_high_contrast',
+            String(next)
+          );
+        } catch {
+          // Ignore storage restrictions in embedded iframes
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleSoundEnabled = useCallback(() => {
+    setSoundEnabled((prev) => {
+      const next = !prev;
+      setAudioSoundEnabled(next);
+      if (next) {
+        unlockAudioContext();
+        playNotificationDing('test', true);
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const unlock = () => unlockAudioContext();
+    window.addEventListener('pointerdown', unlock, { passive: true });
+    window.addEventListener('keydown', unlock, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  useEffect(() => {
+    return installMediaProtection();
+  }, []);
+
+  useEffect(() => {
+    if (
+      studioConfig?.ratePerMinuteCents &&
+      studioConfig.ratePerMinuteCents > 0
+    ) {
+      setRatePerMinuteCents(studioConfig.ratePerMinuteCents);
+    }
+  }, [studioConfig?.ratePerMinuteCents]);
 
   const activePlans = useMemo(
     () => callPlans.filter((p) => p.active),
@@ -168,7 +266,11 @@ export default function App() {
 
   const navigateRoute = useCallback((path: '/' | '/admin') => {
     if (typeof window !== 'undefined' && window.location.pathname !== path) {
-      window.history.pushState({}, '', path);
+      try {
+        window.history.pushState({}, '', path);
+      } catch {
+        // Ignore History API restrictions in sandboxed frames
+      }
     }
     setCurrentPath(path);
   }, []);
@@ -261,6 +363,7 @@ export default function App() {
         if (signal.planId) {
           setIncomingRingPlanId(signal.planId);
         }
+        playNotificationDing('incoming_call');
         setIncomingRing({
           callId: signal.callId || `direct_${Date.now()}`,
           fromUid: signal.fromUid,
@@ -345,6 +448,9 @@ export default function App() {
   const handlePresenceEvent = useCallback(
     (event: PresenceEvent) => {
       if (event.kind === 'joined') {
+        if (event.peer.uid !== myUidRef.current) {
+          playNotificationDing('user_joined');
+        }
         pushToast(
           'user_joined',
           'Novo usuário no estúdio',
@@ -396,6 +502,9 @@ export default function App() {
     (event: RoomEvent) => {
       if (event.kind === 'peer_joined') {
         roomStartedAtMapRef.current.set(event.participant.uid, Date.now());
+        if (event.participant.uid !== myUidRef.current) {
+          playNotificationDing('user_joined');
+        }
         if (activeSessionRef.current?.isGroupRoom || isAdmin) {
           pushToast(
             'user_joined',
@@ -455,10 +564,13 @@ export default function App() {
     wsConnected,
     peers,
     roomParticipants,
+    queueSummary,
     sendWs,
     joinRoom,
     leaveRoom,
     sendModerationCommand,
+    syncQueueEntry,
+    syncAuthoritativeQueue,
   } = useWebSocketStudio({
     user,
     profile: myProfile,
@@ -1016,14 +1128,111 @@ export default function App() {
     void syncMeshPeers(user.uid, participantUids, 'main_studio_room');
   }, [activeSession?.isGroupRoom, roomParticipants, syncMeshPeers, user]);
 
+  // Play incoming call ding & toast when a new call request enters waiting queue for admin
+  useEffect(() => {
+    if (!isAdmin) {
+      seenQueueIdsRef.current.clear();
+      queueInitializedRef.current = false;
+      return;
+    }
+    if (!queueInitializedRef.current) {
+      for (const req of callQueue) {
+        seenQueueIdsRef.current.add(req.id);
+      }
+      queueInitializedRef.current = true;
+      return;
+    }
+    let hasNewWaiting = false;
+    for (const req of callQueue) {
+      if (!seenQueueIdsRef.current.has(req.id)) {
+        seenQueueIdsRef.current.add(req.id);
+        if (req.status === 'waiting') {
+          hasNewWaiting = true;
+          pushToast(
+            'info',
+            'Nova solicitação na fila',
+            `${req.userName} solicitou chamada (${req.planName || 'plano selecionado'}).`
+          );
+        }
+      }
+    }
+    if (hasNewWaiting && !dndActiveRef.current) {
+      playNotificationDing('incoming_call');
+    }
+  }, [callQueue, isAdmin, pushToast]);
+
+  // Synchronize visitor waiting entry to WebSocket queue calculator
+  useEffect(() => {
+    if (!user || isAdmin || !wsConnected) return;
+    const waitingReq = callQueue.find((q) => q.status === 'waiting');
+    if (waitingReq) {
+      syncQueueEntry({
+        status: 'waiting',
+        callId: waitingReq.id,
+        planDurationMinutes: waitingReq.planDurationMinutes || 10,
+        createdAtMs: waitingReq.createdAt?.toMillis?.() ?? Date.now(),
+      });
+    } else {
+      syncQueueEntry({ status: 'idle' });
+    }
+  }, [callQueue, isAdmin, syncQueueEntry, user, wsConnected]);
+
+  // Synchronize authoritative Firestore queue & active call estimate from Admin
+  useEffect(() => {
+    if (!user || !isAdmin || !wsConnected) return;
+    const waitingEntries = callQueue
+      .filter((q) => q.status === 'waiting')
+      .map((q) => ({
+        callId: q.id,
+        uid: q.userId,
+        planDurationMinutes: q.planDurationMinutes || 10,
+        createdAtMs: q.createdAt?.toMillis?.() ?? Date.now(),
+      }));
+
+    const activeQueueReq = studioState?.activeCallId
+      ? callQueue.find((q) => q.id === studioState.activeCallId)
+      : undefined;
+
+    const activeCall =
+      activeSession && !activeSession.isGroupRoom
+        ? {
+            callId: activeSession.callId,
+            durationMinutes: activeSession.planDurationMinutes || 15,
+            startedAtMs: sessionStartedAtRef.current ?? undefined,
+          }
+        : studioState?.activeCallId
+          ? {
+              callId: studioState.activeCallId,
+              durationMinutes: activeQueueReq?.planDurationMinutes || 15,
+              startedAtMs: activeQueueReq?.updatedAt?.toMillis?.() ?? undefined,
+            }
+          : null;
+
+    syncAuthoritativeQueue({
+      waiting: waitingEntries,
+      activeCall,
+    });
+  }, [
+    activeSession,
+    callQueue,
+    isAdmin,
+    studioState?.activeCallId,
+    syncAuthoritativeQueue,
+    user,
+    wsConnected,
+  ]);
+
   // Redirect visitor back to studio tab after clicking public landing CTA
   useEffect(() => {
     if (!user || !pendingPublicJoinRef.current) return;
     pendingPublicJoinRef.current = false;
+    const nextIntent = pendingEntryIntentRef.current;
+    pendingEntryIntentRef.current = 'group';
     if (!isAdmin && isAdminRoute) {
       navigateRoute('/');
     }
     if (!isAdmin) {
+      setEntryIntent(nextIntent);
       setActiveTab('studio');
     }
   }, [isAdmin, isAdminRoute, navigateRoute, user]);
@@ -1104,9 +1313,11 @@ export default function App() {
   const modelOnline = modelProfile
     ? peers.some((p) => p.uid === modelProfile.uid)
     : false;
+  const holidayToday = getHolidayForDate(studioState, scheduleNow);
   const scheduleOfflineNow =
-    Boolean(studioState?.autoScheduleEnabled) &&
-    !isWithinOperatingHours(studioState, scheduleNow);
+    Boolean(holidayToday) ||
+    (Boolean(studioState?.autoScheduleEnabled) &&
+      !isWithinOperatingHours(studioState, scheduleNow));
   const dndActiveNow = isDndActiveNow(studioState, scheduleNow);
   dndActiveRef.current = dndActiveNow;
 
@@ -1120,11 +1331,18 @@ export default function App() {
         (!studioState.isLive || studioState.callMode === 'paused')));
 
   useEffect(() => {
-    if (!isAdmin || !studioState?.autoScheduleEnabled) {
+    if (!isAdmin || !studioState) {
       autoScheduleSyncRef.current = null;
       return;
     }
-    const shouldBeLive = isWithinOperatingHours(studioState, scheduleNow);
+    const isHolidayNow = getHolidayForDate(studioState, scheduleNow) !== null;
+    if (!studioState.autoScheduleEnabled && !isHolidayNow) {
+      autoScheduleSyncRef.current = null;
+      return;
+    }
+
+    const shouldBeLive =
+      !isHolidayNow && isWithinOperatingHours(studioState, scheduleNow);
     const targetMode = shouldBeLive ? 'open' : 'paused';
     if (
       studioState.isLive === shouldBeLive &&
@@ -1134,7 +1352,7 @@ export default function App() {
       return;
     }
 
-    const syncKey = `${shouldBeLive}_${studioState.scheduleStartTime}_${studioState.scheduleEndTime}_${studioState.scheduleDays}`;
+    const syncKey = `${shouldBeLive}_${isHolidayNow}_${serializeSchedulePeriodsDigest(studioState)}`;
     if (autoScheduleSyncRef.current === syncKey) return;
     autoScheduleSyncRef.current = syncKey;
 
@@ -1146,10 +1364,14 @@ export default function App() {
       'info',
       shouldBeLive
         ? 'Estúdio aberto automaticamente'
-        : 'Modo Descanso ativado automaticamente',
+        : isHolidayNow
+          ? 'Modo Descanso ativado por data programada'
+          : 'Modo Descanso ativado automaticamente',
       shouldBeLive
         ? 'Seu horário de atendimento começou e a sala está liberada.'
-        : 'Seu horário configurado encerrou e a tela de Descanso está ativa.'
+        : isHolidayNow
+          ? 'A data de hoje está definida como feriado/folga e o estúdio entrou em descanso.'
+          : 'Seu horário configurado encerrou e a tela de Descanso está ativa.'
     );
   }, [isAdmin, pushToast, scheduleNow, studioState, updateStudioState]);
 
@@ -1190,42 +1412,55 @@ export default function App() {
     );
   }, [isAdmin, pushToast, scheduleNow, studioState, updateStudioState]);
 
+  if (listenerError && user) {
+    throw listenerError;
+  }
+
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#0B0C0F] text-[#F3EFE6] flex items-center justify-center">
-        <p className="text-sm text-[#9BA1AE]">Carregando estúdio...</p>
+      <div className="min-h-screen luxury-canvas text-[#FAF4F7] flex items-center justify-center">
+        <p className="text-sm text-[#C9BAC4]">Carregando estúdio...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#0B0C0F] text-[#F3EFE6] flex flex-col">
-      <Header
-        isAuthenticated={Boolean(user)}
-        isAdmin={isAdmin}
-        isAdminRoute={isAdminRoute}
-        activeTab={activeTab}
-        onSelectTab={(tab) => {
-          if (isAdminRoute) navigateRoute('/');
-          setActiveTab(tab);
-        }}
-        onNavigateRoute={navigateRoute}
-        onLogin={() => void loginWithGoogle()}
-        onLogout={() => void logout()}
-      />
+    <MotionConfig reducedMotion="user">
+      <div
+        className={`relative min-h-screen text-[#FAF4F7] flex flex-col ${
+          isAdmin && highContrastAdmin ? 'admin-high-contrast' : 'luxury-canvas'
+        }`}
+      >
+        <TechAmbientField />
+        <Header
+          studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+          isAuthenticated={Boolean(user)}
+          isAdmin={isAdmin}
+          isAdminRoute={isAdminRoute}
+          highContrastAdmin={highContrastAdmin}
+          onToggleHighContrastAdmin={toggleHighContrastAdmin}
+          activeTab={activeTab}
+          onSelectTab={(tab) => {
+            if (isAdminRoute) navigateRoute('/');
+            setActiveTab(tab);
+          }}
+          onNavigateRoute={navigateRoute}
+          onLogin={() => void loginWithGoogle()}
+          onLogout={() => void logout()}
+        />
 
-      {!user ? (
-        isAdminRoute ? (
-          <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-16 flex items-center justify-center">
-            <section className="max-w-lg w-full bg-[#13151A] border border-white/10 rounded-xl p-8 space-y-6">
+        {!user ? (
+          isAdminRoute ? (
+            <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-16 flex items-center justify-center">
+              <section className="max-w-lg w-full luxury-card tech-reticle border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-6">
               <div className="space-y-2">
-                <p className="text-xs font-medium text-[#C9A46B]">
+                <p className="text-xs font-medium text-[#F4C2D7]">
                   Administração · Lorena Noir
                 </p>
-                <h1 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+                <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
                   Central de Recepção da Modelo
                 </h1>
-                <p className="text-sm text-[#9BA1AE] leading-relaxed">
+                <p className="text-sm text-[#C9BAC4] leading-relaxed">
                   Entre com sua conta administrativa para atender videochamadas dos internautas, moderar áudio em tempo real e acompanhar a receita.
                 </p>
               </div>
@@ -1233,7 +1468,7 @@ export default function App() {
               {authError && (
                 <div
                   role="alert"
-                  className="p-3.5 rounded-lg bg-red-950/40 border border-red-500/30 text-xs text-red-200"
+                  className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
                 >
                   {authError}
                 </div>
@@ -1243,14 +1478,14 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void loginWithGoogle()}
-                  className="px-5 py-3 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors cursor-pointer"
+                  className="px-6 py-3 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
                 >
                   Entrar como Modelo Administradora
                 </button>
                 <button
                   type="button"
                   onClick={() => navigateRoute('/')}
-                  className="px-4 py-3 text-xs font-medium rounded-lg bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors cursor-pointer"
+                  className="px-5 py-3 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
                 >
                   Ir para área dos internautas
                 </button>
@@ -1259,25 +1494,33 @@ export default function App() {
           </main>
         ) : (
           <LoginView
+            studioConfig={studioConfig}
+            galleryItems={galleryItems}
             onEnterVideoCall={() => {
               pendingPublicJoinRef.current = true;
+              pendingEntryIntentRef.current = 'group';
+              void loginWithGoogle();
+            }}
+            onEnterPrivateCall={() => {
+              pendingPublicJoinRef.current = true;
+              pendingEntryIntentRef.current = 'private';
               void loginWithGoogle();
             }}
             authError={authError}
           />
         )
       ) : isAdminRoute ? (
-        <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
+        <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
           {!isAdmin ? (
-            <section className="max-w-lg mx-auto my-12 bg-[#13151A] border border-white/10 rounded-xl p-8 space-y-5">
+            <section className="max-w-lg mx-auto my-12 luxury-card border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-5">
               <div className="space-y-2">
                 <p className="text-xs font-medium text-[#FCA5A5]">
                   Acesso Restrito
                 </p>
-                <h1 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+                <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
                   Área Exclusiva da Modelo
                 </h1>
-                <p className="text-sm text-[#9BA1AE] leading-relaxed">
+                <p className="text-sm text-[#C9BAC4] leading-relaxed">
                   A conta conectada atualmente não possui permissão administrativa para receber chamadas no painel da modelo Lorena Noir.
                 </p>
               </div>
@@ -1285,14 +1528,14 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => navigateRoute('/')}
-                  className="px-5 py-2.5 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors cursor-pointer"
+                  className="px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
                 >
                   Ir para Recepção de Videochamada
                 </button>
                 <button
                   type="button"
                   onClick={() => void logout()}
-                  className="px-4 py-2.5 text-xs font-medium rounded-lg bg-[#161920] border border-white/15 text-[#F3EFE6] hover:bg-[#1F232C] transition-colors cursor-pointer"
+                  className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
                 >
                   Trocar de Conta
                 </button>
@@ -1307,6 +1550,8 @@ export default function App() {
               peers={peers}
               roomParticipants={roomParticipants}
               studioState={studioState}
+              studioConfig={studioConfig}
+              galleryItems={galleryItems}
               callQueue={callQueue}
               callMessages={callMessages}
               callHistory={callHistory}
@@ -1314,6 +1559,12 @@ export default function App() {
               callPlans={callPlans}
               ratePerMinuteCents={ratePerMinuteCents}
               onChangeRatePerMinuteCents={setRatePerMinuteCents}
+              soundEnabled={soundEnabled}
+              onToggleSoundEnabled={toggleSoundEnabled}
+              onTestSoundDing={() => {
+                unlockAudioContext();
+                playNotificationDing('test', true);
+              }}
               wsConnected={wsConnected}
               isGroupRoom={Boolean(activeSession?.isGroupRoom)}
               activeCallId={activeSession?.callId || null}
@@ -1340,28 +1591,36 @@ export default function App() {
               onRejectIncomingRing={handleRejectIncomingRing}
               onAcceptQueueAndCall={handleAcceptQueueAndCall}
               onUpdateCallStatus={updateCallStatus}
+              onDeleteCallRequest={deleteCallRequest}
               onDirectCallUser={handleDirectCallUser}
               onSavePlan={saveCallPlan}
               onDeletePlan={deleteCallPlan}
               onUpdateStudioState={updateStudioState}
+              onSaveStudioConfig={saveStudioConfig}
+              onSaveGalleryItem={saveGalleryItem}
+              onDeleteGalleryItem={deleteGalleryItem}
+              onRestoreDefaultGallery={restoreDefaultGallery}
               onUpdateUserControl={updateUserControl}
+              onDeleteUserProfile={deleteUserProfile}
               onSendModeration={sendModerationCommand}
               onRecordCallHistory={recordCallHistory}
               onUpdateCallHistoryStatus={updateCallHistoryStatus}
+              onUpdateCallHistoryRecord={updateCallHistoryRecord}
+              onDeleteCallHistoryRecord={deleteCallHistoryRecord}
               onUpdateInterestMessageStatus={updateInterestMessageStatus}
               onDeleteInterestMessage={deleteInterestMessage}
             />
           )}
         </main>
       ) : (
-        <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
+        <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
           {/* Account & Live Context Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-white/10">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#F4C2D7]/15">
             <div className="space-y-1">
-              <h1 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+              <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
                 {isAdmin ? 'Painel da Modelo' : 'Recepção do Estúdio'}
               </h1>
-              <p className="text-xs text-[#9BA1AE]">
+              <p className="text-xs text-[#C9BAC4]">
                 {myProfile?.displayName || user.displayName} ·{' '}
                 {isAdmin ? 'Modelo Administradora' : 'Visitante Autenticado'} ·{' '}
                 {wsConnected
@@ -1375,9 +1634,9 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => navigateRoute('/admin')}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-[#13151A] border border-white/10 text-[#F3EFE6] hover:bg-[#1B1E26] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  <Users className="w-3.5 h-3.5 text-[#C9A46B]" />
+                  <Users className="w-3.5 h-3.5 text-[#F4C2D7]" />
                   <span>Página de Administração</span>
                 </button>
               )}
@@ -1385,7 +1644,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setActiveTab('call')}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <Video className="w-3.5 h-3.5" />
                   <span>
@@ -1400,15 +1659,15 @@ export default function App() {
           {incomingRing && (
             <div
               role="alert"
-              className="p-4 sm:px-6 rounded-xl bg-[#191611] border border-[#C9A46B]/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+              className="p-4 sm:px-6 rounded-2xl luxury-card border border-[#F4C2D7]/45 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-[0_0_32px_rgba(244,194,215,0.16)]"
             >
               <div className="flex items-start sm:items-center gap-3">
-                <PhoneCall className="w-5 h-5 text-[#C9A46B] shrink-0 mt-0.5 sm:mt-0" />
+                <PhoneCall className="w-5 h-5 text-[#F4C2D7] shrink-0 mt-0.5 sm:mt-0" />
                 <div className="space-y-1">
-                  <p className="text-sm font-semibold text-[#F3EFE6]">
+                  <p className="text-sm font-semibold text-[#FAF4F7]">
                     Chamada de vídeo recebida de {incomingRing.fromName}
                   </p>
-                  <p className="text-xs text-[#C8CCD4]">
+                  <p className="text-xs text-[#C9BAC4]">
                     {incomingRing.planName && incomingRing.planPriceCents !== undefined
                       ? `Plano selecionado: ${incomingRing.planName} · ${BRL_FORMATTER.format(incomingRing.planPriceCents / 100)} (${incomingRing.planDurationMinutes || 0} min)`
                       : 'Selecione um plano pré-definido e autorize a cobrança para iniciar o vídeo.'}
@@ -1423,7 +1682,7 @@ export default function App() {
                       aria-label="Plano da videochamada"
                       value={selectedRingPlan?.id || ''}
                       onChange={(e) => setIncomingRingPlanId(e.target.value)}
-                      className="px-3 py-2 text-xs rounded-lg bg-[#0E1014] border border-white/15 text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                      className="px-3.5 py-2 text-xs rounded-full bg-[#0B060F] border border-[#F4C2D7]/25 text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
                     >
                       {activePlans.map((plan) => (
                         <option key={plan.id} value={plan.id}>
@@ -1436,7 +1695,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void handleAcceptIncomingRing()}
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="px-5 py-2 text-xs font-semibold rounded-full bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {!isAdmin &&
                   !callQueue.some((q) => q.id === incomingRing.callId) &&
@@ -1447,7 +1706,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleRejectIncomingRing}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-[#1B1E26] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <PhoneOff className="w-3.5 h-3.5" />
                   <span>Recusar</span>
@@ -1458,7 +1717,7 @@ export default function App() {
 
           {/* Real-time Moderation or Call Status Banner */}
           {noticeBanner && (
-            <div className="px-4 py-3 rounded-lg bg-[#13151A] border border-white/15 flex items-center justify-between gap-4 text-xs text-[#E2C799]">
+            <div className="px-5 py-3 rounded-2xl luxury-card border border-[#F4C2D7]/25 flex items-center justify-between gap-4 text-xs text-[#F4C2D7]">
               <div className="flex items-center gap-2.5">
                 <ShieldAlert className="w-4 h-4 shrink-0" />
                 <span>{noticeBanner}</span>
@@ -1466,7 +1725,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setNoticeBanner(null)}
-                className="text-[#9BA1AE] hover:text-[#F3EFE6] cursor-pointer"
+                className="text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
               >
                 Dispensar
               </button>
@@ -1501,36 +1760,77 @@ export default function App() {
             />
           ) : (
             <>
-              {activeTab === 'call' && (
-                <VideoCallStage
-                  isAdmin={isAdmin}
-                  isGroupRoom={Boolean(activeSession?.isGroupRoom)}
-                  myProfile={myProfile}
-                  modelProfile={modelProfile}
-                  studioState={studioState}
-                  activeCallId={activeSession?.callId || null}
-                  activePartnerName={activeSession?.partnerName || ''}
-                  activePartnerUid={activeSession?.partnerUid || null}
-                  activePlan={activeStagePlan}
-                  localStream={localStream}
-                  remoteStream={remoteStream}
-                  remoteStreams={remoteStreams}
-                  peerConnectionStates={peerConnectionStates}
-                  roomParticipants={roomParticipants}
-                  micEnabled={micEnabled}
-                  camEnabled={camEnabled}
-                  mediaError={mediaError}
-                  connectionState={connectionState}
-                  elapsedSeconds={elapsedSeconds}
-                  wsConnected={wsConnected}
-                  messages={callMessages}
-                  onAcquireMedia={acquireLocalMedia}
-                  onToggleMic={() => toggleMic()}
-                  onToggleCam={toggleCam}
-                  onEndCall={() => void handleEndCall()}
-                  onSendMessage={handleSendMessage}
-                />
-              )}
+              {activeTab === 'call' &&
+                (!isAdmin &&
+                !activeSession &&
+                myProfile?.accessStatus !== 'blocked' &&
+                callQueue.some(
+                  (q) => q.status === 'waiting' || q.status === 'accepted'
+                ) ? (
+                  <SalaDeEspera
+                    request={
+                      callQueue.find(
+                        (q) => q.status === 'waiting' || q.status === 'accepted'
+                      )!
+                    }
+                    modelName={
+                      studioConfig?.modelName ||
+                      studioState?.modelName ||
+                      modelProfile?.displayName ||
+                      'Lorena Noir'
+                    }
+                    modelAvatarUrl={
+                      studioConfig?.modelAvatarUrl || modelProfile?.photoUrl
+                    }
+                    loungeImageUrl={studioConfig?.loungeImageUrl}
+                    modelOnline={modelOnline}
+                    studioState={studioState}
+                    queueSummary={queueSummary}
+                    wsConnected={wsConnected}
+                    localStream={localStream}
+                    micEnabled={micEnabled}
+                    camEnabled={camEnabled}
+                    mediaError={mediaError}
+                    onAcquireMedia={acquireLocalMedia}
+                    onToggleMic={() => toggleMic()}
+                    onToggleCam={toggleCam}
+                    onEnterAcceptedCall={(req) =>
+                      void handleEnterAcceptedCall(req)
+                    }
+                    onCancelRequest={(requestId) =>
+                      updateCallStatus(requestId, 'cancelled')
+                    }
+                  />
+                ) : (
+                  <VideoCallStage
+                    isAdmin={isAdmin}
+                    isGroupRoom={Boolean(activeSession?.isGroupRoom)}
+                    myProfile={myProfile}
+                    modelProfile={modelProfile}
+                    studioState={studioState}
+                    activeCallId={activeSession?.callId || null}
+                    activePartnerName={activeSession?.partnerName || ''}
+                    activePartnerUid={activeSession?.partnerUid || null}
+                    activePlan={activeStagePlan}
+                    localStream={localStream}
+                    remoteStream={remoteStream}
+                    remoteStreams={remoteStreams}
+                    peerConnectionStates={peerConnectionStates}
+                    roomParticipants={roomParticipants}
+                    micEnabled={micEnabled}
+                    camEnabled={camEnabled}
+                    mediaError={mediaError}
+                    connectionState={connectionState}
+                    elapsedSeconds={elapsedSeconds}
+                    wsConnected={wsConnected}
+                    messages={callMessages}
+                    onAcquireMedia={acquireLocalMedia}
+                    onToggleMic={() => toggleMic()}
+                    onToggleCam={toggleCam}
+                    onEndCall={() => void handleEndCall()}
+                    onSendMessage={handleSendMessage}
+                  />
+                ))}
 
               {activeTab === 'users' && isAdmin && (
                 <UserControlPanel
@@ -1545,12 +1845,15 @@ export default function App() {
                   onChangeRatePerMinuteCents={setRatePerMinuteCents}
                   onUpdateStudioState={updateStudioState}
                   onUpdateUserControl={updateUserControl}
+                  onDeleteUserProfile={deleteUserProfile}
                   onSendModeration={sendModerationCommand}
                   onDirectCallUser={handleDirectCallUser}
                   onSavePlan={saveCallPlan}
                   onDeletePlan={deleteCallPlan}
                   onRecordCallHistory={recordCallHistory}
                   onUpdateCallHistoryStatus={updateCallHistoryStatus}
+                  onUpdateCallHistoryRecord={updateCallHistoryRecord}
+                  onDeleteCallHistoryRecord={deleteCallHistoryRecord}
                   onUpdateInterestMessageStatus={updateInterestMessageStatus}
                   onDeleteInterestMessage={deleteInterestMessage}
                 />
@@ -1560,18 +1863,31 @@ export default function App() {
                 <div className="space-y-8">
                   <CallQueuePanel
                     isAdmin={isAdmin}
+                    entryIntent={entryIntent}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
                     studioState={studioState}
+                    studioConfig={studioConfig}
+                    galleryItems={galleryItems}
                     callQueue={callQueue}
                     callPlans={callPlans}
                     peers={peers}
                     roomParticipants={roomParticipants}
+                    queueSummary={queueSummary}
+                    wsConnected={wsConnected}
+                    localStream={localStream}
+                    micEnabled={micEnabled}
+                    camEnabled={camEnabled}
+                    mediaError={mediaError}
+                    onAcquireMedia={acquireLocalMedia}
+                    onToggleMic={() => toggleMic()}
+                    onToggleCam={toggleCam}
                     onRequestCall={requestVideoCall}
                     onDirectCallModel={handleVisitorDirectCallModel}
                     onJoinGroupRoom={handleVisitorJoinGroupRoom}
                     onAcceptAndCall={handleAcceptQueueAndCall}
                     onUpdateCallStatus={updateCallStatus}
+                    onDeleteCallRequest={deleteCallRequest}
                     onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
                   />
                   {!isAdmin && (
@@ -1617,29 +1933,45 @@ export default function App() {
                       onChangeRatePerMinuteCents={setRatePerMinuteCents}
                       onUpdateStudioState={updateStudioState}
                       onUpdateUserControl={updateUserControl}
+                      onDeleteUserProfile={deleteUserProfile}
                       onSendModeration={sendModerationCommand}
                       onDirectCallUser={handleDirectCallUser}
                       onSavePlan={saveCallPlan}
                       onDeletePlan={deleteCallPlan}
                       onRecordCallHistory={recordCallHistory}
                       onUpdateCallHistoryStatus={updateCallHistoryStatus}
+                      onUpdateCallHistoryRecord={updateCallHistoryRecord}
+                      onDeleteCallHistoryRecord={deleteCallHistoryRecord}
                       onUpdateInterestMessageStatus={updateInterestMessageStatus}
                       onDeleteInterestMessage={deleteInterestMessage}
                     />
                     <CallQueuePanel
                       isAdmin={isAdmin}
+                      entryIntent={entryIntent}
                       myProfile={myProfile}
                       modelProfile={modelProfile}
                       studioState={studioState}
+                      studioConfig={studioConfig}
+                      galleryItems={galleryItems}
                       callQueue={callQueue}
                       callPlans={callPlans}
                       peers={peers}
                       roomParticipants={roomParticipants}
+                      queueSummary={queueSummary}
+                      wsConnected={wsConnected}
+                      localStream={localStream}
+                      micEnabled={micEnabled}
+                      camEnabled={camEnabled}
+                      mediaError={mediaError}
+                      onAcquireMedia={acquireLocalMedia}
+                      onToggleMic={() => toggleMic()}
+                      onToggleCam={toggleCam}
                       onRequestCall={requestVideoCall}
                       onDirectCallModel={handleVisitorDirectCallModel}
                       onJoinGroupRoom={handleVisitorJoinGroupRoom}
                       onAcceptAndCall={handleAcceptQueueAndCall}
                       onUpdateCallStatus={updateCallStatus}
+                      onDeleteCallRequest={deleteCallRequest}
                       onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
                     />
                   </div>
@@ -1647,18 +1979,31 @@ export default function App() {
                   <div className="space-y-8">
                     <CallQueuePanel
                       isAdmin={isAdmin}
+                      entryIntent={entryIntent}
                       myProfile={myProfile}
                       modelProfile={modelProfile}
                       studioState={studioState}
+                      studioConfig={studioConfig}
+                      galleryItems={galleryItems}
                       callQueue={callQueue}
                       callPlans={callPlans}
                       peers={peers}
                       roomParticipants={roomParticipants}
+                      queueSummary={queueSummary}
+                      wsConnected={wsConnected}
+                      localStream={localStream}
+                      micEnabled={micEnabled}
+                      camEnabled={camEnabled}
+                      mediaError={mediaError}
+                      onAcquireMedia={acquireLocalMedia}
+                      onToggleMic={() => toggleMic()}
+                      onToggleCam={toggleCam}
                       onRequestCall={requestVideoCall}
                       onDirectCallModel={handleVisitorDirectCallModel}
                       onJoinGroupRoom={handleVisitorJoinGroupRoom}
                       onAcceptAndCall={handleAcceptQueueAndCall}
                       onUpdateCallStatus={updateCallStatus}
+                      onDeleteCallRequest={deleteCallRequest}
                       onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
                     />
                     <RatingSystem
@@ -1680,6 +2025,7 @@ export default function App() {
       )}
 
       <ToastOverlay toasts={toasts} onDismiss={dismissToast} />
-    </div>
+      </div>
+    </MotionConfig>
   );
 }

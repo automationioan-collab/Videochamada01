@@ -99,15 +99,15 @@ const StarSelector: React.FC<StarSelectorProps> = ({
                 onChange(Math.max(1, (value || 2) - 1));
               }
             }}
-            className={`w-10 h-10 rounded-lg border flex items-center justify-center transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9A46B] ${
+            className={`w-10 h-10 rounded-xl border flex items-center justify-center transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4C2D7] ${
               filled
-                ? 'bg-[#C9A46B]/15 border-[#C9A46B]/60 text-[#C9A46B]'
-                : 'bg-[#0E1014] border-white/10 text-[#6F7685] hover:border-white/25 hover:text-[#C8CCD4]'
+                ? 'bg-[#281837] border-[#F4C2D7] text-[#F4C2D7]'
+                : 'bg-[#0B060F] border-[#F4C2D7]/20 text-[#938291] hover:border-[#F4C2D7]/45 hover:text-[#FAF4F7]'
             }`}
           >
             <Star
               className={`w-5 h-5 transition-transform ${
-                filled ? 'fill-[#C9A46B] text-[#C9A46B] scale-105' : ''
+                filled ? 'fill-[#F4C2D7] text-[#F4C2D7] scale-105' : ''
               }`}
             />
           </button>
@@ -135,7 +135,6 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
     comment: string;
   } | null>(null);
 
-  // Per-row inline rating state for unrated calls in the visitor history list
   const [inlineDraftId, setInlineDraftId] = useState<string | null>(null);
   const [inlineRating, setInlineRating] = useState<number>(5);
   const [inlineHover, setInlineHover] = useState<number>(0);
@@ -147,7 +146,6 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
     return callHistory.find((r) => r.callId === endedSession.callId) ?? null;
   }, [callHistory, endedSession]);
 
-  // Reset form when a brand-new endedSession starts
   useEffect(() => {
     if (endedSession) {
       setSelectedRating(5);
@@ -157,7 +155,6 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
     }
   }, [endedSession?.callId]);
 
-  // Auto-flush rating once the Firestore callHistory record lands after call completion
   useEffect(() => {
     if (!pendingFlush || !matchedEndedRecord) return;
     if (matchedEndedRecord.callId !== pendingFlush.callId) return;
@@ -190,7 +187,6 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
     if (!endedSession || selectedRating < 1) return;
 
     if (!matchedEndedRecord) {
-      // History record is still syncing from model/server; queue flush
       setSubmitting(true);
       setPendingFlush({
         callId: endedSession.callId,
@@ -249,20 +245,20 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
       {endedSession && (
         <section
           aria-labelledby="post-call-rating-title"
-          className="bg-[#13151A] border border-[#C9A46B]/35 rounded-xl p-6 space-y-5"
+          className="luxury-card border border-[#F4C2D7]/35 rounded-2xl p-6 space-y-5"
         >
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
-              <p className="text-xs font-medium text-[#C9A46B]">
+              <p className="text-xs font-medium text-[#F4C2D7]">
                 Avaliação pós-chamada
               </p>
               <h2
                 id="post-call-rating-title"
-                className="font-display text-2xl font-semibold text-[#F3EFE6]"
+                className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]"
               >
                 Como foi sua videochamada com {endedSession.partnerName || modelName}?
               </h2>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-[#9BA1AE]">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[#C9BAC4]">
                 <span>{endedSession.partnerName || modelName}</span>
                 {endedSession.planName && (
                   <>
@@ -287,7 +283,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                 type="button"
                 onClick={onDismissEndedSession}
                 aria-label="Fechar avaliação"
-                className="p-2 rounded-lg bg-[#0E1014] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors shrink-0 cursor-pointer"
+                className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors shrink-0 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -295,7 +291,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
           </div>
 
           {matchedEndedRecord?.rating ? (
-            <div className="pt-4 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="pt-4 border-t border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-sm font-medium text-[#86EFAC]">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -308,18 +304,18 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                         key={star}
                         className={`w-4 h-4 ${
                           star <= (matchedEndedRecord.rating ?? 0)
-                            ? 'fill-[#C9A46B] text-[#C9A46B]'
-                            : 'text-[#4B5262]'
+                            ? 'fill-[#F4C2D7] text-[#F4C2D7]'
+                            : 'text-[#938291]/40'
                         }`}
                       />
                     ))}
                   </div>
-                  <span className="text-xs font-mono tabular-nums text-[#E2C799]">
+                  <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
                     {matchedEndedRecord.rating}/5
                   </span>
                 </div>
                 {matchedEndedRecord.ratingComment && (
-                  <p className="text-xs text-[#C8CCD4] max-w-2xl">
+                  <p className="text-xs text-[#C9BAC4] max-w-2xl">
                     "{matchedEndedRecord.ratingComment}"
                   </p>
                 )}
@@ -329,7 +325,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                 <button
                   type="button"
                   onClick={onDismissEndedSession}
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   Concluir
                 </button>
@@ -345,7 +341,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                     onChange={setSelectedRating}
                     onHover={setHoverRating}
                   />
-                  <span className="text-xs font-medium text-[#E2C799]">
+                  <span className="text-xs font-medium text-[#F4C2D7]">
                     {RATING_LABELS[hoverRating > 0 ? hoverRating : selectedRating]}
                   </span>
                 </div>
@@ -355,11 +351,11 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <label
                     htmlFor="post-call-rating-comment"
-                    className="text-xs font-medium text-[#9BA1AE]"
+                    className="text-xs font-medium text-[#C9BAC4]"
                   >
                     Comentário sobre vídeo, áudio e atendimento (opcional)
                   </label>
-                  <span className="text-[11px] font-mono tabular-nums text-[#727988]">
+                  <span className="text-[11px] font-mono tabular-nums text-[#938291]">
                     {comment.length}/300
                   </span>
                 </div>
@@ -370,12 +366,12 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
                   placeholder="Conte como foi a qualidade de imagem, som e conexão..."
-                  className="w-full bg-[#0E1014] border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-[#F3EFE6] placeholder-[#6F7685] focus:outline-none focus:border-[#C9A46B] resize-none"
+                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2.5 text-sm text-[#FAF4F7] placeholder-[#938291] focus:outline-none focus:border-[#F4C2D7] resize-none"
                 />
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                <p className="text-[11px] text-[#9BA1AE]">
+                <p className="text-[11px] text-[#C9BAC4]">
                   {pendingFlush
                     ? 'Sincronizando registro da sessão no Firebase...'
                     : 'Sua nota é vinculada ao registro finalizado da chamada.'}
@@ -386,7 +382,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                     <button
                       type="button"
                       onClick={onDismissEndedSession}
-                      className="px-4 py-2 text-xs font-medium rounded-lg bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       Avaliar Depois
                     </button>
@@ -394,7 +390,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                   <button
                     type="submit"
                     disabled={submitting || selectedRating < 1}
-                    className="px-5 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {submitting ? 'Salvando Avaliação...' : 'Enviar Avaliação'}
                   </button>
@@ -409,25 +405,25 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
       {showHistoryList && (
         <section
           aria-labelledby="visitor-ratings-history-title"
-          className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden"
+          className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
         >
-          <div className="p-6 border-b border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="space-y-1">
               <h2
                 id="visitor-ratings-history-title"
-                className="font-display text-xl font-semibold text-[#F3EFE6]"
+                className="font-display text-2xl font-semibold text-[#FAF4F7]"
               >
                 Avaliações das suas Videochamadas
               </h2>
-              <p className="text-xs text-[#9BA1AE]">
+              <p className="text-xs text-[#C9BAC4]">
                 Avalie a qualidade das sessões concluídas ou consulte as notas registradas.
               </p>
             </div>
 
             {averageScore !== null && (
               <div className="text-left sm:text-right">
-                <p className="text-xs text-[#9BA1AE]">Sua média enviada</p>
-                <p className="text-sm font-mono tabular-nums font-semibold text-[#E2C799]">
+                <p className="text-xs text-[#938291]">Sua média enviada</p>
+                <p className="text-sm font-mono tabular-nums font-semibold text-[#F4C2D7]">
                   {averageScore.toFixed(1)} / 5 ({ratedRecords.length}{' '}
                   {ratedRecords.length === 1 ? 'avaliação' : 'avaliações'})
                 </p>
@@ -437,15 +433,15 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
 
           {callHistory.length === 0 ? (
             <div className="p-8 text-center space-y-1.5">
-              <p className="text-sm font-medium text-[#F3EFE6]">
+              <p className="text-sm font-medium text-[#FAF4F7]">
                 Nenhuma videochamada concluída registrada ainda.
               </p>
-              <p className="text-xs text-[#9BA1AE]">
+              <p className="text-xs text-[#C9BAC4]">
                 Assim que encerrar uma chamada com {modelName}, o formulário de avaliação ficará disponível aqui automaticamente.
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-white/5">
+            <div className="divide-y divide-[#F4C2D7]/10">
               {unratedRecords.map((record) => {
                 const isEditing = inlineDraftId === record.id;
                 const isSaving = savingInlineId === record.id;
@@ -453,10 +449,10 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                   <div key={record.id} className="p-5 space-y-3">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="space-y-1">
-                        <p className="text-sm font-medium text-[#F3EFE6]">
+                        <p className="text-sm font-medium text-[#FAF4F7]">
                           {record.planName || `Videochamada com ${modelName}`}
                         </p>
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-[#9BA1AE]">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-[#C9BAC4]">
                           <span className="font-mono tabular-nums">
                             {formatRecordDate(record)}
                           </span>
@@ -465,7 +461,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                             {formatDurationClock(record.durationSeconds)}
                           </span>
                           <span aria-hidden="true">·</span>
-                          <span className="font-mono tabular-nums text-[#E2C799]">
+                          <span className="font-mono tabular-nums text-[#F4C2D7]">
                             {BRL_FORMATTER.format(record.amountCents / 100)}
                           </span>
                         </div>
@@ -480,9 +476,9 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                             setInlineHover(0);
                             setInlineComment('');
                           }}
-                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          <Star className="w-3.5 h-3.5 fill-[#0B0C0F]" />
+                          <Star className="w-3.5 h-3.5 fill-[#190B15]" />
                           <span>Avaliar Chamada</span>
                         </button>
                       )}
@@ -491,7 +487,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                     {isEditing && (
                       <form
                         onSubmit={(e) => void handleInlineSubmit(e, record.id)}
-                        className="pt-3 border-t border-white/10 space-y-3"
+                        className="pt-3 border-t border-[#F4C2D7]/15 space-y-3"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <StarSelector
@@ -501,7 +497,7 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                             onHover={setInlineHover}
                             label={`Avaliar chamada de ${formatRecordDate(record)}`}
                           />
-                          <span className="text-xs text-[#E2C799]">
+                          <span className="text-xs text-[#F4C2D7]">
                             {RATING_LABELS[inlineHover > 0 ? inlineHover : inlineRating]}
                           </span>
                         </div>
@@ -513,20 +509,20 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                             value={inlineComment}
                             onChange={(e) => setInlineComment(e.target.value)}
                             placeholder="Comentário opcional sobre qualidade de vídeo/áudio..."
-                            className="flex-1 bg-[#0E1014] border border-white/10 rounded-lg px-3.5 py-2 text-sm text-[#F3EFE6] placeholder-[#6F7685] focus:outline-none focus:border-[#C9A46B]"
+                            className="flex-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm text-[#FAF4F7] placeholder-[#938291] focus:outline-none focus:border-[#F4C2D7]"
                           />
                           <div className="flex items-center gap-2 shrink-0">
                             <button
                               type="button"
                               onClick={() => setInlineDraftId(null)}
-                              className="px-3.5 py-2 text-xs font-medium rounded-lg bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                              className="px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                             >
                               Cancelar
                             </button>
                             <button
                               type="submit"
                               disabled={isSaving}
-                              className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                              className="px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                             >
                               {isSaving ? 'Salvando...' : 'Salvar Nota'}
                             </button>
@@ -544,10 +540,10 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                   className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
                   <div className="space-y-1">
-                    <p className="text-sm font-medium text-[#F3EFE6]">
+                    <p className="text-sm font-medium text-[#FAF4F7]">
                       {record.planName || `Videochamada com ${modelName}`}
                     </p>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-[#9BA1AE]">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[#C9BAC4]">
                       <span className="font-mono tabular-nums">
                         {formatRecordDate(record)}
                       </span>
@@ -556,12 +552,12 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                         {formatDurationClock(record.durationSeconds)}
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span className="font-mono tabular-nums text-[#E2C799]">
+                      <span className="font-mono tabular-nums text-[#F4C2D7]">
                         {BRL_FORMATTER.format(record.amountCents / 100)}
                       </span>
                     </div>
                     {record.ratingComment && (
-                      <p className="text-xs text-[#C8CCD4] pt-0.5">
+                      <p className="text-xs text-[#C9BAC4] pt-0.5">
                         "{record.ratingComment}"
                       </p>
                     )}
@@ -577,13 +573,13 @@ export const RatingSystem: React.FC<RatingSystemProps> = ({
                           key={star}
                           className={`w-4 h-4 ${
                             star <= (record.rating ?? 0)
-                              ? 'fill-[#C9A46B] text-[#C9A46B]'
-                              : 'text-[#3C4250]'
+                              ? 'fill-[#F4C2D7] text-[#F4C2D7]'
+                              : 'text-[#938291]/40'
                           }`}
                         />
                       ))}
                     </div>
-                    <span className="text-xs font-mono tabular-nums text-[#E2C799]">
+                    <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
                       {record.rating}/5
                     </span>
                   </div>

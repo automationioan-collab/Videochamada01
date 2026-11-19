@@ -2,34 +2,55 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   CreditCard,
+  Lock,
   PhoneCall,
   PhoneOff,
+  Trash2,
   Users,
   Video,
   X,
 } from 'lucide-react';
 import { isDndActiveNow } from '../lib/schedule';
+import { DEFAULT_STUDIO_CONFIG } from '../lib/studioDefaults';
 import { GaleriaModelo } from './GaleriaModelo';
+import { SalaDeEspera } from './SalaDeEspera';
+import { TechSpotlightCard } from './TechEffects';
 import type {
+  CallEntryIntent,
   CallPaymentStatus,
   CallPlan,
   CallRequest,
   CallStatus,
+  GalleryItemRecord,
   PresencePeer,
+  QueueWaitSummary,
   RoomParticipant,
+  StudioConfig,
   StudioProfile,
   StudioState,
 } from '../types/studio';
 
 interface CallQueuePanelProps {
   isAdmin: boolean;
+  entryIntent?: CallEntryIntent;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
   studioState: StudioState | null;
+  studioConfig?: StudioConfig | null;
+  galleryItems?: GalleryItemRecord[];
   callQueue: CallRequest[];
   callPlans: CallPlan[];
   peers: PresencePeer[];
   roomParticipants: RoomParticipant[];
+  queueSummary?: QueueWaitSummary;
+  wsConnected?: boolean;
+  localStream?: MediaStream | null;
+  micEnabled?: boolean;
+  camEnabled?: boolean;
+  mediaError?: string | null;
+  onAcquireMedia?: () => Promise<MediaStream | null>;
+  onToggleMic?: () => void;
+  onToggleCam?: () => void;
   onRequestCall: (topic: string, plan: CallPlan) => Promise<string | null>;
   onDirectCallModel: (topic: string, plan: CallPlan) => Promise<void>;
   onJoinGroupRoom: (topic: string, plan: CallPlan) => Promise<void>;
@@ -39,6 +60,7 @@ interface CallQueuePanelProps {
     status: CallStatus,
     paymentStatus?: CallPaymentStatus
   ) => Promise<void>;
+  onDeleteCallRequest?: (requestId: string) => Promise<void>;
   onEnterAcceptedCall: (req: CallRequest) => void;
 }
 
@@ -58,25 +80,38 @@ const CALL_STATUS_LABEL: Record<CallStatus, string> = {
 
 export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   isAdmin,
+  entryIntent = 'group',
   myProfile,
   modelProfile,
   studioState,
+  studioConfig,
+  galleryItems,
   callQueue,
   callPlans,
   peers,
   roomParticipants,
+  queueSummary,
+  wsConnected = false,
+  localStream = null,
+  micEnabled = true,
+  camEnabled = true,
+  mediaError = null,
+  onAcquireMedia,
+  onToggleMic,
+  onToggleCam,
   onRequestCall,
   onDirectCallModel,
   onJoinGroupRoom,
   onAcceptAndCall,
   onUpdateCallStatus,
+  onDeleteCallRequest,
   onEnterAcceptedCall,
 }) => {
   const [topic, setTopic] = useState('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<'pix' | 'card'>('pix');
   const [paymentAuthorized, setPaymentAuthorized] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState<'group' | 'private' | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [loungeFailed, setLoungeFailed] = useState(false);
 
@@ -110,18 +145,40 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ? peers.some((p) => p.uid === modelProfile.uid)
     : false;
   const dndBlocked = isDndActiveNow(studioState);
+  const modelBusyInCall = Boolean(studioState?.activeCallId);
   const canDirectCallNow =
     Boolean(modelProfile) &&
     modelOnline &&
     !dndBlocked &&
+    !modelBusyInCall &&
     (studioState?.isLive ?? true) &&
     (studioState?.callMode ?? 'open') === 'open';
   const displayModelName =
-    studioState?.modelName || modelProfile?.displayName || 'Lorena Noir';
+    studioConfig?.modelName ||
+    studioState?.modelName ||
+    modelProfile?.displayName ||
+    DEFAULT_STUDIO_CONFIG.modelName;
+  const avatarSrc =
+    studioConfig?.modelAvatarUrl ||
+    modelProfile?.photoUrl ||
+    DEFAULT_STUDIO_CONFIG.modelAvatarUrl;
+  const loungeSrc =
+    studioConfig?.loungeImageUrl || DEFAULT_STUDIO_CONFIG.loungeImageUrl;
 
-  const buildCleanTopic = (plan: CallPlan) =>
-    topic.trim() ||
-    `${plan.name} · Pagamento ${paymentMethod === 'pix' ? 'PIX' : 'Cartão'}`;
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarSrc]);
+
+  useEffect(() => {
+    setLoungeFailed(false);
+  }, [loungeSrc]);
+
+  const buildCleanTopic = (plan: CallPlan, mode: 'group' | 'private') => {
+    const base =
+      topic.trim() ||
+      `${plan.name} · Pagamento ${paymentMethod === 'pix' ? 'PIX' : 'Cartão'}`;
+    return mode === 'private' ? `[Privativa 1-para-1] ${base}` : base;
+  };
 
   const handleJoinSharedRoom = async () => {
     if (
@@ -135,17 +192,16 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
-    setSubmitting(true);
+    setSubmitting('group');
     try {
-      await onJoinGroupRoom(buildCleanTopic(selectedPlan), selectedPlan);
+      await onJoinGroupRoom(buildCleanTopic(selectedPlan, 'group'), selectedPlan);
       setTopic('');
     } finally {
-      setSubmitting(false);
+      setSubmitting(null);
     }
   };
 
-  const handleRequestSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handlePrivateOneOnOneCall = async () => {
     if (
       submitting ||
       isBlocked ||
@@ -156,9 +212,9 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
-    setSubmitting(true);
+    setSubmitting('private');
     try {
-      const cleanTopic = buildCleanTopic(selectedPlan);
+      const cleanTopic = buildCleanTopic(selectedPlan, 'private');
       if (canDirectCallNow) {
         await onDirectCallModel(cleanTopic, selectedPlan);
       } else {
@@ -166,42 +222,58 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
       }
       setTopic('');
     } finally {
-      setSubmitting(false);
+      setSubmitting(null);
+    }
+  };
+
+  const handleRequestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (entryIntent === 'private') {
+      await handlePrivateOneOnOneCall();
+    } else {
+      await handleJoinSharedRoom();
     }
   };
 
   if (isAdmin) {
     const waitingCalls = callQueue.filter((c) => c.status === 'waiting');
     const historyCalls = callQueue.filter((c) => c.status !== 'waiting').slice(0, 12);
+    const totalEstimatedQueueMinutes = waitingCalls.reduce(
+      (acc, req) => acc + (req.planDurationMinutes || 10),
+      0
+    );
 
     return (
       <div className="space-y-8">
-        <section className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-          <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between">
+        <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+          <div className="px-6 py-5 border-b border-[#F4C2D7]/15 flex items-center justify-between">
             <div>
-              <h2 className="font-display text-2xl font-semibold text-[#F3EFE6]">
+              <h2 className="font-display text-2xl font-semibold text-[#FAF4F7]">
                 Fila de Chamadas em Tempo Real
               </h2>
-              <p className="text-xs text-[#9BA1AE]">
+              <p className="text-xs text-[#C9BAC4]">
                 Aceite solicitações para abrir a videochamada instantaneamente com o usuário.
               </p>
             </div>
-            <span className="text-xs font-mono tabular-nums text-[#E2C799]">
+            <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
               {waitingCalls.length} aguardando
+              {waitingCalls.length > 0
+                ? ` · ~${totalEstimatedQueueMinutes} min estimados`
+                : ''}
             </span>
           </div>
 
           {waitingCalls.length === 0 ? (
             <div className="p-12 text-center space-y-2">
-              <p className="text-sm font-medium text-[#F3EFE6]">
+              <p className="text-sm font-medium text-[#FAF4F7]">
                 Nenhuma solicitação pendente na fila.
               </p>
-              <p className="text-xs text-[#9BA1AE]">
+              <p className="text-xs text-[#C9BAC4]">
                 Novos pedidos aparecem automaticamente aqui ou você pode iniciar uma chamada na aba Usuários.
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-white/5">
+            <div className="divide-y divide-[#F4C2D7]/10">
               {waitingCalls.map((req) => {
                 const isOnline = peers.some((p) => p.uid === req.userId);
                 return (
@@ -215,22 +287,22 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                           src={req.userPhotoUrl}
                           alt={req.userName}
                           referrerPolicy="no-referrer"
-                          className="w-10 h-10 rounded-full object-cover shrink-0"
+                          className="w-10 h-10 rounded-full object-cover shrink-0 border border-[#F4C2D7]/25"
                         />
                       ) : (
-                        <div className="w-10 h-10 rounded-full bg-[#1B1E26] flex items-center justify-center text-sm font-semibold text-[#C9A46B] shrink-0">
+                        <div className="w-10 h-10 rounded-full bg-[#21142D] flex items-center justify-center text-sm font-semibold text-[#F4C2D7] shrink-0">
                           {req.userName.slice(0, 1).toUpperCase()}
                         </div>
                       )}
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-[#F3EFE6] truncate">
+                        <p className="text-sm font-medium text-[#FAF4F7] truncate">
                           {req.userName}
                         </p>
-                        <p className="text-xs text-[#9BA1AE] truncate">
+                        <p className="text-xs text-[#C9BAC4] truncate">
                           {req.topic} · {isOnline ? 'Online agora' : 'Offline'}
                         </p>
                         {req.planName && typeof req.planPriceCents === 'number' && (
-                          <p className="text-[11px] font-mono tabular-nums text-[#E2C799] mt-0.5">
+                          <p className="text-[11px] font-mono tabular-nums text-[#F4C2D7] mt-0.5">
                             {req.planName} ·{' '}
                             {BRL_FORMATTER.format(req.planPriceCents / 100)} ·{' '}
                             {req.paymentStatus === 'captured'
@@ -245,7 +317,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                       <button
                         type="button"
                         onClick={() => void onAcceptAndCall(req)}
-                        className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap cursor-pointer"
+                        className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-colors whitespace-nowrap cursor-pointer"
                       >
                         <Video className="w-3.5 h-3.5" />
                         <span>Aceitar e Conectar Vídeo</span>
@@ -255,7 +327,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                         onClick={() =>
                           void onUpdateCallStatus(req.id, 'rejected', 'refunded')
                         }
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-[#1B1E26] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors whitespace-nowrap cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors whitespace-nowrap cursor-pointer"
                       >
                         <X className="w-3.5 h-3.5" />
                         <span>Recusar</span>
@@ -269,28 +341,40 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         </section>
 
         {historyCalls.length > 0 && (
-          <section className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-white/10">
-              <h3 className="text-sm font-semibold text-[#F3EFE6]">
+          <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#F4C2D7]/15">
+              <h3 className="text-sm font-semibold text-[#FAF4F7]">
                 Histórico Recente de Sessões
               </h3>
             </div>
-            <div className="divide-y divide-white/5">
+            <div className="divide-y divide-[#F4C2D7]/10">
               {historyCalls.map((item) => (
                 <div
                   key={item.id}
                   className="px-6 py-3 flex items-center justify-between gap-4 text-xs"
                 >
                   <div className="min-w-0">
-                    <span className="font-medium text-[#F3EFE6]">
+                    <span className="font-medium text-[#FAF4F7]">
                       {item.userName}
                     </span>
-                    <span className="text-[#727988] mx-2">·</span>
-                    <span className="text-[#9BA1AE] truncate">{item.topic}</span>
+                    <span className="text-[#938291] mx-2">·</span>
+                    <span className="text-[#C9BAC4] truncate">{item.topic}</span>
                   </div>
-                  <span className="text-[#9BA1AE] whitespace-nowrap shrink-0">
-                    {CALL_STATUS_LABEL[item.status]}
-                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-[#C9BAC4] whitespace-nowrap">
+                      {CALL_STATUS_LABEL[item.status]}
+                    </span>
+                    {onDeleteCallRequest && (
+                      <button
+                        type="button"
+                        onClick={() => void onDeleteCallRequest(item.id)}
+                        aria-label={`Remover registro de ${item.userName}`}
+                        className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -300,71 +384,167 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     );
   }
 
+  const resolvedQueueSummary: QueueWaitSummary = queueSummary ?? {
+    totalWaiting: 0,
+    myPosition: 0,
+    aheadCount: 0,
+    activeCallRemainingSeconds: 0,
+    aheadQueueSeconds: 0,
+    totalEstimatedWaitSeconds: 0,
+    updatedAtMs: 0,
+  };
+
+  // Dedicated visual Waiting Room when visitor has a pending/accepted call request
+  if (
+    !isBlocked &&
+    activeRequest &&
+    (activeRequest.status === 'waiting' || activeRequest.status === 'accepted')
+  ) {
+    return (
+      <div className="space-y-12">
+        <SalaDeEspera
+          request={activeRequest}
+          modelName={displayModelName}
+          modelAvatarUrl={avatarSrc}
+          loungeImageUrl={loungeSrc}
+          modelOnline={modelOnline}
+          studioState={studioState}
+          queueSummary={resolvedQueueSummary}
+          wsConnected={wsConnected}
+          localStream={localStream}
+          micEnabled={micEnabled}
+          camEnabled={camEnabled}
+          mediaError={mediaError}
+          onAcquireMedia={onAcquireMedia ?? (async () => null)}
+          onToggleMic={onToggleMic ?? (() => {})}
+          onToggleCam={onToggleCam ?? (() => {})}
+          onEnterAcceptedCall={onEnterAcceptedCall}
+          onCancelRequest={(requestId) =>
+            onUpdateCallStatus(requestId, 'cancelled')
+          }
+        />
+
+        <GaleriaModelo
+          modelName={displayModelName}
+          items={galleryItems}
+          ctaDisabled={true}
+          ctaLabel={
+            studioConfig?.groupButtonLabel ||
+            DEFAULT_STUDIO_CONFIG.groupButtonLabel
+          }
+          privateCtaLabel={
+            studioConfig?.privateButtonLabel ||
+            DEFAULT_STUDIO_CONFIG.privateButtonLabel
+          }
+          onPrimaryAction={() =>
+            window.scrollTo({ top: 0, behavior: 'smooth' })
+          }
+        />
+      </div>
+    );
+  }
+
   // Viewer / Client Queue & Model Availability View
   return (
     <div className="space-y-12">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
-      <section className="lg:col-span-7 bg-[#13151A] border border-white/10 rounded-xl p-6 sm:p-8 flex flex-col justify-between space-y-6">
+      <TechSpotlightCard className="lg:col-span-7 luxury-card border border-[#F4C2D7]/20 rounded-2xl p-6 sm:p-8 flex flex-col justify-between space-y-6">
         <div className="space-y-4">
           <div className="flex items-center gap-4">
-            {!avatarFailed ? (
+            {!avatarFailed && avatarSrc ? (
               <img
-                src="/src/assets/images/model_avatar_camila_1794946401641.jpg"
+                src={avatarSrc}
                 alt={displayModelName}
                 referrerPolicy="no-referrer"
                 onError={() => setAvatarFailed(true)}
-                className="w-16 h-16 rounded-full object-cover border border-white/15 shrink-0"
+                className="w-16 h-16 rounded-full object-cover border border-[#F4C2D7]/35 shrink-0"
               />
             ) : (
-              <div className="w-16 h-16 rounded-full bg-[#1B1E26] flex items-center justify-center font-display text-2xl text-[#C9A46B]">
-                L
+              <div className="w-16 h-16 rounded-full bg-[#21142D] flex items-center justify-center font-display text-2xl text-[#F4C2D7]">
+                {displayModelName.slice(0, 1).toUpperCase()}
               </div>
             )}
             <div>
-              <h2 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+              <h2 className="font-display text-3xl font-semibold text-[#FAF4F7]">
                 {displayModelName}
               </h2>
-              <p className="text-xs text-[#9BA1AE] font-mono tabular-nums">
+              <p className="text-xs text-[#C9BAC4] font-mono tabular-nums">
                 {studioState?.isLive ?? true
                   ? 'Estúdio Ao Vivo'
                   : 'Estúdio Pausado'}{' '}
                 ·{' '}
                 {modelOnline
-                  ? 'Lorena Noir conectada agora'
+                  ? `${displayModelName} conectada agora`
                   : 'Sala aberta'}{' '}
                 · {roomParticipants.length} na videochamada agora
               </p>
             </div>
           </div>
 
-          <p className="text-sm text-[#C8CCD4] leading-relaxed">
-            {studioState?.headline ||
-              'Atendimento privado e sala aberta em videochamada ao vivo com Lorena Noir.'}
+          <p className="text-sm text-[#C9BAC4] leading-relaxed">
+            {studioConfig?.headline ||
+              studioState?.headline ||
+              DEFAULT_STUDIO_CONFIG.headline}
           </p>
+
+          {(resolvedQueueSummary.totalWaiting > 0 || modelBusyInCall) &&
+            !activeRequest && (
+              <div className="px-4 py-2.5 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/25 text-xs text-[#C9BAC4] flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  {modelBusyInCall
+                    ? `${displayModelName} está em atendimento privativo no momento`
+                    : `${resolvedQueueSummary.totalWaiting} ${
+                        resolvedQueueSummary.totalWaiting === 1
+                          ? 'internauta aguardando'
+                          : 'internautas aguardando'
+                      } na fila`}
+                </span>
+                <span className="font-mono tabular-nums text-[#F4C2D7]">
+                  Espera est.: ~
+                  {Math.max(
+                    1,
+                    Math.ceil(
+                      resolvedQueueSummary.totalEstimatedWaitSeconds / 60
+                    )
+                  )}{' '}
+                  min
+                </span>
+              </div>
+            )}
+
+          {entryIntent === 'private' && (
+            <div className="px-4 py-2.5 rounded-xl bg-[#21142D] border border-[#F4C2D7]/40 text-xs text-[#F8D6E3] flex items-center gap-2">
+              <Lock className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Modo selecionado: Chamada Privativa 1-para-1 (exclusivamente você e{' '}
+                {displayModelName}).
+              </span>
+            </div>
+          )}
         </div>
 
         {isBlocked ? (
-          <div className="p-4 rounded-lg bg-red-950/40 border border-red-500/30 text-xs text-red-200">
+          <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200">
             Seu acesso às videochamadas foi suspenso pela moderação do estúdio.
           </div>
         ) : activeRequest ? (
-          <div className="p-5 rounded-xl bg-[#0B0C0F] border border-white/10 space-y-4">
+          <div className="p-5 rounded-2xl bg-[#0B060F] border border-[#F4C2D7]/20 space-y-4">
             <div className="flex items-center justify-between gap-4">
               <div className="space-y-0.5 min-w-0">
-                <p className="text-xs text-[#9BA1AE]">Sua solicitação atual</p>
-                <p className="text-sm font-medium text-[#F3EFE6] truncate">
+                <p className="text-xs text-[#C9BAC4]">Sua solicitação atual</p>
+                <p className="text-sm font-medium text-[#FAF4F7] truncate">
                   {activeRequest.topic}
                 </p>
                 {activeRequest.planName &&
                   typeof activeRequest.planPriceCents === 'number' && (
-                    <p className="text-xs font-mono tabular-nums text-[#E2C799]">
+                    <p className="text-xs font-mono tabular-nums text-[#F4C2D7]">
                       {activeRequest.planName} ·{' '}
                       {BRL_FORMATTER.format(activeRequest.planPriceCents / 100)}{' '}
                       · Autorizado
                     </p>
                   )}
               </div>
-              <span className="text-xs font-medium text-[#E2C799] whitespace-nowrap shrink-0">
+              <span className="text-xs font-medium text-[#F4C2D7] whitespace-nowrap shrink-0">
                 {CALL_STATUS_LABEL[activeRequest.status]}
               </span>
             </div>
@@ -375,7 +555,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                 <button
                   type="button"
                   onClick={() => onEnterAcceptedCall(activeRequest)}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-colors cursor-pointer"
                 >
                   <Video className="w-4 h-4" />
                   <span>Ir para a Sala de Vídeo</span>
@@ -388,7 +568,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   onClick={() =>
                     void onUpdateCallStatus(activeRequest.id, 'cancelled')
                   }
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
                 >
                   <PhoneOff className="w-3.5 h-3.5" />
                   <span>Cancelar Solicitação</span>
@@ -397,7 +577,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             </div>
           </div>
         ) : activePlans.length === 0 ? (
-          <div className="p-4 rounded-lg bg-[#0B0C0F] border border-white/10 text-xs text-[#9BA1AE]">
+          <div className="p-4 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/20 text-xs text-[#C9BAC4]">
             Nenhum plano pré-definido de videochamada está ativo no momento. Aguarde a modelo liberar os pacotes de atendimento.
           </div>
         ) : (
@@ -405,10 +585,10 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             {/* Step 1: Predefined Plan Selection */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-[#9BA1AE]">
+                <span className="text-xs font-medium text-[#C9BAC4]">
                   1. Escolha um plano pré-definido para sua videochamada
                 </span>
-                <span className="text-[11px] text-[#E2C799]">
+                <span className="text-[11px] text-[#F4C2D7]">
                   Cobrança obrigatória por sessão
                 </span>
               </div>
@@ -422,26 +602,26 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                       type="button"
                       onClick={() => setSelectedPlanId(plan.id)}
                       aria-pressed={isSelected}
-                      className={`p-3.5 rounded-lg border text-left transition-colors flex flex-col justify-between gap-2 cursor-pointer ${
+                      className={`tech-glass-interactive p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 cursor-pointer ${
                         isSelected
-                          ? 'bg-[#1D1912] border-[#C9A46B] text-[#F3EFE6]'
-                          : 'bg-[#0B0C0F] border-white/10 text-[#C8CCD4] hover:border-white/25'
+                          ? 'bg-[#281837] border-[#F4C2D7] text-[#FAF4F7] shadow-[0_0_24px_-8px_rgba(244,194,215,0.45)]'
+                          : 'bg-[#0B060F] border-[#F4C2D7]/15 text-[#C9BAC4] hover:border-[#F4C2D7]/45'
                       }`}
                     >
                       <div className="space-y-1">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[11px] font-mono tabular-nums text-[#E2C799]">
+                          <span className="text-[11px] font-mono tabular-nums text-[#F4C2D7]">
                             {plan.durationMinutes} min
                           </span>
                           {isSelected && (
-                            <Check className="w-3.5 h-3.5 text-[#C9A46B] shrink-0" />
+                            <Check className="w-3.5 h-3.5 text-[#F4C2D7] shrink-0" />
                           )}
                         </div>
-                        <p className="text-xs font-semibold text-[#F3EFE6] line-clamp-1">
+                        <p className="text-xs font-semibold text-[#FAF4F7] line-clamp-1">
                           {plan.name}
                         </p>
                       </div>
-                      <p className="text-lg font-semibold font-mono tabular-nums text-[#F3EFE6]">
+                      <p className="text-lg font-semibold font-mono tabular-nums text-[#FAF4F7]">
                         {BRL_FORMATTER.format(plan.priceCents / 100)}
                       </p>
                     </button>
@@ -450,28 +630,28 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
               </div>
 
               {selectedPlan && (
-                <p className="text-xs text-[#9BA1AE]">
+                <p className="text-xs text-[#C9BAC4]">
                   {selectedPlan.description}
                 </p>
               )}
             </div>
 
             {/* Step 2: Payment Method & Authorization */}
-            <div className="p-3.5 rounded-lg bg-[#0B0C0F] border border-white/10 space-y-3">
+            <div className="p-4 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/15 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-xs text-[#F3EFE6]">
-                  <CreditCard className="w-4 h-4 text-[#C9A46B] shrink-0" />
+                <div className="flex items-center gap-2 text-xs text-[#FAF4F7]">
+                  <CreditCard className="w-4 h-4 text-[#F4C2D7] shrink-0" />
                   <span className="font-medium">Forma de pagamento</span>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#13151A] border border-white/10 rounded-lg self-start sm:self-auto">
+                <div className="flex items-center gap-1 p-1 bg-[#150D1D] border border-[#F4C2D7]/15 rounded-full self-start sm:self-auto">
                   <button
                     type="button"
                     onClick={() => setPaymentMethod('pix')}
-                    className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       paymentMethod === 'pix'
-                        ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                        : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                        ? 'luxury-rose-cta font-semibold'
+                        : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                     }`}
                   >
                     PIX Instantâneo
@@ -479,10 +659,10 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setPaymentMethod('card')}
-                    className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       paymentMethod === 'card'
-                        ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                        : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                        ? 'luxury-rose-cta font-semibold'
+                        : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                     }`}
                   >
                     Cartão de Crédito
@@ -490,22 +670,22 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                 </div>
               </div>
 
-              <label className="flex items-start gap-2.5 text-xs text-[#C8CCD4] cursor-pointer">
+              <label className="flex items-start gap-2.5 text-xs text-[#C9BAC4] cursor-pointer">
                 <input
                   type="checkbox"
                   checked={paymentAuthorized}
                   onChange={(e) => setPaymentAuthorized(e.target.checked)}
-                  className="mt-0.5 accent-[#C9A46B] cursor-pointer"
+                  className="mt-0.5 accent-[#F4C2D7] cursor-pointer"
                 />
                 <span>
                   Autorizo a cobrança de{' '}
-                  <strong className="font-mono tabular-nums text-[#E2C799]">
+                  <strong className="font-mono tabular-nums text-[#F4C2D7]">
                     {selectedPlan
                       ? BRL_FORMATTER.format(selectedPlan.priceCents / 100)
                       : 'R$ 0,00'}
                   </strong>{' '}
                   pelo pacote de{' '}
-                  <strong className="font-mono tabular-nums text-[#F3EFE6]">
+                  <strong className="font-mono tabular-nums text-[#FAF4F7]">
                     {selectedPlan?.durationMinutes ?? 0} minutos
                   </strong>{' '}
                   com {displayModelName}.
@@ -517,7 +697,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="call-topic"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Assunto ou preferência da chamada (opcional)
               </label>
@@ -528,22 +708,56 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="Ex.: Conversa ao vivo, sessão VIP..."
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-4 py-2.5 text-sm text-[#F3EFE6] placeholder:text-[#686E7C] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                onClick={() => void handleJoinSharedRoom()}
+                onClick={() => void handlePrivateOneOnOneCall()}
                 disabled={
-                  submitting ||
+                  Boolean(submitting) ||
                   dndBlocked ||
                   !selectedPlan ||
                   !paymentAuthorized ||
                   studioState?.callMode === 'paused'
                 }
-                className="inline-flex items-center gap-2.5 px-6 py-3 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                className={`inline-flex items-center gap-2.5 px-5 py-3 text-xs font-semibold rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                  entryIntent === 'private'
+                    ? 'luxury-rose-cta'
+                    : 'bg-[#1A1024] border border-[#F4C2D7]/45 text-[#FAF4F7] hover:border-[#F4C2D7] hover:bg-[#281837]'
+                }`}
+              >
+                {canDirectCallNow ? (
+                  <Lock className="w-4 h-4 shrink-0" />
+                ) : (
+                  <PhoneCall className="w-4 h-4 shrink-0" />
+                )}
+                <span>
+                  {submitting === 'private'
+                    ? 'Chamando no privado...'
+                    : canDirectCallNow
+                      ? `Chamada Privativa Só com ${displayModelName} (1-para-1)`
+                      : 'Solicitar Chamada Privativa (1-para-1)'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void handleJoinSharedRoom()}
+                disabled={
+                  Boolean(submitting) ||
+                  dndBlocked ||
+                  !selectedPlan ||
+                  !paymentAuthorized ||
+                  studioState?.callMode === 'paused'
+                }
+                className={`inline-flex items-center gap-2.5 px-5 py-3 text-xs font-semibold rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                  entryIntent === 'private'
+                    ? 'bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837]'
+                    : 'luxury-rose-cta'
+                }`}
               >
                 <Users className="w-4 h-4 shrink-0" />
                 <span>
@@ -551,66 +765,43 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                     ? 'Modo Não Perturbe ativo'
                     : studioState?.callMode === 'paused'
                       ? 'Sala temporariamente fechada'
-                      : submitting
+                      : submitting === 'group'
                         ? 'Conectando na sala...'
                         : selectedPlan
-                          ? `Autorizar ${BRL_FORMATTER.format(
+                          ? `Sala ao Vivo (Múltiplos Internautas · ${BRL_FORMATTER.format(
                               selectedPlan.priceCents / 100
-                            )} e Entrar na Videochamada ao Vivo`
+                            )})`
                           : 'Selecione um plano'}
-                </span>
-              </button>
-
-              <button
-                type="submit"
-                disabled={
-                  submitting ||
-                  dndBlocked ||
-                  !selectedPlan ||
-                  !paymentAuthorized ||
-                  studioState?.callMode === 'paused'
-                }
-                className="inline-flex items-center gap-2 px-4 py-3 text-xs font-medium rounded-lg bg-[#161920] border border-white/15 text-[#F3EFE6] hover:bg-[#1F232C] disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                {canDirectCallNow ? (
-                  <Video className="w-4 h-4 text-[#C9A46B] shrink-0" />
-                ) : (
-                  <PhoneCall className="w-4 h-4 text-[#C9A46B] shrink-0" />
-                )}
-                <span>
-                  {canDirectCallNow
-                    ? `Chamar ${displayModelName} (1-para-1)`
-                    : 'Entrar na Fila Privada'}
                 </span>
               </button>
             </div>
           </form>
         )}
-      </section>
+      </TechSpotlightCard>
 
-      <aside className="lg:col-span-5 relative rounded-xl overflow-hidden bg-[#13151A] border border-white/10 min-h-[300px]">
-        {!loungeFailed ? (
+      <aside className="lg:col-span-5 relative tech-reticle rounded-2xl overflow-hidden bg-[#150D1D] border border-[#F4C2D7]/25 min-h-[300px] shadow-[0_18px_45px_-20px_rgba(192,98,162,0.3)]">
+        {!loungeFailed && loungeSrc ? (
           <img
-            src="/src/assets/images/studio_backdrop_lounge_1794946401840.jpg"
-            alt="Ambiente do Salão Privado Maison Aura"
+            src={loungeSrc}
+            alt={`Ambiente do Salão Privado ${studioConfig?.studioBrand || 'Maison Aura'}`}
             referrerPolicy="no-referrer"
             onError={() => setLoungeFailed(true)}
             className="w-full h-full object-cover lg:absolute lg:inset-0"
           />
         ) : (
-          <div className="w-full h-full bg-[#161920]" />
+          <div className="w-full h-full bg-[#1A1024]" />
         )}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0B0C0F]/95 via-[#0B0C0F]/35 to-transparent pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-t from-[#0B060F]/95 via-[#0B060F]/35 to-transparent pointer-events-none" />
         <div className="absolute bottom-0 left-0 right-0 p-6 space-y-1">
-          <p className="text-xs font-medium text-[#E2C799] font-mono tabular-nums">
+          <p className="text-xs font-medium text-[#F4C2D7] font-mono tabular-nums">
             Sala Ao Vivo · {roomParticipants.length} conectado
             {roomParticipants.length === 1 ? '' : 's'}
           </p>
-          <p className="font-display text-2xl font-semibold text-[#F3EFE6]">
-            Videochamada Multi-Participantes
+          <p className="font-display text-2xl font-semibold text-[#FAF4F7]">
+            Sala Compartilhada ou Privativa 1-para-1
           </p>
-          <p className="text-xs text-[#C8CCD4]">
-            Entre imediatamente na sala ao vivo compartilhada com vários internautas e Lorena Noir, ou solicite atendimento exclusivo 1-para-1.
+          <p className="text-xs text-[#C9BAC4]">
+            Escolha entrar na sala compartilhada com outros internautas ou iniciar uma sessão 100% privativa somente com {displayModelName}.
           </p>
         </div>
       </aside>
@@ -618,8 +809,16 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
 
       <GaleriaModelo
         modelName={displayModelName}
+        items={galleryItems}
         ctaDisabled={isBlocked || dndBlocked || studioState?.callMode === 'paused'}
-        ctaLabel="Entrar na Videochamada ao Vivo"
+        ctaLabel={
+          studioConfig?.groupButtonLabel ||
+          DEFAULT_STUDIO_CONFIG.groupButtonLabel
+        }
+        privateCtaLabel={
+          studioConfig?.privateButtonLabel ||
+          DEFAULT_STUDIO_CONFIG.privateButtonLabel
+        }
         onPrimaryAction={() => {
           const input = document.getElementById('call-topic');
           if (input) {
@@ -629,6 +828,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }
         }}
+        onPrivateAction={() => void handlePrivateOneOnOneCall()}
       />
     </div>
   );

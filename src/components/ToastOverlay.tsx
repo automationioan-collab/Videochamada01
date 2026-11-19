@@ -43,18 +43,18 @@ const VARIANT_CONFIG: Record<
   },
   user_left: {
     icon: UserMinus,
-    iconColor: 'text-[#9BA1AE]',
-    labelColor: 'text-[#9BA1AE]',
+    iconColor: 'text-[#938291]',
+    labelColor: 'text-[#938291]',
   },
   call_accepted: {
     icon: CheckCircle2,
-    iconColor: 'text-[#E2C799]',
-    labelColor: 'text-[#E2C799]',
+    iconColor: 'text-[#F4C2D7]',
+    labelColor: 'text-[#F4C2D7]',
   },
   info: {
     icon: CheckCircle2,
-    iconColor: 'text-[#C9A46B]',
-    labelColor: 'text-[#C9A46B]',
+    iconColor: 'text-[#F8D6E3]',
+    labelColor: 'text-[#F8D6E3]',
   },
   warning: {
     icon: ShieldAlert,
@@ -86,7 +86,7 @@ export const ToastOverlay: React.FC<ToastOverlayProps> = ({
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
               role="status"
-              className="pointer-events-auto bg-[#13151A]/95 backdrop-blur-md border border-white/15 rounded-xl p-4 shadow-xl flex items-start gap-3"
+              className="pointer-events-auto bg-[#150D1D]/95 backdrop-blur-md border border-[#F4C2D7]/25 rounded-2xl p-4 shadow-xl flex items-start gap-3"
             >
               <div className="pt-0.5 shrink-0">
                 <Icon className={`w-4 h-4 ${config.iconColor}`} />
@@ -97,11 +97,11 @@ export const ToastOverlay: React.FC<ToastOverlayProps> = ({
                   <p className={`text-xs font-semibold ${config.labelColor}`}>
                     {toast.title}
                   </p>
-                  <span className="text-[11px] font-mono tabular-nums text-[#727988] shrink-0">
+                  <span className="text-[11px] font-mono tabular-nums text-[#938291] shrink-0">
                     {toast.timestamp}
                   </span>
                 </div>
-                <p className="text-xs text-[#E5E2DC] leading-relaxed break-words">
+                <p className="text-xs text-[#C9BAC4] leading-relaxed break-words">
                   {toast.message}
                 </p>
               </div>
@@ -110,7 +110,7 @@ export const ToastOverlay: React.FC<ToastOverlayProps> = ({
                 type="button"
                 onClick={() => onDismiss(toast.id)}
                 aria-label="Fechar notificação"
-                className="p-1 -mr-1 -mt-1 rounded-md text-[#727988] hover:text-[#F3EFE6] hover:bg-white/5 transition-colors cursor-pointer shrink-0"
+                className="p-1 -mr-1 -mt-1 rounded-full text-[#938291] hover:text-[#FAF4F7] hover:bg-[#FAF4F7]/5 transition-colors cursor-pointer shrink-0"
               >
                 <X className="w-3.5 h-3.5" />
               </button>

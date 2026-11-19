@@ -2,9 +2,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import type {
   PresencePeer,
+  QueueWaitSummary,
   RoomParticipant,
   StudioProfile,
 } from '../types/studio';
+
+const EMPTY_QUEUE_SUMMARY: QueueWaitSummary = {
+  totalWaiting: 0,
+  myPosition: 0,
+  aheadCount: 0,
+  activeCallRemainingSeconds: 0,
+  aheadQueueSeconds: 0,
+  totalEstimatedWaitSeconds: 0,
+  updatedAtMs: 0,
+};
 
 export interface SignalPayload {
   type:
@@ -70,6 +81,8 @@ export function useWebSocketStudio({
   const [roomParticipants, setRoomParticipants] = useState<RoomParticipant[]>(
     []
   );
+  const [queueSummary, setQueueSummary] =
+    useState<QueueWaitSummary>(EMPTY_QUEUE_SUMMARY);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatRef = useRef<number | null>(null);
@@ -96,6 +109,7 @@ export function useWebSocketStudio({
       setWsConnected(false);
       setPeers([]);
       setRoomParticipants([]);
+      setQueueSummary(EMPTY_QUEUE_SUMMARY);
       hasInitialPresenceRef.current = false;
       previousPeersRef.current = new Map();
       if (wsRef.current) {
@@ -195,6 +209,10 @@ export function useWebSocketStudio({
         }
         if (type === 'room:sync' && Array.isArray(data.participants)) {
           setRoomParticipants(data.participants as RoomParticipant[]);
+          return;
+        }
+        if (type === 'queue:sync' && data.summary && typeof data.summary === 'object') {
+          setQueueSummary(data.summary as QueueWaitSummary);
           return;
         }
         if (type === 'room:peer_joined' && data.participant) {
@@ -339,13 +357,59 @@ export function useWebSocketStudio({
     [sendWs]
   );
 
+  const syncQueueEntry = useCallback(
+    (entry: {
+      status: 'waiting' | 'idle';
+      callId?: string;
+      planDurationMinutes?: number;
+      createdAtMs?: number;
+    }) => {
+      return sendWs({
+        type: 'queue:entry',
+        status: entry.status,
+        ...(entry.callId ? { callId: entry.callId } : {}),
+        ...(entry.planDurationMinutes
+          ? { planDurationMinutes: entry.planDurationMinutes }
+          : {}),
+        ...(entry.createdAtMs ? { createdAtMs: entry.createdAtMs } : {}),
+      });
+    },
+    [sendWs]
+  );
+
+  const syncAuthoritativeQueue = useCallback(
+    (payload: {
+      waiting: Array<{
+        callId: string;
+        uid: string;
+        planDurationMinutes: number;
+        createdAtMs: number;
+      }>;
+      activeCall: {
+        callId: string;
+        durationMinutes: number;
+        startedAtMs?: number;
+      } | null;
+    }) => {
+      return sendWs({
+        type: 'queue:authoritative_sync',
+        waiting: payload.waiting,
+        activeCall: payload.activeCall,
+      });
+    },
+    [sendWs]
+  );
+
   return {
     wsConnected,
     peers,
     roomParticipants,
+    queueSummary,
     sendWs,
     joinRoom,
     leaveRoom,
     sendModerationCommand,
+    syncQueueEntry,
+    syncAuthoritativeQueue,
   };
 }

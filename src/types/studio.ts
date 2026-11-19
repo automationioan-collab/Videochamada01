@@ -23,6 +23,20 @@ export interface StudioProfile {
   updatedAt: Timestamp;
 }
 
+export interface SchedulePeriod {
+  id: string;
+  label?: string;
+  startTime: string;
+  endTime: string;
+  days: string;
+  enabled: boolean;
+}
+
+export interface ScheduleHolidayDate {
+  date: string;
+  label?: string;
+}
+
 export interface StudioState {
   modelUid: string;
   modelName: string;
@@ -37,6 +51,8 @@ export interface StudioState {
   scheduleEndTime?: string;
   scheduleDays?: string;
   scheduleTimezone?: string;
+  schedulePeriods?: SchedulePeriod[];
+  holidayDates?: ScheduleHolidayDate[];
   dndActive?: boolean;
   dndUntilMs?: number;
   dndScheduleEnabled?: boolean;
@@ -44,6 +60,28 @@ export interface StudioState {
   dndEndTime?: string;
   updatedAt: Timestamp;
 }
+
+export type StudioStateUpdatePatch = Partial<{
+  modelName: string;
+  isLive: boolean;
+  callMode: StudioCallMode;
+  headline: string;
+  activeCallId: string;
+  activeCallUserId: string;
+  activeCallUserName: string;
+  autoScheduleEnabled: boolean;
+  scheduleStartTime: string;
+  scheduleEndTime: string;
+  scheduleDays: string;
+  scheduleTimezone: string;
+  schedulePeriods: SchedulePeriod[];
+  holidayDates: ScheduleHolidayDate[];
+  dndActive: boolean;
+  dndUntilMs: number;
+  dndScheduleEnabled: boolean;
+  dndStartTime: string;
+  dndEndTime: string;
+}>;
 
 export type CallPaymentStatus = 'authorized' | 'captured' | 'refunded';
 
@@ -146,4 +184,49 @@ export interface InterestMessage {
   status: InterestMessageStatus;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+export type GalleryCategoryType = 'editorial' | 'portraits' | 'studio';
+
+export interface GalleryItemRecord {
+  id: string;
+  title: string;
+  caption: string;
+  category: GalleryCategoryType;
+  specs: string;
+  src: string;
+  alt: string;
+  sortOrder: number;
+  active: boolean;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export interface StudioConfig {
+  modelUid: string;
+  studioBrand: string;
+  modelName: string;
+  modelAvatarUrl?: string;
+  heroImageUrl?: string;
+  loungeImageUrl?: string;
+  modelBio?: string;
+  heroTitle: string;
+  heroSubtitle: string;
+  headline: string;
+  groupButtonLabel: string;
+  privateButtonLabel: string;
+  ratePerMinuteCents: number;
+  updatedAt?: Timestamp;
+}
+
+export type CallEntryIntent = 'group' | 'private';
+
+export interface QueueWaitSummary {
+  totalWaiting: number;
+  myPosition: number;
+  aheadCount: number;
+  activeCallRemainingSeconds: number;
+  aheadQueueSeconds: number;
+  totalEstimatedWaitSeconds: number;
+  updatedAtMs: number;
 }

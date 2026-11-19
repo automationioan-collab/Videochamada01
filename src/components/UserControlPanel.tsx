@@ -6,11 +6,15 @@ import {
   Crown,
   Mic,
   MicOff,
+  Pencil,
   PhoneCall,
   Plus,
   RotateCcw,
+  Save,
   Search,
   Star,
+  Trash2,
+  X,
 } from 'lucide-react';
 import type {
   AccessStatus,
@@ -20,9 +24,10 @@ import type {
   InterestMessage,
   InterestMessageStatus,
   PresencePeer,
-  StudioCallMode,
   StudioProfile,
+  StudioRole,
   StudioState,
+  StudioStateUpdatePatch,
 } from '../types/studio';
 import type { ModerationEffect } from '../hooks/useWebSocketStudio';
 import { CallPlansManager } from './CallPlansManager';
@@ -40,28 +45,18 @@ interface UserControlPanelProps {
   callPlans: CallPlan[];
   ratePerMinuteCents: number;
   onChangeRatePerMinuteCents: (cents: number) => void;
-  onUpdateStudioState: (
-    patch: Partial<{
-      modelName: string;
-      isLive: boolean;
-      callMode: StudioCallMode;
-      headline: string;
-      autoScheduleEnabled: boolean;
-      scheduleStartTime: string;
-      scheduleEndTime: string;
-      scheduleDays: string;
-      scheduleTimezone: string;
-      dndActive: boolean;
-      dndUntilMs: number;
-      dndScheduleEnabled: boolean;
-      dndStartTime: string;
-      dndEndTime: string;
-    }>
-  ) => Promise<void>;
+  onUpdateStudioState: (patch: StudioStateUpdatePatch) => Promise<void>;
   onUpdateUserControl: (
     targetUid: string,
-    patch: Partial<{ accessStatus: AccessStatus; notes: string }>
+    patch: Partial<{
+      displayName: string;
+      photoUrl: string;
+      role: StudioRole;
+      accessStatus: AccessStatus;
+      notes: string;
+    }>
   ) => Promise<void>;
+  onDeleteUserProfile?: (targetUid: string) => Promise<void>;
   onSendModeration: (
     targetUid: string,
     action: ModerationEffect['action'],
@@ -96,6 +91,15 @@ interface UserControlPanelProps {
     recordId: string,
     status: CallHistoryStatus
   ) => Promise<void>;
+  onUpdateCallHistoryRecord?: (
+    recordId: string,
+    patch: Partial<{
+      durationSeconds: number;
+      amountCents: number;
+      status: CallHistoryStatus;
+    }>
+  ) => Promise<void>;
+  onDeleteCallHistoryRecord?: (recordId: string) => Promise<void>;
   onUpdateInterestMessageStatus: (
     messageId: string,
     status: InterestMessageStatus
@@ -151,12 +155,15 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
   onChangeRatePerMinuteCents,
   onUpdateStudioState,
   onUpdateUserControl,
+  onDeleteUserProfile,
   onSendModeration,
   onDirectCallUser,
   onSavePlan,
   onDeletePlan,
   onRecordCallHistory,
   onUpdateCallHistoryStatus,
+  onUpdateCallHistoryRecord,
+  onDeleteCallHistoryRecord,
   onUpdateInterestMessageStatus,
   onDeleteInterestMessage,
 }) => {
@@ -173,6 +180,22 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
     studioState?.headline || 'Atendimento privado por videochamada em tempo real.'
   );
   const [savingHeadline, setSavingHeadline] = useState(false);
+
+  // User inline edit state
+  const [editingUserUid, setEditingUserUid] = useState<string | null>(null);
+  const [editUserName, setEditUserName] = useState('');
+  const [editUserRole, setEditUserRole] = useState<StudioRole>('viewer');
+  const [editUserStatus, setEditUserStatus] = useState<AccessStatus>('active');
+  const [editUserNotes, setEditUserNotes] = useState('');
+  const [savingUserEdit, setSavingUserEdit] = useState(false);
+
+  // Call history inline edit state
+  const [editingHistoryId, setEditingHistoryId] = useState<string | null>(null);
+  const [editHistMinutes, setEditHistMinutes] = useState('10');
+  const [editHistAmountBrl, setEditHistAmountBrl] = useState('0.00');
+  const [editHistStatus, setEditHistStatus] =
+    useState<CallHistoryStatus>('completed');
+  const [savingHistEdit, setSavingHistEdit] = useState(false);
 
   const peerMap = useMemo(() => {
     const map = new Map<string, PresencePeer>();
@@ -314,13 +337,13 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
   return (
     <div className="space-y-8">
       {/* Studio Availability Controls */}
-      <section className="bg-[#13151A] border border-white/10 rounded-xl p-6 space-y-6">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-white/10">
+      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-6 space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-[#F4C2D7]/15">
           <div className="space-y-1">
-            <h2 className="font-display text-2xl font-semibold text-[#F3EFE6]">
+            <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
               Controle do Estúdio da Modelo
             </h2>
-            <p className="text-xs text-[#9BA1AE]">
+            <p className="text-xs text-[#C9BAC4]">
               Altere a disponibilidade da sala e controle usuários conectados em tempo real.
             </p>
           </div>
@@ -334,16 +357,16 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   autoScheduleEnabled: false,
                 })
               }
-              className={`px-4 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`px-4 py-2 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 studioState?.isLive
                   ? 'bg-[#16A34A]/20 border-[#16A34A]/50 text-[#86EFAC]'
-                  : 'bg-[#1B1E26] border-white/15 text-[#9BA1AE]'
+                  : 'bg-[#1A1024] border-[#F4C2D7]/20 text-[#C9BAC4]'
               }`}
             >
               {studioState?.isLive ? 'Estúdio Ao Vivo' : 'Modo Descanso (Offline)'}
             </button>
 
-            <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
+            <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
               {(
                 [
                   { id: 'open', label: 'Aberto' },
@@ -355,10 +378,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   key={mode.id}
                   type="button"
                   onClick={() => void onUpdateStudioState({ callMode: mode.id })}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     studioState?.callMode === mode.id
-                      ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                      : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                      ? 'luxury-rose-cta font-semibold'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                   }`}
                 >
                   {mode.label}
@@ -376,7 +399,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
             <div className="flex-1 space-y-1.5">
               <label
                 htmlFor="studio-headline"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Mensagem exibida aos usuários na recepção
               </label>
@@ -386,13 +409,13 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                 maxLength={140}
                 value={headlineDraft}
                 onChange={(e) => setHeadlineDraft(e.target.value)}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
             <button
               type="submit"
               disabled={savingHeadline}
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#1F232C] border border-white/15 text-[#F3EFE6] hover:bg-[#2A303C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="px-4 py-2 text-xs font-semibold rounded-full bg-[#21142D] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {savingHeadline ? 'Salvando...' : 'Atualizar Mensagem'}
             </button>
@@ -400,25 +423,25 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
 
           <div className="lg:col-span-5 grid grid-cols-4 gap-4 pt-2 lg:pt-0">
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Cadastrados</p>
-              <p className="text-xl font-semibold font-mono tabular-nums text-[#F3EFE6]">
+              <p className="text-[11px] text-[#938291]">Cadastrados</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#FAF4F7]">
                 {metrics.total}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Online</p>
+              <p className="text-[11px] text-[#938291]">Online</p>
               <p className="text-xl font-semibold font-mono tabular-nums text-[#86EFAC]">
                 {metrics.online}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">VIP</p>
-              <p className="text-xl font-semibold font-mono tabular-nums text-[#E2C799]">
+              <p className="text-[11px] text-[#938291]">VIP</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#F4C2D7]">
                 {metrics.vip}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Restritos</p>
+              <p className="text-[11px] text-[#938291]">Restritos</p>
               <p className="text-xl font-semibold font-mono tabular-nums text-[#FCA5A5]">
                 {metrics.restricted}
               </p>
@@ -434,20 +457,20 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
       />
 
       {/* Real-Time Users Table */}
-      <section className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-        <div className="p-5 border-b border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+        <div className="p-5 border-b border-[#F4C2D7]/15 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="relative flex-1 max-w-sm">
-            <Search className="w-4 h-4 text-[#727988] absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-[#938291] absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Buscar usuário por nome ou ID..."
-              className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg pl-10 pr-3.5 py-2 text-sm text-[#F3EFE6] placeholder:text-[#686E7C] focus:outline-none focus:border-[#C9A46B]"
+              className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full pl-10 pr-4 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
             />
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg overflow-x-auto">
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full overflow-x-auto">
             {(
               [
                 { id: 'all', label: 'Todos' },
@@ -460,10 +483,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                 key={tab.id}
                 type="button"
                 onClick={() => setFilter(tab.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   filter === tab.id
-                    ? 'bg-[#1F232C] text-[#F3EFE6]'
-                    : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                    ? 'bg-[#281837] text-[#FAF4F7]'
+                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                 }`}
               >
                 {tab.label}
@@ -474,10 +497,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
 
         {filteredParticipants.length === 0 ? (
           <div className="p-12 text-center space-y-2">
-            <p className="text-sm font-medium text-[#F3EFE6]">
+            <p className="text-sm font-medium text-[#FAF4F7]">
               Nenhum usuário encontrado neste filtro.
             </p>
-            <p className="text-xs text-[#9BA1AE]">
+            <p className="text-xs text-[#C9BAC4]">
               Quando visitantes fizerem login na plataforma, eles aparecerão aqui em tempo real.
             </p>
           </div>
@@ -485,14 +508,14 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-white/10 text-[11px] font-medium text-[#9BA1AE]">
+                <tr className="border-b border-[#F4C2D7]/15 text-[11px] font-medium text-[#C9BAC4]">
                   <th className="py-3 px-5">Usuário</th>
                   <th className="py-3 px-4">Presença em Tempo Real</th>
                   <th className="py-3 px-4">Status de Acesso</th>
                   <th className="py-3 px-5 text-right">Ações Instantâneas</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5 text-sm">
+              <tbody className="divide-y divide-[#F4C2D7]/10 text-sm">
                 {filteredParticipants.map((member) => {
                   const livePeer = peerMap.get(member.uid);
                   const isOnline = Boolean(livePeer);
@@ -500,148 +523,302 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   const isVip = member.accessStatus === 'vip';
                   const isMuted = member.accessStatus === 'muted';
                   const isBlocked = member.accessStatus === 'blocked';
+                  const isEditingThisUser = editingUserUid === member.uid;
 
                   return (
-                    <tr
-                      key={member.uid}
-                      className="hover:bg-white/[0.02] transition-colors"
-                    >
-                      <td className="py-3.5 px-5">
-                        <div className="flex items-center gap-3">
-                          {member.photoUrl ? (
-                            <img
-                              src={member.photoUrl}
-                              alt={member.displayName}
-                              referrerPolicy="no-referrer"
-                              className="w-8 h-8 rounded-full object-cover bg-[#1B1E26] shrink-0"
-                            />
-                          ) : (
-                            <div className="w-8 h-8 rounded-full bg-[#1B1E26] flex items-center justify-center text-xs font-semibold text-[#C9A46B] shrink-0">
-                              {member.displayName.slice(0, 1).toUpperCase()}
+                    <React.Fragment key={member.uid}>
+                      <tr className="hover:bg-[#FAF4F7]/[0.02] transition-colors">
+                        <td className="py-3.5 px-5">
+                          <div className="flex items-center gap-3">
+                            {member.photoUrl ? (
+                              <img
+                                src={member.photoUrl}
+                                alt={member.displayName}
+                                referrerPolicy="no-referrer"
+                                className="w-8 h-8 rounded-full object-cover bg-[#21142D] border border-[#F4C2D7]/25 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-8 h-8 rounded-full bg-[#21142D] border border-[#F4C2D7]/25 flex items-center justify-center text-xs font-semibold text-[#F4C2D7] shrink-0">
+                                {member.displayName.slice(0, 1).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="font-medium text-[#FAF4F7] truncate max-w-[200px]">
+                                {member.displayName}
+                              </p>
+                              <p className="text-[11px] font-mono text-[#938291] truncate max-w-[210px]">
+                                {member.role === 'moderator' ? 'Moderador · ' : ''}
+                                {member.notes
+                                  ? member.notes
+                                  : member.uid.slice(0, 12)}
+                              </p>
                             </div>
-                          )}
-                          <div className="min-w-0">
-                            <p className="font-medium text-[#F3EFE6] truncate max-w-[200px]">
-                              {member.displayName}
-                            </p>
-                            <p className="text-[11px] font-mono text-[#727988] truncate max-w-[180px]">
-                              {member.uid.slice(0, 12)}
-                            </p>
                           </div>
-                        </div>
-                      </td>
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs">
-                        {isOnline ? (
-                          <span className="text-[#86EFAC]">
-                            Online{inCall ? ' · Em videochamada' : ' · Conectado'}
-                          </span>
-                        ) : (
-                          <span className="text-[#727988]">Offline</span>
-                        )}
-                      </td>
+                        <td className="py-3.5 px-4 text-xs">
+                          {isOnline ? (
+                            <span className="text-[#86EFAC]">
+                              Online{inCall ? ' · Em videochamada' : ' · Conectado'}
+                            </span>
+                          ) : (
+                            <span className="text-[#938291]">Offline</span>
+                          )}
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs">
-                        <span
-                          className={
-                            isBlocked
-                              ? 'text-[#FCA5A5]'
-                              : isMuted
-                                ? 'text-[#FCD34D]'
-                                : isVip
-                                  ? 'text-[#E2C799]'
-                                  : 'text-[#C8CCD4]'
-                          }
-                        >
-                          {STATUS_LABELS[member.accessStatus]}
-                        </span>
-                      </td>
-
-                      <td className="py-3.5 px-5">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            disabled={!isOnline || isBlocked}
-                            onClick={() =>
-                              void onDirectCallUser({
-                                uid: member.uid,
-                                displayName: member.displayName,
-                                photoUrl: member.photoUrl,
-                              })
-                            }
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            <PhoneCall className="w-3.5 h-3.5" />
-                            <span>Chamar</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAction(
-                                member,
-                                isVip ? 'active' : 'vip',
-                                isVip ? 'unblock' : 'vip'
-                              )
-                            }
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              isVip
-                                ? 'bg-[#C9A46B]/15 border-[#C9A46B]/40 text-[#E2C799]'
-                                : 'bg-[#161920] border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6]'
-                            }`}
-                          >
-                            <Crown className="w-3.5 h-3.5" />
-                            <span>{isVip ? 'Remover VIP' : 'VIP'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAction(
-                                member,
-                                isMuted ? 'active' : 'muted',
-                                isMuted ? 'unmute' : 'mute'
-                              )
-                            }
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              isMuted
-                                ? 'bg-amber-950/40 border-amber-500/40 text-amber-200'
-                                : 'bg-[#161920] border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6]'
-                            }`}
-                          >
-                            {isMuted ? (
-                              <Mic className="w-3.5 h-3.5" />
-                            ) : (
-                              <MicOff className="w-3.5 h-3.5" />
-                            )}
-                            <span>{isMuted ? 'Ativar voz' : 'Silenciar'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAction(
-                                member,
-                                isBlocked ? 'active' : 'blocked',
-                                isBlocked ? 'unblock' : 'block'
-                              )
-                            }
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        <td className="py-3.5 px-4 text-xs">
+                          <span
+                            className={
                               isBlocked
-                                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                                : 'bg-red-950/30 border-red-500/30 text-red-300 hover:bg-red-950/50'
-                            }`}
+                                ? 'text-[#FCA5A5]'
+                                : isMuted
+                                  ? 'text-[#FCD34D]'
+                                  : isVip
+                                    ? 'text-[#F4C2D7]'
+                                    : 'text-[#C9BAC4]'
+                            }
                           >
-                            {isBlocked ? (
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                            ) : (
-                              <Ban className="w-3.5 h-3.5" />
+                            {STATUS_LABELS[member.accessStatus]}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-5">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={!isOnline || isBlocked}
+                              onClick={() =>
+                                void onDirectCallUser({
+                                  uid: member.uid,
+                                  displayName: member.displayName,
+                                  photoUrl: member.photoUrl,
+                                })
+                              }
+                              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-35 disabled:cursor-not-allowed transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              <PhoneCall className="w-3.5 h-3.5" />
+                              <span>Chamar</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleAction(
+                                  member,
+                                  isVip ? 'active' : 'vip',
+                                  isVip ? 'unblock' : 'vip'
+                                )
+                              }
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                isVip
+                                  ? 'bg-[#281837] border-[#F4C2D7]/45 text-[#F4C2D7]'
+                                  : 'bg-[#1A1024] border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7]'
+                              }`}
+                            >
+                              <Crown className="w-3.5 h-3.5" />
+                              <span>{isVip ? 'Remover VIP' : 'VIP'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleAction(
+                                  member,
+                                  isMuted ? 'active' : 'muted',
+                                  isMuted ? 'unmute' : 'mute'
+                                )
+                              }
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                isMuted
+                                  ? 'bg-amber-950/40 border-amber-500/40 text-amber-200'
+                                  : 'bg-[#1A1024] border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7]'
+                              }`}
+                            >
+                              {isMuted ? (
+                                <Mic className="w-3.5 h-3.5" />
+                              ) : (
+                                <MicOff className="w-3.5 h-3.5" />
+                              )}
+                              <span>{isMuted ? 'Ativar voz' : 'Silenciar'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleAction(
+                                  member,
+                                  isBlocked ? 'active' : 'blocked',
+                                  isBlocked ? 'unblock' : 'block'
+                                )
+                              }
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                isBlocked
+                                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                                  : 'bg-red-950/30 border-red-500/30 text-red-300 hover:bg-red-950/50'
+                              }`}
+                            >
+                              {isBlocked ? (
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              ) : (
+                                <Ban className="w-3.5 h-3.5" />
+                              )}
+                              <span>{isBlocked ? 'Liberar' : 'Bloquear'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isEditingThisUser) {
+                                  setEditingUserUid(null);
+                                } else {
+                                  setEditingUserUid(member.uid);
+                                  setEditUserName(member.displayName);
+                                  setEditUserRole(
+                                    member.role === 'model'
+                                      ? 'viewer'
+                                      : member.role
+                                  );
+                                  setEditUserStatus(member.accessStatus);
+                                  setEditUserNotes(member.notes || '');
+                                }
+                              }}
+                              aria-label={`Editar ficha de ${member.displayName}`}
+                              className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#F4C2D7] transition-colors shrink-0 cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+
+                            {onDeleteUserProfile && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void onDeleteUserProfile(member.uid)
+                                }
+                                aria-label={`Excluir perfil de ${member.displayName}`}
+                                className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors shrink-0 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             )}
-                            <span>{isBlocked ? 'Liberar' : 'Bloquear'}</span>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                          </div>
+                        </td>
+                      </tr>
+
+                      {isEditingThisUser && (
+                        <tr className="bg-[#150D1D]">
+                          <td colSpan={4} className="p-4 border-t border-[#F4C2D7]/15">
+                            <form
+                              onSubmit={async (e) => {
+                                e.preventDefault();
+                                if (savingUserEdit) return;
+                                setSavingUserEdit(true);
+                                try {
+                                  await onUpdateUserControl(member.uid, {
+                                    displayName: editUserName,
+                                    role: editUserRole,
+                                    accessStatus: editUserStatus,
+                                    notes: editUserNotes,
+                                  });
+                                  setEditingUserUid(null);
+                                } finally {
+                                  setSavingUserEdit(false);
+                                }
+                              }}
+                              className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end"
+                            >
+                              <div className="sm:col-span-3 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Nome exibido
+                                </label>
+                                <input
+                                  type="text"
+                                  maxLength={80}
+                                  required
+                                  value={editUserName}
+                                  onChange={(e) =>
+                                    setEditUserName(e.target.value)
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-1.5 text-xs text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                />
+                              </div>
+
+                              <div className="sm:col-span-2 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Papel
+                                </label>
+                                <select
+                                  value={editUserRole}
+                                  onChange={(e) =>
+                                    setEditUserRole(
+                                      e.target.value as StudioRole
+                                    )
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-2.5 py-1.5 text-xs text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                >
+                                  <option value="viewer">Internauta</option>
+                                  <option value="moderator">Moderador</option>
+                                </select>
+                              </div>
+
+                              <div className="sm:col-span-2 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Status
+                                </label>
+                                <select
+                                  value={editUserStatus}
+                                  onChange={(e) =>
+                                    setEditUserStatus(
+                                      e.target.value as AccessStatus
+                                    )
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-2.5 py-1.5 text-xs text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                >
+                                  <option value="active">Ativo</option>
+                                  <option value="vip">VIP</option>
+                                  <option value="muted">Silenciado</option>
+                                  <option value="blocked">Bloqueado</option>
+                                </select>
+                              </div>
+
+                              <div className="sm:col-span-3 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Notas internas da modelo
+                                </label>
+                                <input
+                                  type="text"
+                                  maxLength={300}
+                                  value={editUserNotes}
+                                  onChange={(e) =>
+                                    setEditUserNotes(e.target.value)
+                                  }
+                                  placeholder="Preferências, observações..."
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-1.5 text-xs text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                />
+                              </div>
+
+                              <div className="sm:col-span-2 flex items-center justify-end gap-2">
+                                <button
+                                  type="submit"
+                                  disabled={savingUserEdit}
+                                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta cursor-pointer"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                  <span>Salvar</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingUserUid(null)}
+                                  aria-label="Cancelar edição"
+                                  className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </form>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
@@ -663,43 +840,43 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
       {/* Admin Call History & Finalized Transactions Panel */}
       <section
         aria-labelledby="call-history-heading"
-        className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden"
+        className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
       >
-        <div className="p-6 border-b border-white/10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+        <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
           <div className="space-y-1">
             <h2
               id="call-history-heading"
-              className="font-display text-2xl font-semibold text-[#F3EFE6]"
+              className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]"
             >
               Histórico de Chamadas e Transações
             </h2>
-            <p className="text-xs text-[#9BA1AE]">
+            <p className="text-xs text-[#C9BAC4]">
               Registro automático de duração, data e valor finalizado ao encerrar cada videochamada.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-6">
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Finalizadas</p>
-              <p className="text-xl font-semibold font-mono tabular-nums text-[#F3EFE6]">
+              <p className="text-[11px] text-[#938291]">Finalizadas</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#FAF4F7]">
                 {historyMetrics.completedCount}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Tempo Total</p>
-              <p className="text-xl font-semibold font-mono tabular-nums text-[#C8CCD4]">
+              <p className="text-[11px] text-[#938291]">Tempo Total</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#C9BAC4]">
                 {formatDurationClock(historyMetrics.totalDurationSeconds)}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Receita Finalizada</p>
+              <p className="text-[11px] text-[#938291]">Receita Finalizada</p>
               <p className="text-xl font-semibold font-mono tabular-nums text-[#86EFAC]">
                 {BRL_FORMATTER.format(historyMetrics.netRevenueCents / 100)}
               </p>
             </div>
             <div>
-              <p className="text-[11px] text-[#9BA1AE]">Avaliação Média</p>
-              <p className="text-xl font-semibold font-mono tabular-nums text-[#E2C799]">
+              <p className="text-[11px] text-[#938291]">Avaliação Média</p>
+              <p className="text-xl font-semibold font-mono tabular-nums text-[#F4C2D7]">
                 {historyMetrics.averageRating !== null
                   ? `${historyMetrics.averageRating.toFixed(1)}/5`
                   : '—'}
@@ -709,24 +886,24 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
         </div>
 
         {/* Tariff & Filter Toolbar */}
-        <div className="p-5 border-b border-white/10 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+        <div className="p-5 border-b border-[#F4C2D7]/15 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3 flex-1">
             <div className="relative flex-1 min-w-[220px] max-w-xs">
-              <Search className="w-4 h-4 text-[#727988] absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <Search className="w-4 h-4 text-[#938291] absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={historySearch}
                 onChange={(e) => setHistorySearch(e.target.value)}
                 placeholder="Filtrar histórico por usuário..."
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg pl-10 pr-3.5 py-2 text-sm text-[#F3EFE6] placeholder:text-[#686E7C] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full pl-10 pr-4 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
-            <div className="flex items-center gap-2 bg-[#0B0C0F] border border-white/10 rounded-lg px-3 py-1.5">
-              <Clock className="w-3.5 h-3.5 text-[#C9A46B] shrink-0" />
+            <div className="flex items-center gap-2 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full px-3.5 py-1.5">
+              <Clock className="w-3.5 h-3.5 text-[#F4C2D7] shrink-0" />
               <label
                 htmlFor="rate-per-min"
-                className="text-xs text-[#9BA1AE] whitespace-nowrap"
+                className="text-xs text-[#C9BAC4] whitespace-nowrap"
               >
                 Tarifa/min (R$):
               </label>
@@ -740,13 +917,13 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   const val = Math.max(0, Number(e.target.value) || 0);
                   onChangeRatePerMinuteCents(Math.round(val * 100));
                 }}
-                className="w-16 bg-transparent text-xs font-mono tabular-nums text-[#F3EFE6] focus:outline-none text-right"
+                className="w-16 bg-transparent text-xs font-mono tabular-nums text-[#FAF4F7] focus:outline-none text-right"
               />
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
+            <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
               {(
                 [
                   { id: 'all', label: 'Todas' },
@@ -758,10 +935,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setHistoryFilter(tab.id)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     historyFilter === tab.id
-                      ? 'bg-[#1F232C] text-[#F3EFE6]'
-                      : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                      ? 'bg-[#281837] text-[#FAF4F7]'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                   }`}
                 >
                   {tab.label}
@@ -773,9 +950,9 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
               <button
                 type="button"
                 onClick={() => setShowManualForm((prev) => !prev)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-[#161920] border border-white/15 text-[#F3EFE6] hover:bg-[#1F232C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <Plus className="w-3.5 h-3.5 text-[#C9A46B]" />
+                <Plus className="w-3.5 h-3.5 text-[#F4C2D7]" />
                 <span>{showManualForm ? 'Fechar Registro' : 'Registrar Chamada'}</span>
               </button>
             )}
@@ -786,12 +963,12 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
         {showManualForm && participants.length > 0 && (
           <form
             onSubmit={handleManualRecordSubmit}
-            className="p-5 bg-[#0F1116] border-b border-white/10 grid grid-cols-1 sm:grid-cols-4 gap-4 items-end"
+            className="p-5 bg-[#150D1D] border-b border-[#F4C2D7]/15 grid grid-cols-1 sm:grid-cols-4 gap-4 items-end"
           >
             <div className="space-y-1.5">
               <label
                 htmlFor="manual-user"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Usuário
               </label>
@@ -799,7 +976,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                 id="manual-user"
                 value={manualUserId || participants[0]?.uid || ''}
                 onChange={(e) => setManualUserId(e.target.value)}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3 py-2 text-sm text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-2 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               >
                 {participants.map((p) => (
                   <option key={p.uid} value={p.uid}>
@@ -812,7 +989,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="manual-duration"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Duração (minutos)
               </label>
@@ -829,14 +1006,14 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                     ((mins * ratePerMinuteCents) / 100).toFixed(2)
                   );
                 }}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-2 text-sm font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <div className="space-y-1.5">
               <label
                 htmlFor="manual-amount"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Valor Finalizado (R$)
               </label>
@@ -845,14 +1022,14 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                 type="text"
                 value={manualAmountBrl}
                 onChange={(e) => setManualAmountBrl(e.target.value)}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-2 text-sm font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <button
               type="submit"
               disabled={savingManual}
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap cursor-pointer h-[38px]"
+              className="px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap cursor-pointer h-[38px]"
             >
               {savingManual ? 'Salvando...' : 'Salvar Transação'}
             </button>
@@ -861,10 +1038,10 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
 
         {filteredHistory.length === 0 ? (
           <div className="p-12 text-center space-y-2">
-            <p className="text-sm font-medium text-[#F3EFE6]">
+            <p className="text-sm font-medium text-[#FAF4F7]">
               Nenhuma chamada finalizada registrada ainda.
             </p>
-            <p className="text-xs text-[#9BA1AE]">
+            <p className="text-xs text-[#C9BAC4]">
               Ao encerrar uma videochamada com um usuário, a duração, data e valor da transação aparecerão aqui automaticamente.
             </p>
           </div>
@@ -872,7 +1049,7 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-white/10 text-[11px] font-medium text-[#9BA1AE]">
+                <tr className="border-b border-[#F4C2D7]/15 text-[11px] font-medium text-[#C9BAC4]">
                   <th className="py-3 px-5">Participante</th>
                   <th className="py-3 px-4">Data e Hora</th>
                   <th className="py-3 px-4 text-right">Duração</th>
@@ -882,101 +1059,260 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
                   <th className="py-3 px-5 text-right">Ação</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5 text-sm">
+              <tbody className="divide-y divide-[#F4C2D7]/10 text-sm">
                 {filteredHistory.map((record) => {
                   const isCompleted = record.status === 'completed';
+                  const isEditingThisRecord = editingHistoryId === record.id;
                   return (
-                    <tr
-                      key={record.id}
-                      className="hover:bg-white/[0.02] transition-colors"
-                    >
-                      <td className="py-3.5 px-5">
-                        <div className="min-w-0">
-                          <p className="font-medium text-[#F3EFE6] truncate max-w-[200px]">
-                            {record.userName}
-                          </p>
-                          <p className="text-[11px] font-mono text-[#727988] truncate max-w-[220px]">
-                            {record.planName
-                              ? `${record.planName} · ${record.callId}`
-                              : record.callId}
-                          </p>
-                        </div>
-                      </td>
+                    <React.Fragment key={record.id}>
+                      <tr className="hover:bg-[#FAF4F7]/[0.02] transition-colors">
+                        <td className="py-3.5 px-5">
+                          <div className="min-w-0">
+                            <p className="font-medium text-[#FAF4F7] truncate max-w-[200px]">
+                              {record.userName}
+                            </p>
+                            <p className="text-[11px] font-mono text-[#938291] truncate max-w-[220px]">
+                              {record.planName
+                                ? `${record.planName} · ${record.callId}`
+                                : record.callId}
+                            </p>
+                          </div>
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-[#C8CCD4] whitespace-nowrap">
-                        {formatCallDate(record)}
-                      </td>
+                        <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-[#C9BAC4] whitespace-nowrap">
+                          {formatCallDate(record)}
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-[#F3EFE6] text-right whitespace-nowrap">
-                        {formatDurationClock(record.durationSeconds)}
-                      </td>
+                        <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-[#FAF4F7] text-right whitespace-nowrap">
+                          {formatDurationClock(record.durationSeconds)}
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-right whitespace-nowrap font-medium text-[#E2C799]">
-                        {BRL_FORMATTER.format(record.amountCents / 100)}
-                      </td>
+                        <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-right whitespace-nowrap font-medium text-[#F4C2D7]">
+                          {BRL_FORMATTER.format(record.amountCents / 100)}
+                        </td>
 
-                      <td className="py-3.5 px-4 text-xs">
-                        {typeof record.rating === 'number' && record.rating > 0 ? (
-                          <div className="space-y-0.5 max-w-[200px]">
-                            <div className="flex items-center gap-1.5">
-                              <div className="flex items-center gap-0.5">
-                                {[1, 2, 3, 4, 5].map((star) => (
-                                  <Star
-                                    key={star}
-                                    className={`w-3.5 h-3.5 ${
-                                      star <= (record.rating ?? 0)
-                                        ? 'fill-[#C9A46B] text-[#C9A46B]'
-                                        : 'text-[#3C4250]'
-                                    }`}
-                                  />
-                                ))}
+                        <td className="py-3.5 px-4 text-xs">
+                          {typeof record.rating === 'number' &&
+                          record.rating > 0 ? (
+                            <div className="space-y-0.5 max-w-[200px]">
+                              <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-0.5">
+                                  {[1, 2, 3, 4, 5].map((star) => (
+                                    <Star
+                                      key={star}
+                                      className={`w-3.5 h-3.5 ${
+                                        star <= (record.rating ?? 0)
+                                          ? 'fill-[#F4C2D7] text-[#F4C2D7]'
+                                          : 'text-[#938291]/40'
+                                      }`}
+                                    />
+                                  ))}
+                                </div>
+                                <span className="font-mono tabular-nums text-[#F4C2D7]">
+                                  {record.rating}/5
+                                </span>
                               </div>
-                              <span className="font-mono tabular-nums text-[#E2C799]">
-                                {record.rating}/5
-                              </span>
+                              {record.ratingComment && (
+                                <p
+                                  title={record.ratingComment}
+                                  className="text-[11px] text-[#C9BAC4] truncate"
+                                >
+                                  "{record.ratingComment}"
+                                </p>
+                              )}
                             </div>
-                            {record.ratingComment && (
-                              <p
-                                title={record.ratingComment}
-                                className="text-[11px] text-[#9BA1AE] truncate"
+                          ) : (
+                            <span className="text-[#938291] whitespace-nowrap">
+                              Não avaliada
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-xs whitespace-nowrap">
+                          <span
+                            className={
+                              isCompleted ? 'text-[#86EFAC]' : 'text-[#FCA5A5]'
+                            }
+                          >
+                            {isCompleted ? 'Finalizada' : 'Reembolsada'}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-5 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void onUpdateCallHistoryStatus(
+                                  record.id,
+                                  isCompleted ? 'refunded' : 'completed'
+                                )
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>
+                                {isCompleted ? 'Reembolsar' : 'Revalidar'}
+                              </span>
+                            </button>
+
+                            {onUpdateCallHistoryRecord && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isEditingThisRecord) {
+                                    setEditingHistoryId(null);
+                                  } else {
+                                    setEditingHistoryId(record.id);
+                                    setEditHistMinutes(
+                                      String(
+                                        Math.max(
+                                          1,
+                                          Math.round(
+                                            record.durationSeconds / 60
+                                          )
+                                        )
+                                      )
+                                    );
+                                    setEditHistAmountBrl(
+                                      (record.amountCents / 100).toFixed(2)
+                                    );
+                                    setEditHistStatus(record.status);
+                                  }
+                                }}
+                                aria-label={`Editar transação de ${record.userName}`}
+                                className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#F4C2D7] transition-colors shrink-0 cursor-pointer"
                               >
-                                "{record.ratingComment}"
-                              </p>
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {onDeleteCallHistoryRecord && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void onDeleteCallHistoryRecord(record.id)
+                                }
+                                aria-label={`Remover transação de ${record.userName}`}
+                                className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors shrink-0 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             )}
                           </div>
-                        ) : (
-                          <span className="text-[#727988] whitespace-nowrap">
-                            Não avaliada
-                          </span>
-                        )}
-                      </td>
+                        </td>
+                      </tr>
 
-                      <td className="py-3.5 px-4 text-xs whitespace-nowrap">
-                        <span
-                          className={
-                            isCompleted ? 'text-[#86EFAC]' : 'text-[#FCA5A5]'
-                          }
-                        >
-                          {isCompleted ? 'Finalizada' : 'Reembolsada'}
-                        </span>
-                      </td>
+                      {isEditingThisRecord && onUpdateCallHistoryRecord && (
+                        <tr className="bg-[#150D1D]">
+                          <td colSpan={7} className="p-4 border-t border-[#F4C2D7]/15">
+                            <form
+                              onSubmit={async (e) => {
+                                e.preventDefault();
+                                if (savingHistEdit) return;
+                                setSavingHistEdit(true);
+                                try {
+                                  const mins = Math.max(
+                                    0,
+                                    Math.min(
+                                      1440,
+                                      Number(editHistMinutes) || 0
+                                    )
+                                  );
+                                  const parsedBrl = Number(
+                                    editHistAmountBrl.replace(',', '.')
+                                  );
+                                  const cents = Math.max(
+                                    0,
+                                    Math.round(
+                                      (Number.isFinite(parsedBrl)
+                                        ? parsedBrl
+                                        : 0) * 100
+                                    )
+                                  );
+                                  await onUpdateCallHistoryRecord(record.id, {
+                                    durationSeconds: Math.round(mins * 60),
+                                    amountCents: cents,
+                                    status: editHistStatus,
+                                  });
+                                  setEditingHistoryId(null);
+                                } finally {
+                                  setSavingHistEdit(false);
+                                }
+                              }}
+                              className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end"
+                            >
+                              <div className="sm:col-span-3 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Duração (minutos)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={1440}
+                                  value={editHistMinutes}
+                                  onChange={(e) =>
+                                    setEditHistMinutes(e.target.value)
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-1.5 text-xs font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                />
+                              </div>
 
-                      <td className="py-3.5 px-5 text-right">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void onUpdateCallHistoryStatus(
-                              record.id,
-                              isCompleted ? 'refunded' : 'completed'
-                            )
-                          }
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>{isCompleted ? 'Reembolsar' : 'Revalidar'}</span>
-                        </button>
-                      </td>
-                    </tr>
+                              <div className="sm:col-span-3 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Valor Finalizado (R$)
+                                </label>
+                                <input
+                                  type="text"
+                                  value={editHistAmountBrl}
+                                  onChange={(e) =>
+                                    setEditHistAmountBrl(e.target.value)
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3 py-1.5 text-xs font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                />
+                              </div>
+
+                              <div className="sm:col-span-3 space-y-1">
+                                <label className="block text-[11px] text-[#C9BAC4]">
+                                  Status da Transação
+                                </label>
+                                <select
+                                  value={editHistStatus}
+                                  onChange={(e) =>
+                                    setEditHistStatus(
+                                      e.target.value as CallHistoryStatus
+                                    )
+                                  }
+                                  className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-2.5 py-1.5 text-xs text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                                >
+                                  <option value="completed">Finalizada</option>
+                                  <option value="refunded">Reembolsada</option>
+                                </select>
+                              </div>
+
+                              <div className="sm:col-span-3 flex items-center justify-end gap-2">
+                                <button
+                                  type="submit"
+                                  disabled={savingHistEdit}
+                                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta cursor-pointer"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                  <span>Salvar</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingHistoryId(null)}
+                                  aria-label="Cancelar edição da transação"
+                                  className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </form>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>

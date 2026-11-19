@@ -49,8 +49,95 @@ interface RoomParticipantRecord {
   planPriceCents?: number;
 }
 
+interface QueueEntryRecord {
+  callId: string;
+  uid: string;
+  planDurationMinutes: number;
+  createdAtMs: number;
+}
+
+interface ActiveCallEstimate {
+  callId: string;
+  startedAtMs: number;
+  durationMinutes: number;
+}
+
 const connectedPeers = new Map<string, ConnectedPeer>();
 const roomParticipants = new Map<string, RoomParticipantRecord>();
+const visitorQueueEntries = new Map<string, QueueEntryRecord>();
+let authoritativeWaitingQueue: QueueEntryRecord[] = [];
+let hasAuthoritativeQueue = false;
+let activeCallEstimate: ActiveCallEstimate | null = null;
+
+function getOrderedWaitingEntries(): QueueEntryRecord[] {
+  const source = hasAuthoritativeQueue
+    ? authoritativeWaitingQueue
+    : Array.from(visitorQueueEntries.values());
+  return [...source].sort((a, b) => a.createdAtMs - b.createdAtMs);
+}
+
+function getActiveCallRemainingSeconds(nowMs: number): number {
+  if (!activeCallEstimate) return 0;
+  const durationSec = Math.max(60, activeCallEstimate.durationMinutes * 60);
+  const elapsedSec = Math.max(
+    0,
+    Math.round((nowMs - activeCallEstimate.startedAtMs) / 1000)
+  );
+  return Math.max(45, durationSec - elapsedSec);
+}
+
+function buildQueueSummaryForUser(uid: string | null) {
+  const nowMs = Date.now();
+  const ordered = getOrderedWaitingEntries();
+  const totalWaiting = ordered.length;
+  const activeCallRemainingSeconds = getActiveCallRemainingSeconds(nowMs);
+
+  const myIndex = uid ? ordered.findIndex((entry) => entry.uid === uid) : -1;
+  const myPosition = myIndex >= 0 ? myIndex + 1 : 0;
+  const aheadSlice = myIndex >= 0 ? ordered.slice(0, myIndex) : ordered;
+  const aheadCount = aheadSlice.length;
+
+  const aheadQueueSeconds = aheadSlice.reduce((sum, entry) => {
+    const mins = Math.max(1, Math.min(240, entry.planDurationMinutes || 10));
+    return sum + mins * 60 + 30;
+  }, 0);
+
+  let totalEstimatedWaitSeconds = activeCallRemainingSeconds + aheadQueueSeconds;
+  if (myIndex >= 0 && totalEstimatedWaitSeconds === 0) {
+    const entry = ordered[myIndex];
+    const waitedSec = Math.max(
+      0,
+      Math.round((nowMs - entry.createdAtMs) / 1000)
+    );
+    totalEstimatedWaitSeconds = Math.max(15, 45 - waitedSec);
+  }
+
+  return {
+    totalWaiting,
+    myPosition,
+    aheadCount,
+    activeCallRemainingSeconds,
+    aheadQueueSeconds,
+    totalEstimatedWaitSeconds,
+    updatedAtMs: nowMs,
+  };
+}
+
+function sendQueueSyncToPeer(peer: ConnectedPeer) {
+  if (peer.ws.readyState !== WebSocket.OPEN) return;
+  peer.ws.send(
+    JSON.stringify({
+      type: 'queue:sync',
+      summary: buildQueueSummaryForUser(peer.uid),
+    })
+  );
+}
+
+function broadcastQueueSync() {
+  for (const peer of connectedPeers.values()) {
+    sendQueueSyncToPeer(peer);
+  }
+}
 
 function serializePeers() {
   return Array.from(connectedPeers.values()).map((peer) => ({
@@ -137,6 +224,7 @@ async function startServer() {
     const modelInRoom = Array.from(roomParticipants.values()).some(
       (p) => p.isAdmin
     );
+    const publicQueue = buildQueueSummaryForUser(null);
     res.json({
       ok: true,
       roomId: MAIN_ROOM_ID,
@@ -144,6 +232,8 @@ async function startServer() {
       modelInRoom,
       roomParticipantCount: roomParticipants.size,
       activePeersCount: connectedPeers.size,
+      totalWaiting: publicQueue.totalWaiting,
+      estimatedWaitSeconds: publicQueue.totalEstimatedWaitSeconds,
     });
   });
 
@@ -251,6 +341,12 @@ async function startServer() {
               type: 'room:sync',
               roomId: MAIN_ROOM_ID,
               participants: serializeRoomParticipants(),
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'queue:sync',
+              summary: buildQueueSummaryForUser(uid),
             })
           );
           broadcastPresence();
@@ -392,7 +488,24 @@ async function startServer() {
           sender.inCallWith = targetUid;
           const target = connectedPeers.get(targetUid);
           if (target) target.inCallWith = sender.uid;
+          const callId =
+            typeof data.callId === 'string' && data.callId
+              ? data.callId.slice(0, 128)
+              : `call_${Date.now()}`;
+          const durationMinutes =
+            typeof data.planDurationMinutes === 'number' &&
+            data.planDurationMinutes > 0
+              ? data.planDurationMinutes
+              : 15;
+          activeCallEstimate = {
+            callId,
+            startedAtMs: Date.now(),
+            durationMinutes,
+          };
+          visitorQueueEntries.delete(sender.uid);
+          visitorQueueEntries.delete(targetUid);
           broadcastPresence();
+          broadcastQueueSync();
         } else if (msgType === 'call:end' || msgType === 'call:reject') {
           if (sender.inCallWith !== `room:${MAIN_ROOM_ID}`) {
             sender.inCallWith = null;
@@ -401,7 +514,16 @@ async function startServer() {
           if (target && target.inCallWith === sender.uid) {
             target.inCallWith = null;
           }
+          if (
+            activeCallEstimate &&
+            (typeof data.callId !== 'string' ||
+              !data.callId ||
+              activeCallEstimate.callId === data.callId)
+          ) {
+            activeCallEstimate = null;
+          }
           broadcastPresence();
+          broadcastQueueSync();
         }
 
         sendToUser(targetUid, {
@@ -411,6 +533,119 @@ async function startServer() {
           fromPhotoUrl: sender.photoUrl,
           fromRole: sender.role,
         });
+        return;
+      }
+
+      if (msgType === 'queue:entry') {
+        const status = typeof data.status === 'string' ? data.status : 'idle';
+        if (status === 'waiting') {
+          const callId =
+            typeof data.callId === 'string' && data.callId
+              ? data.callId.slice(0, 128)
+              : `wait_${sender.uid}`;
+          const planDurationMinutes =
+            typeof data.planDurationMinutes === 'number' &&
+            data.planDurationMinutes > 0
+              ? Math.min(240, Math.round(data.planDurationMinutes))
+              : 10;
+          const createdAtMs =
+            typeof data.createdAtMs === 'number' && data.createdAtMs > 0
+              ? data.createdAtMs
+              : Date.now();
+
+          visitorQueueEntries.set(sender.uid, {
+            callId,
+            uid: sender.uid,
+            planDurationMinutes,
+            createdAtMs,
+          });
+          if (hasAuthoritativeQueue) {
+            const idx = authoritativeWaitingQueue.findIndex(
+              (item) => item.uid === sender.uid
+            );
+            const nextEntry = {
+              callId,
+              uid: sender.uid,
+              planDurationMinutes,
+              createdAtMs,
+            };
+            if (idx >= 0) {
+              authoritativeWaitingQueue[idx] = nextEntry;
+            } else {
+              authoritativeWaitingQueue.push(nextEntry);
+            }
+          }
+        } else {
+          visitorQueueEntries.delete(sender.uid);
+          if (hasAuthoritativeQueue) {
+            authoritativeWaitingQueue = authoritativeWaitingQueue.filter(
+              (item) => item.uid !== sender.uid
+            );
+          }
+        }
+        broadcastQueueSync();
+        return;
+      }
+
+      if (msgType === 'queue:authoritative_sync') {
+        if (!sender.isAdmin) return;
+        const rawEntries = Array.isArray(data.waiting) ? data.waiting : [];
+        authoritativeWaitingQueue = rawEntries
+          .filter(
+            (item): item is Record<string, unknown> =>
+              Boolean(item) &&
+              typeof item === 'object' &&
+              typeof (item as Record<string, unknown>).uid === 'string' &&
+              typeof (item as Record<string, unknown>).callId === 'string'
+          )
+          .slice(0, 100)
+          .map((item) => ({
+            callId: String(item.callId).slice(0, 128),
+            uid: String(item.uid).slice(0, 128),
+            planDurationMinutes:
+              typeof item.planDurationMinutes === 'number' &&
+              item.planDurationMinutes > 0
+                ? Math.min(240, Math.round(item.planDurationMinutes))
+                : 10,
+            createdAtMs:
+              typeof item.createdAtMs === 'number' && item.createdAtMs > 0
+                ? item.createdAtMs
+                : Date.now(),
+          }));
+        hasAuthoritativeQueue = true;
+
+        const rawActive =
+          data.activeCall && typeof data.activeCall === 'object'
+            ? (data.activeCall as Record<string, unknown>)
+            : null;
+        if (
+          rawActive &&
+          typeof rawActive.callId === 'string' &&
+          rawActive.callId
+        ) {
+          const callId = rawActive.callId.slice(0, 128);
+          const durationMinutes =
+            typeof rawActive.durationMinutes === 'number' &&
+            rawActive.durationMinutes > 0
+              ? Math.min(240, Math.round(rawActive.durationMinutes))
+              : 15;
+          const startedAtMs =
+            typeof rawActive.startedAtMs === 'number' &&
+            rawActive.startedAtMs > 0
+              ? rawActive.startedAtMs
+              : activeCallEstimate?.callId === callId
+                ? activeCallEstimate.startedAtMs
+                : Date.now();
+          activeCallEstimate = {
+            callId,
+            durationMinutes,
+            startedAtMs,
+          };
+        } else {
+          activeCallEstimate = null;
+        }
+
+        broadcastQueueSync();
         return;
       }
 
@@ -496,6 +731,12 @@ async function startServer() {
             }
           }
           connectedPeers.delete(authenticatedUid);
+          visitorQueueEntries.delete(authenticatedUid);
+          if (current.isAdmin && connectedPeers.size === 0) {
+            hasAuthoritativeQueue = false;
+            authoritativeWaitingQueue = [];
+            activeCallEstimate = null;
+          }
           if (departedRoomPeer) {
             broadcastRoomSync();
             notifyRoomParticipantsAndAdmins(authenticatedUid, {
@@ -505,6 +746,7 @@ async function startServer() {
             });
           }
           broadcastPresence();
+          broadcastQueueSync();
         }
       }
     });

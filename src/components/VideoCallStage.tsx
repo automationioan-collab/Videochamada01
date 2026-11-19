@@ -4,7 +4,6 @@ import {
   MicOff,
   PhoneOff,
   Send,
-  Users,
   Video,
   VideoOff,
   Camera,
@@ -98,12 +97,28 @@ const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({
   }, [stream]);
 
   return (
-    <div className="relative w-full h-full min-h-[180px] rounded-lg overflow-hidden bg-[#101217] border border-white/10">
+    <div
+      data-protected-media="true"
+      onContextMenu={(e) => e.preventDefault()}
+      className="relative w-full h-full min-h-[180px] rounded-xl overflow-hidden bg-[#150D1D] border border-[#F4C2D7]/20 select-none"
+    >
       <video
         ref={videoRef}
         autoPlay
         playsInline
+        controls={false}
+        controlsList="nodownload nofullscreen noremoteplayback"
+        disablePictureInPicture
+        disableRemotePlayback
+        draggable={false}
+        onContextMenu={(e) => e.preventDefault()}
         className={`w-full h-full object-cover ${hasLiveVideo ? 'block' : 'hidden'}`}
+      />
+      <div
+        aria-hidden="true"
+        onContextMenu={(e) => e.preventDefault()}
+        onDragStart={(e) => e.preventDefault()}
+        className="absolute inset-0 z-10 select-none"
       />
       {!hasLiveVideo && (
         <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-4 text-center">
@@ -112,25 +127,25 @@ const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({
               src={participant.photoUrl}
               alt={participant.displayName}
               referrerPolicy="no-referrer"
-              className="w-14 h-14 rounded-full object-cover border border-white/15"
+              className="w-14 h-14 rounded-full object-cover border border-[#F4C2D7]/35"
             />
           ) : (
-            <div className="w-14 h-14 rounded-full bg-[#1B1E26] border border-white/15 flex items-center justify-center font-display text-xl text-[#C9A46B]">
+            <div className="w-14 h-14 rounded-full bg-[#21142D] border border-[#F4C2D7]/25 flex items-center justify-center font-display text-xl text-[#F4C2D7]">
               {participant.displayName.slice(0, 1).toUpperCase()}
             </div>
           )}
-          <p className="text-xs font-medium text-[#C8CCD4]">
+          <p className="text-xs font-medium text-[#C9BAC4]">
             {state === 'connected'
               ? 'Áudio conectado'
               : 'Conectando vídeo...'}
           </p>
         </div>
       )}
-      <div className="absolute inset-x-0 bottom-0 px-3 py-2 bg-gradient-to-t from-[#0B0C0F]/95 to-transparent flex items-center justify-between gap-2 text-xs">
-        <span className="font-medium text-[#F3EFE6] truncate">
+      <div className="absolute inset-x-0 bottom-0 px-3 py-2 bg-gradient-to-t from-[#0B060F]/95 to-transparent flex items-center justify-between gap-2 text-xs">
+        <span className="font-medium text-[#FAF4F7] truncate">
           {participant.displayName}
         </span>
-        <span className="text-[11px] font-mono tabular-nums text-[#E2C799] shrink-0">
+        <span className="text-[11px] font-mono tabular-nums text-[#F4C2D7] shrink-0">
           {participant.isAdmin ? 'Modelo' : 'Visitante'}
           {state === 'connected' ? ' · Ao vivo' : ''}
         </span>
@@ -263,8 +278,12 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   return (
     <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
       {/* Main Video Stage */}
-      <div className="lg:col-span-8 flex flex-col bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-        <div className="relative aspect-video bg-[#0B0C0F] w-full overflow-hidden">
+      <div className="lg:col-span-8 flex flex-col luxury-card border border-[#F4C2D7]/25 rounded-2xl overflow-hidden shadow-[0_24px_60px_-24px_rgba(192,98,162,0.28)]">
+        <div
+          data-protected-media="true"
+          onContextMenu={(e) => e.preventDefault()}
+          className="relative tech-reticle aspect-video bg-[#0B060F] w-full overflow-hidden select-none"
+        >
           {isGroupRoom && otherRoomParticipants.length > 0 ? (
             <div className={`w-full h-full p-3 pt-16 pb-16 sm:pb-3 grid gap-3 ${groupGridCols}`}>
               {otherRoomParticipants.map((participant) => (
@@ -281,6 +300,12 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
               ref={remoteVideoRef}
               autoPlay
               playsInline
+              controls={false}
+              controlsList="nodownload nofullscreen noremoteplayback"
+              disablePictureInPicture
+              disableRemotePlayback
+              draggable={false}
+              onContextMenu={(e) => e.preventDefault()}
               className="w-full h-full object-cover"
             />
           ) : (
@@ -289,6 +314,11 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
+                controls={false}
+                controlsList="nodownload nofullscreen noremoteplayback"
+                disablePictureInPicture
+                disableRemotePlayback
+                draggable={false}
                 className="hidden"
               />
               {!standbyFailed ? (
@@ -296,22 +326,30 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                   src="/src/assets/images/model_studio_hero_1794946401293.jpg"
                   alt={modelProfile?.displayName || 'Estúdio da Modelo'}
                   referrerPolicy="no-referrer"
+                  draggable={false}
+                  onContextMenu={(e) => e.preventDefault()}
                   onError={() => setStandbyFailed(true)}
                   className="w-full h-full object-cover opacity-80"
                 />
               ) : (
-                <div className="w-full h-full flex items-center justify-center bg-[#101217]">
-                  <Video className="w-12 h-12 text-[#C9A46B]/50" />
+                <div className="w-full h-full flex items-center justify-center bg-[#150D1D]">
+                  <Video className="w-12 h-12 text-[#F4C2D7]/50" />
                 </div>
               )}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#0B0C0F]/90 via-[#0B0C0F]/35 to-[#0B0C0F]/60" />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#0B060F]/95 via-[#0B060F]/35 to-[#0B060F]/60 pointer-events-none" />
             </>
           )}
+          <div
+            aria-hidden="true"
+            onContextMenu={(e) => e.preventDefault()}
+            onDragStart={(e) => e.preventDefault()}
+            className="absolute inset-0 z-[5] select-none"
+          />
 
           {/* Top overlay bar */}
           <div className="absolute top-0 left-0 right-0 p-5 flex items-center justify-between gap-4 pointer-events-none">
             <div className="space-y-0.5">
-              <p className="text-xs font-medium text-[#E2C799]">
+              <p className="text-xs font-medium text-[#F4C2D7]">
                 {isGroupRoom
                   ? `Sala Ao Vivo · ${studioState?.modelName || 'Lorena Noir'}`
                   : inActiveCall
@@ -320,13 +358,13 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                       modelProfile?.displayName ||
                       'Lorena Noir'}
               </p>
-              <p className="text-xs font-mono tabular-nums text-[#C8CCD4]">
+              <p className="text-xs font-mono tabular-nums text-[#C9BAC4]">
                 {connectionLabel}
               </p>
             </div>
-            <div className="text-right text-xs text-[#C8CCD4] space-y-0.5">
+            <div className="text-right text-xs text-[#C9BAC4] space-y-0.5">
               {inActiveCall && activePlan && (
-                <p className="font-mono tabular-nums text-[#E2C799]">
+                <p className="font-mono tabular-nums text-[#F4C2D7]">
                   {activePlan.name} · {BRL_FORMATTER.format(activePlan.priceCents / 100)}
                 </p>
               )}
@@ -340,7 +378,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
           {((isGroupRoom && otherRoomParticipants.length === 0) ||
             (!isGroupRoom && !hasRemoteVideo)) && (
             <div className="absolute bottom-6 left-6 right-52 space-y-1.5 pointer-events-none">
-              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#F3EFE6]">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
                 {isGroupRoom
                   ? 'Sala Ao Vivo Aberta'
                   : inActiveCall
@@ -349,7 +387,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                       ? 'Câmera do Estúdio Pronta'
                       : 'Sala Privada da Modelo'}
               </h2>
-              <p className="text-xs sm:text-sm text-[#C8CCD4] max-w-lg">
+              <p className="text-xs sm:text-sm text-[#C9BAC4] max-w-lg">
                 {isGroupRoom
                   ? 'Você já está conectado na videochamada ao vivo. Novos internautas e Lorena Noir aparecerão automaticamente neste painel.'
                   : inActiveCall
@@ -362,19 +400,29 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
           )}
 
           {/* Local Camera Picture-in-Picture */}
-          <div className="absolute bottom-4 right-4 w-36 sm:w-44 aspect-video rounded-lg overflow-hidden bg-[#161920] border border-white/15">
+          <div
+            data-protected-media="true"
+            onContextMenu={(e) => e.preventDefault()}
+            className="absolute bottom-4 right-4 z-20 w-36 sm:w-44 aspect-video rounded-xl overflow-hidden bg-[#1A1024] border border-[#F4C2D7]/25 shadow-[0_0_24px_rgba(244,194,215,0.12)] select-none"
+          >
             {localStream && camEnabled ? (
               <video
                 ref={localVideoRef}
                 autoPlay
                 muted
                 playsInline
+                controls={false}
+                controlsList="nodownload nofullscreen noremoteplayback"
+                disablePictureInPicture
+                disableRemotePlayback
+                draggable={false}
+                onContextMenu={(e) => e.preventDefault()}
                 className="w-full h-full object-cover scale-x-[-1]"
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 p-2 text-center">
-                <VideoOff className="w-4 h-4 text-[#9BA1AE]" />
-                <span className="text-[11px] text-[#9BA1AE]">
+                <VideoOff className="w-4 h-4 text-[#938291]" />
+                <span className="text-[11px] text-[#938291]">
                   {localStream ? 'Câmera pausada' : 'Prévia desligada'}
                 </span>
               </div>
@@ -383,13 +431,13 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
         </div>
 
         {/* Media Control Bar */}
-        <div className="p-4 sm:px-6 border-t border-white/10 flex flex-wrap items-center justify-between gap-4 bg-[#13151A]">
+        <div className="p-4 sm:px-6 border-t border-[#F4C2D7]/15 flex flex-wrap items-center justify-between gap-4 bg-[#150D1D]">
           <div className="flex flex-wrap items-center gap-3">
             {!localStream ? (
               <button
                 type="button"
                 onClick={() => void onAcquireMedia()}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Camera className="w-4 h-4" />
                 <span>Ativar Câmera e Microfone</span>
@@ -400,14 +448,14 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                   type="button"
                   disabled={isMutedByAdmin}
                   onClick={onToggleMic}
-                  className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                     micEnabled && !isMutedByAdmin
-                      ? 'bg-[#1C2029] border-white/15 text-[#F3EFE6] hover:bg-[#252A36]'
+                      ? 'bg-[#21142D] border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837]'
                       : 'bg-red-950/50 border-red-500/40 text-red-200'
                   }`}
                 >
                   {micEnabled && !isMutedByAdmin ? (
-                    <Mic className="w-4 h-4" />
+                    <Mic className="w-4 h-4 text-[#F4C2D7]" />
                   ) : (
                     <MicOff className="w-4 h-4" />
                   )}
@@ -423,14 +471,14 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                 <button
                   type="button"
                   onClick={onToggleCam}
-                  className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     camEnabled
-                      ? 'bg-[#1C2029] border-white/15 text-[#F3EFE6] hover:bg-[#252A36]'
-                      : 'bg-[#13151A] border-white/10 text-[#9BA1AE]'
+                      ? 'bg-[#21142D] border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837]'
+                      : 'bg-[#150D1D] border-[#F4C2D7]/15 text-[#938291]'
                   }`}
                 >
                   {camEnabled ? (
-                    <Video className="w-4 h-4" />
+                    <Video className="w-4 h-4 text-[#F4C2D7]" />
                   ) : (
                     <VideoOff className="w-4 h-4" />
                   )}
@@ -444,7 +492,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
             <button
               type="button"
               onClick={onEndCall}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#DC2626] text-white hover:bg-[#B91C1C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full bg-[#DC2626] text-white hover:bg-[#B91C1C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <PhoneOff className="w-4 h-4" />
               <span>Encerrar Chamada</span>
@@ -460,13 +508,13 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
       </div>
 
       {/* In-Call Chat Sidebar */}
-      <aside className="lg:col-span-4 flex flex-col bg-[#13151A] border border-white/10 rounded-xl overflow-hidden min-h-[420px]">
-        <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+      <aside className="lg:col-span-4 flex flex-col luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden min-h-[420px]">
+        <div className="px-5 py-4 border-b border-[#F4C2D7]/15 flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-[#F3EFE6]">
+            <h3 className="text-sm font-semibold text-[#FAF4F7]">
               Chat da Chamada
             </h3>
-            <p className="text-xs text-[#9BA1AE]">
+            <p className="text-xs text-[#C9BAC4]">
               {inActiveCall
                 ? `Sessão privada · ${activePartnerName}`
                 : 'Mensagens sincronizadas da sessão'}
@@ -480,10 +528,10 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
         >
           {callMessages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center py-10 space-y-2">
-              <p className="text-sm text-[#9BA1AE]">
+              <p className="text-sm text-[#C9BAC4]">
                 Nenhuma mensagem nesta chamada ainda.
               </p>
-              <p className="text-xs text-[#727988]">
+              <p className="text-xs text-[#938291]">
                 {inActiveCall
                   ? 'Envie uma mensagem abaixo para conversar durante o vídeo.'
                   : 'O chat privado fica disponível assim que houver uma solicitação ativa.'}
@@ -499,7 +547,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                     isMine ? 'items-end' : 'items-start'
                   }`}
                 >
-                  <div className="flex items-center gap-2 text-[11px] text-[#9BA1AE]">
+                  <div className="flex items-center gap-2 text-[11px] text-[#938291]">
                     <span>{msg.senderName}</span>
                     <span aria-hidden="true">·</span>
                     <span>
@@ -507,10 +555,10 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                     </span>
                   </div>
                   <div
-                    className={`px-3.5 py-2.5 rounded-lg text-sm max-w-[85%] break-words ${
+                    className={`px-3.5 py-2.5 rounded-xl text-sm max-w-[85%] break-words ${
                       isMine
-                        ? 'bg-[#C9A46B]/20 border border-[#C9A46B]/30 text-[#F3EFE6]'
-                        : 'bg-[#1B1E26] border border-white/10 text-[#E5E2DC]'
+                        ? 'bg-[#281837] border border-[#F4C2D7]/35 text-[#FAF4F7]'
+                        : 'bg-[#1A1024] border border-[#F4C2D7]/15 text-[#FAF4F7]'
                     }`}
                   >
                     {msg.text}
@@ -523,7 +571,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
 
         <form
           onSubmit={handleSubmitChat}
-          className="p-4 border-t border-white/10 flex items-center gap-2"
+          className="p-4 border-t border-[#F4C2D7]/15 flex items-center gap-2"
         >
           <input
             type="text"
@@ -540,7 +588,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
                     ? 'Escrever mensagem...'
                     : 'Inicie uma chamada para enviar mensagens'
             }
-            className="flex-1 bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm text-[#F3EFE6] placeholder:text-[#686E7C] focus:outline-none focus:border-[#C9A46B] disabled:opacity-50"
+            className="flex-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7] disabled:opacity-50"
           />
           <button
             type="submit"
@@ -552,7 +600,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
               isBlocked
             }
             aria-label="Enviar mensagem"
-            className="p-2.5 rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0"
+            className="p-2.5 rounded-full luxury-rose-cta transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0"
           >
             <Send className="w-4 h-4" />
           </button>

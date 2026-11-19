@@ -1,13 +1,18 @@
 import React, { useMemo, useState } from 'react';
+import { motion } from 'motion/react';
 import {
   Ban,
+  BellRing,
   Mic,
   MicOff,
   PhoneCall,
   PhoneIncoming,
   PhoneOff,
+  Trash2,
   Users,
   Video,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import type {
@@ -19,20 +24,26 @@ import type {
   CallPlan,
   CallRequest,
   CallStatus,
+  GalleryCategoryType,
+  GalleryItemRecord,
   InterestMessage,
   InterestMessageStatus,
   PresencePeer,
   RoomParticipant,
-  StudioCallMode,
+  StudioConfig,
   StudioProfile,
+  StudioRole,
   StudioState,
+  StudioStateUpdatePatch,
 } from '../types/studio';
 import type { ModerationEffect } from '../hooks/useWebSocketStudio';
-import { isDndActiveNow } from '../lib/schedule';
+import { getScheduleFromState, isDndActiveNow } from '../lib/schedule';
+import { AdminSiteEditor } from './AdminSiteEditor';
 import { CallPlansManager } from './CallPlansManager';
+import { DailyRevenueBarChart } from './DailyRevenueBarChart';
 import { DoNotDisturbPanel } from './DoNotDisturbPanel';
 import { InterestMessagesPanel } from './InterestMessagesPanel';
-import { ModelOfflineView } from './ModelOfflineView';
+import { OperatingSchedulePanel } from './OperatingSchedulePanel';
 import { UserControlPanel } from './UserControlPanel';
 import { VideoCallStage } from './VideoCallStage';
 
@@ -49,6 +60,8 @@ interface ModelAdminPageProps {
   peers: PresencePeer[];
   roomParticipants: RoomParticipant[];
   studioState: StudioState | null;
+  studioConfig: StudioConfig | null;
+  galleryItems: GalleryItemRecord[];
   callQueue: CallRequest[];
   callMessages: CallMessage[];
   callHistory: CallHistoryRecord[];
@@ -56,6 +69,9 @@ interface ModelAdminPageProps {
   callPlans: CallPlan[];
   ratePerMinuteCents: number;
   onChangeRatePerMinuteCents: (cents: number) => void;
+  soundEnabled: boolean;
+  onToggleSoundEnabled: () => void;
+  onTestSoundDing: () => void;
   wsConnected: boolean;
   isGroupRoom: boolean;
   activeCallId: string | null;
@@ -97,6 +113,7 @@ interface ModelAdminPageProps {
     status: CallStatus,
     paymentStatus?: CallPaymentStatus
   ) => Promise<void>;
+  onDeleteCallRequest: (requestId: string) => Promise<void>;
   onDirectCallUser: (target: {
     uid: string;
     displayName: string;
@@ -112,28 +129,34 @@ interface ModelAdminPageProps {
     sortOrder: number;
   }) => Promise<void>;
   onDeletePlan: (planId: string) => Promise<void>;
-  onUpdateStudioState: (
-    patch: Partial<{
-      modelName: string;
-      isLive: boolean;
-      callMode: StudioCallMode;
-      headline: string;
-      autoScheduleEnabled: boolean;
-      scheduleStartTime: string;
-      scheduleEndTime: string;
-      scheduleDays: string;
-      scheduleTimezone: string;
-      dndActive: boolean;
-      dndUntilMs: number;
-      dndScheduleEnabled: boolean;
-      dndStartTime: string;
-      dndEndTime: string;
-    }>
+  onUpdateStudioState: (patch: StudioStateUpdatePatch) => Promise<void>;
+  onSaveStudioConfig: (
+    patch: Partial<Omit<StudioConfig, 'modelUid' | 'updatedAt'>>
   ) => Promise<void>;
+  onSaveGalleryItem: (input: {
+    id?: string;
+    title: string;
+    caption: string;
+    category: GalleryCategoryType;
+    specs: string;
+    src: string;
+    alt: string;
+    sortOrder: number;
+    active: boolean;
+  }) => Promise<void>;
+  onDeleteGalleryItem: (itemId: string) => Promise<void>;
+  onRestoreDefaultGallery: () => Promise<void>;
   onUpdateUserControl: (
     targetUid: string,
-    patch: Partial<{ accessStatus: AccessStatus; notes: string }>
+    patch: Partial<{
+      displayName: string;
+      photoUrl: string;
+      role: StudioRole;
+      accessStatus: AccessStatus;
+      notes: string;
+    }>
   ) => Promise<void>;
+  onDeleteUserProfile: (targetUid: string) => Promise<void>;
   onSendModeration: (
     targetUid: string,
     action: ModerationEffect['action'],
@@ -153,6 +176,15 @@ interface ModelAdminPageProps {
     recordId: string,
     status: CallHistoryStatus
   ) => Promise<void>;
+  onUpdateCallHistoryRecord: (
+    recordId: string,
+    patch: Partial<{
+      durationSeconds: number;
+      amountCents: number;
+      status: CallHistoryStatus;
+    }>
+  ) => Promise<void>;
+  onDeleteCallHistoryRecord: (recordId: string) => Promise<void>;
   onUpdateInterestMessageStatus: (
     messageId: string,
     status: InterestMessageStatus
@@ -160,7 +192,12 @@ interface ModelAdminPageProps {
   onDeleteInterestMessage: (messageId: string) => Promise<void>;
 }
 
-type AdminSection = 'reception' | 'plans' | 'offline_schedule' | 'management';
+type AdminSection =
+  | 'reception'
+  | 'site_editor'
+  | 'plans'
+  | 'offline_schedule'
+  | 'management';
 
 export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   myUid,
@@ -170,6 +207,8 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   peers,
   roomParticipants,
   studioState,
+  studioConfig,
+  galleryItems,
   callQueue,
   callMessages,
   callHistory,
@@ -177,6 +216,9 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   callPlans,
   ratePerMinuteCents,
   onChangeRatePerMinuteCents,
+  soundEnabled,
+  onToggleSoundEnabled,
+  onTestSoundDing,
   wsConnected,
   isGroupRoom,
   activeCallId,
@@ -203,14 +245,22 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onRejectIncomingRing,
   onAcceptQueueAndCall,
   onUpdateCallStatus,
+  onDeleteCallRequest,
   onDirectCallUser,
   onSavePlan,
   onDeletePlan,
   onUpdateStudioState,
+  onSaveStudioConfig,
+  onSaveGalleryItem,
+  onDeleteGalleryItem,
+  onRestoreDefaultGallery,
   onUpdateUserControl,
+  onDeleteUserProfile,
   onSendModeration,
   onRecordCallHistory,
   onUpdateCallHistoryStatus,
+  onUpdateCallHistoryRecord,
+  onDeleteCallHistoryRecord,
   onUpdateInterestMessageStatus,
   onDeleteInterestMessage,
 }) => {
@@ -244,24 +294,30 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   return (
     <div className="space-y-6">
       {/* Model Reception Top Control Strip */}
-      <section className="bg-[#13151A] border border-white/10 rounded-xl p-5 sm:px-6 flex flex-col xl:flex-row xl:items-center justify-between gap-5">
+      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-5 sm:px-6 flex flex-col xl:flex-row xl:items-center justify-between gap-5">
         <div className="space-y-1">
-          <p className="text-xs font-medium text-[#C9A46B]">
+          <p className="text-xs font-medium text-[#F4C2D7]">
             Administração da Modelo · {studioState?.modelName || 'Lorena Noir'}
           </p>
-          <h1 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+          <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
             Central de Recepção de Videochamadas
           </h1>
-          <p className="text-xs text-[#9BA1AE] tabular-nums">
+          <p className="text-xs text-[#C9BAC4] tabular-nums">
             {onlineVisitors.length} internauta
             {onlineVisitors.length === 1 ? '' : 's'} online ·{' '}
             {roomParticipants.length} na sala ao vivo ·{' '}
             {waitingRequests.length} na fila ·{' '}
             {dndActiveNow
               ? 'Modo Não Perturbe ativo'
-              : wsConnected
-                ? 'Sinalização em tempo real ativa'
-                : 'Reconectando'}
+              : studioState?.autoScheduleEnabled
+                ? `Agenda automática (${
+                    getScheduleFromState(studioState).schedulePeriods.filter(
+                      (p) => p.enabled
+                    ).length
+                  } períodos)`
+                : wsConnected
+                  ? 'Sinalização em tempo real ativa'
+                  : 'Reconectando'}
           </p>
         </div>
 
@@ -270,7 +326,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             <button
               type="button"
               onClick={() => void onJoinGroupRoomAdmin()}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Video className="w-3.5 h-3.5" />
               <span>
@@ -290,10 +346,10 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 autoScheduleEnabled: false,
               })
             }
-            className={`px-4 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`px-4 py-2 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               studioState?.isLive ?? true
                 ? 'bg-[#16A34A]/20 border-[#16A34A]/50 text-[#86EFAC]'
-                : 'bg-[#1B1E26] border-white/15 text-[#9BA1AE]'
+                : 'bg-[#1A1024] border-[#F4C2D7]/20 text-[#C9BAC4]'
             }`}
           >
             {studioState?.isLive ?? true
@@ -302,7 +358,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
           </button>
 
           {/* Call mode selector */}
-          <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
             {(
               [
                 { id: 'open', label: 'Chamada Direta' },
@@ -314,10 +370,10 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 key={mode.id}
                 type="button"
                 onClick={() => void onUpdateStudioState({ callMode: mode.id })}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   (studioState?.callMode ?? 'open') === mode.id
-                    ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                    : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                    ? 'luxury-rose-cta font-semibold'
+                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                 }`}
               >
                 {mode.label}
@@ -325,52 +381,70 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             ))}
           </div>
 
+          {/* Audio Notification System Toggle & Test Ding */}
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
+            <button
+              type="button"
+              aria-pressed={soundEnabled}
+              onClick={onToggleSoundEnabled}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                soundEnabled
+                  ? 'bg-[#16A34A]/20 text-[#86EFAC]'
+                  : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+              }`}
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-3.5 h-3.5" />
+              ) : (
+                <VolumeX className="w-3.5 h-3.5" />
+              )}
+              <span>{soundEnabled ? 'Ding Ativo' : 'Som Mudo'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onTestSoundDing}
+              title="Reproduzir som de notificação (ding)"
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-full text-[#F4C2D7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <BellRing className="w-3.5 h-3.5" />
+              <span>Testar</span>
+            </button>
+          </div>
+
           {/* Admin Sub-View Switch */}
-          <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
-            <button
-              type="button"
-              onClick={() => setSection('reception')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                section === 'reception'
-                  ? 'bg-[#1F232C] text-[#F3EFE6]'
-                  : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
-              }`}
-            >
-              Recepção ao Vivo
-            </button>
-            <button
-              type="button"
-              onClick={() => setSection('plans')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                section === 'plans'
-                  ? 'bg-[#1F232C] text-[#F3EFE6]'
-                  : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
-              }`}
-            >
-              Planos e Preços
-            </button>
-            <button
-              type="button"
-              onClick={() => setSection('offline_schedule')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                section === 'offline_schedule'
-                  ? 'bg-[#1F232C] text-[#F3EFE6]'
-                  : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
-              }`}
-            >
-              Horários e Descanso
-            </button>
-            <button
-              type="button"
-              onClick={() => setSection('management')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                section === 'management'
-                  ? 'bg-[#1F232C] text-[#F3EFE6]'
-                  : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
-              }`}
-            >
-              Usuários e Receita
-            </button>
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full overflow-x-auto">
+            {(
+              [
+                { id: 'reception', label: 'Recepção ao Vivo' },
+                { id: 'site_editor', label: 'Site, Perfil e Galeria' },
+                { id: 'plans', label: 'Planos e Preços' },
+                { id: 'offline_schedule', label: 'Horários e Descanso' },
+                { id: 'management', label: 'Usuários e Receita' },
+              ] as const
+            ).map((tab) => {
+              const isSelected = section === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setSection(tab.id)}
+                  className={`relative px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    isSelected
+                      ? 'text-[#FAF4F7]'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                  }`}
+                >
+                  {isSelected && (
+                    <motion.span
+                      layoutId="admin-section-tab"
+                      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                      className="absolute inset-0 rounded-full bg-[#281837] border border-[#F4C2D7]/35 shadow-[0_0_16px_-4px_rgba(244,194,215,0.4)]"
+                    />
+                  )}
+                  <span className="relative z-10">{tab.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -379,12 +453,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
         <div className="space-y-6">
           {/* Active Caller Quick Moderation Bar when in a 1-on-1 call */}
           {activePartnerUid && !isGroupRoom && (
-            <div className="bg-[#13151A] border border-[#C9A46B]/40 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
+            <div className="luxury-card border border-[#F4C2D7]/40 rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
               <div className="text-xs space-y-0.5">
-                <p className="font-semibold text-[#F3EFE6]">
+                <p className="font-semibold text-[#FAF4F7]">
                   Atendendo agora: {activePartnerName}
                 </p>
-                <p className="text-[#9BA1AE]">
+                <p className="text-[#C9BAC4]">
                   Modere o áudio ou encerre o acesso do internauta instantaneamente.
                 </p>
               </div>
@@ -399,7 +473,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                     });
                     onSendModeration(activePartnerUid, wsAction);
                   }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#1B1E26] border border-white/15 text-[#F3EFE6] hover:bg-[#252A36] transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full bg-[#21142D] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
                 >
                   {activePartnerMuted ? (
                     <Mic className="w-3.5 h-3.5 text-[#86EFAC]" />
@@ -419,7 +493,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                     onSendModeration(activePartnerUid, 'block');
                     void onEndCall();
                   }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-950/40 border border-red-500/35 text-red-200 hover:bg-red-950/60 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full bg-red-950/40 border border-red-500/35 text-red-200 hover:bg-red-950/60 transition-colors cursor-pointer"
                 >
                   <Ban className="w-3.5 h-3.5" />
                   <span>Bloquear e Encerrar</span>
@@ -467,15 +541,15 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
           {/* Incoming Calls Queue & Online Visitors Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* Incoming & Waiting Queue */}
-            <section className="lg:col-span-6 bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+            <section className="lg:col-span-6 luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-[#F4C2D7]/15 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <PhoneIncoming className="w-4 h-4 text-[#C9A46B]" />
-                  <h2 className="text-sm font-semibold text-[#F3EFE6]">
+                  <PhoneIncoming className="w-4 h-4 text-[#F4C2D7]" />
+                  <h2 className="text-sm font-semibold text-[#FAF4F7]">
                     Chamadas Recebidas e Fila
                   </h2>
                 </div>
-                <span className="text-xs font-mono tabular-nums text-[#E2C799]">
+                <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
                   {waitingRequests.length + (incomingRing ? 1 : 0)} pendente
                   {waitingRequests.length + (incomingRing ? 1 : 0) === 1
                     ? ''
@@ -483,14 +557,14 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 </span>
               </div>
 
-              <div className="divide-y divide-white/5">
+              <div className="divide-y divide-[#F4C2D7]/10">
                 {incomingRing && (
-                  <div className="p-5 bg-[#1B1710] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="p-5 bg-[#21142D] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div className="space-y-0.5 min-w-0">
-                      <p className="text-xs font-semibold text-[#E2C799]">
+                      <p className="text-xs font-semibold text-[#F4C2D7]">
                         Chamando agora
                       </p>
-                      <p className="text-sm font-semibold text-[#F3EFE6] truncate">
+                      <p className="text-sm font-semibold text-[#FAF4F7] truncate">
                         {incomingRing.fromName}
                       </p>
                       {incomingRing.planName &&
@@ -508,7 +582,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                       <button
                         type="button"
                         onClick={() => void onAcceptIncomingRing()}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors cursor-pointer"
                       >
                         <Video className="w-3.5 h-3.5" />
                         <span>Atender Vídeo</span>
@@ -516,7 +590,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                       <button
                         type="button"
                         onClick={onRejectIncomingRing}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-[#1B1E26] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
                       >
                         <PhoneOff className="w-3.5 h-3.5" />
                         <span>Recusar</span>
@@ -527,10 +601,10 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
 
                 {waitingRequests.length === 0 && !incomingRing ? (
                   <div className="p-10 text-center space-y-1.5">
-                    <p className="text-sm font-medium text-[#F3EFE6]">
+                    <p className="text-sm font-medium text-[#FAF4F7]">
                       Nenhuma chamada aguardando atendimento.
                     </p>
-                    <p className="text-xs text-[#9BA1AE]">
+                    <p className="text-xs text-[#C9BAC4]">
                       Quando um internauta contratar um plano e chamar Lorena Noir, o pedido aparecerá aqui em tempo real.
                     </p>
                   </div>
@@ -545,15 +619,15 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                         className="px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                       >
                         <div className="min-w-0 space-y-0.5">
-                          <p className="text-sm font-medium text-[#F3EFE6] truncate">
+                          <p className="text-sm font-medium text-[#FAF4F7] truncate">
                             {req.userName}
                           </p>
-                          <p className="text-xs text-[#9BA1AE] truncate">
+                          <p className="text-xs text-[#C9BAC4] truncate">
                             {req.topic} · {isOnline ? 'Online agora' : 'Offline'}
                           </p>
                           {req.planName &&
                             typeof req.planPriceCents === 'number' && (
-                              <p className="text-[11px] font-mono tabular-nums text-[#E2C799]">
+                              <p className="text-[11px] font-mono tabular-nums text-[#F4C2D7]">
                                 {req.planName} ·{' '}
                                 {BRL_FORMATTER.format(req.planPriceCents / 100)}{' '}
                                 ·{' '}
@@ -568,7 +642,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                           <button
                             type="button"
                             onClick={() => void onAcceptQueueAndCall(req)}
-                            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors cursor-pointer"
+                            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
                           >
                             <Video className="w-3.5 h-3.5" />
                             <span>Atender</span>
@@ -583,9 +657,17 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                               )
                             }
                             aria-label={`Recusar ${req.userName}`}
-                            className="p-2 rounded-lg bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors cursor-pointer"
+                            className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
                           >
                             <X className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteCallRequest(req.id)}
+                            aria-label={`Remover pedido de ${req.userName}`}
+                            className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -596,11 +678,11 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             </section>
 
             {/* Online Visitors Right Now */}
-            <section className="lg:col-span-6 bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+            <section className="lg:col-span-6 luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-[#F4C2D7]/15 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <Users className="w-4 h-4 text-[#86EFAC]" />
-                  <h2 className="text-sm font-semibold text-[#F3EFE6]">
+                  <h2 className="text-sm font-semibold text-[#FAF4F7]">
                     Internautas Conectados Agora
                   </h2>
                 </div>
@@ -611,15 +693,15 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
 
               {onlineVisitors.length === 0 ? (
                 <div className="p-10 text-center space-y-1.5">
-                  <p className="text-sm font-medium text-[#F3EFE6]">
+                  <p className="text-sm font-medium text-[#FAF4F7]">
                     Nenhum internauta conectado neste instante.
                   </p>
-                  <p className="text-xs text-[#9BA1AE]">
-                    Você receberá uma notificação em tempo real assim que alguém entrar no site.
+                  <p className="text-xs text-[#C9BAC4]">
+                    Você receberá uma notificação sonora e visual assim que alguém entrar no site.
                   </p>
                 </div>
               ) : (
-                <div className="divide-y divide-white/5">
+                <div className="divide-y divide-[#F4C2D7]/10">
                   {onlineVisitors.map((visitor) => {
                     const prof = profileMap.get(visitor.uid);
                     const status = prof?.accessStatus || visitor.accessStatus;
@@ -635,18 +717,18 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                               src={visitor.photoUrl}
                               alt={visitor.displayName}
                               referrerPolicy="no-referrer"
-                              className="w-8 h-8 rounded-full object-cover shrink-0"
+                              className="w-8 h-8 rounded-full object-cover border border-[#F4C2D7]/25 shrink-0"
                             />
                           ) : (
-                            <div className="w-8 h-8 rounded-full bg-[#1B1E26] flex items-center justify-center text-xs font-semibold text-[#C9A46B] shrink-0">
+                            <div className="w-8 h-8 rounded-full bg-[#21142D] border border-[#F4C2D7]/25 flex items-center justify-center text-xs font-semibold text-[#F4C2D7] shrink-0">
                               {visitor.displayName.slice(0, 1).toUpperCase()}
                             </div>
                           )}
                           <div className="min-w-0">
-                            <p className="text-sm font-medium text-[#F3EFE6] truncate">
+                            <p className="text-sm font-medium text-[#FAF4F7] truncate">
                               {visitor.displayName}
                             </p>
-                            <p className="text-xs text-[#9BA1AE]">
+                            <p className="text-xs text-[#C9BAC4]">
                               {visitor.inCallWith
                                 ? 'Em videochamada'
                                 : 'Na recepção'}{' '}
@@ -672,7 +754,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                               photoUrl: visitor.photoUrl,
                             })
                           }
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-35 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-35 disabled:cursor-not-allowed transition-all whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <PhoneCall className="w-3.5 h-3.5" />
                           <span>Chamar</span>
@@ -685,6 +767,9 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             </section>
           </div>
 
+          {/* 30-Day Captured Revenue Bar Chart */}
+          <DailyRevenueBarChart callHistory={callHistory} callQueue={callQueue} />
+
           {/* Offline Interest Messages */}
           <InterestMessagesPanel
             messages={interestMessages}
@@ -694,6 +779,16 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             onDirectCallUser={onDirectCallUser}
           />
         </div>
+      ) : section === 'site_editor' ? (
+        <AdminSiteEditor
+          modelProfile={modelProfile}
+          studioConfig={studioConfig}
+          galleryItems={galleryItems}
+          onSaveStudioConfig={onSaveStudioConfig}
+          onSaveGalleryItem={onSaveGalleryItem}
+          onDeleteGalleryItem={onDeleteGalleryItem}
+          onRestoreDefaultGallery={onRestoreDefaultGallery}
+        />
       ) : section === 'plans' ? (
         <CallPlansManager
           plans={callPlans}
@@ -702,14 +797,8 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
         />
       ) : section === 'offline_schedule' ? (
         <div className="space-y-8">
-          <ModelOfflineView
-            isAdmin={true}
-            myProfile={myProfile}
-            modelProfile={modelProfile}
+          <OperatingSchedulePanel
             studioState={studioState}
-            modelOnline={true}
-            myInterestMessages={interestMessages}
-            onSendInterestMessage={async () => null}
             onUpdateStudioState={onUpdateStudioState}
           />
           <DoNotDisturbPanel
@@ -725,27 +814,33 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
           />
         </div>
       ) : (
-        <UserControlPanel
-          myUid={myUid}
-          profiles={allProfiles}
-          peers={peers}
-          studioState={studioState}
-          callHistory={callHistory}
-          interestMessages={interestMessages}
-          callPlans={callPlans}
-          ratePerMinuteCents={ratePerMinuteCents}
-          onChangeRatePerMinuteCents={onChangeRatePerMinuteCents}
-          onUpdateStudioState={onUpdateStudioState}
-          onUpdateUserControl={onUpdateUserControl}
-          onSendModeration={onSendModeration}
-          onDirectCallUser={onDirectCallUser}
-          onSavePlan={onSavePlan}
-          onDeletePlan={onDeletePlan}
-          onRecordCallHistory={onRecordCallHistory}
-          onUpdateCallHistoryStatus={onUpdateCallHistoryStatus}
-          onUpdateInterestMessageStatus={onUpdateInterestMessageStatus}
-          onDeleteInterestMessage={onDeleteInterestMessage}
-        />
+        <div className="space-y-8">
+          <DailyRevenueBarChart callHistory={callHistory} callQueue={callQueue} />
+          <UserControlPanel
+            myUid={myUid}
+            profiles={allProfiles}
+            peers={peers}
+            studioState={studioState}
+            callHistory={callHistory}
+            interestMessages={interestMessages}
+            callPlans={callPlans}
+            ratePerMinuteCents={ratePerMinuteCents}
+            onChangeRatePerMinuteCents={onChangeRatePerMinuteCents}
+            onUpdateStudioState={onUpdateStudioState}
+            onUpdateUserControl={onUpdateUserControl}
+            onDeleteUserProfile={onDeleteUserProfile}
+            onSendModeration={onSendModeration}
+            onDirectCallUser={onDirectCallUser}
+            onSavePlan={onSavePlan}
+            onDeletePlan={onDeletePlan}
+            onRecordCallHistory={onRecordCallHistory}
+            onUpdateCallHistoryStatus={onUpdateCallHistoryStatus}
+            onUpdateCallHistoryRecord={onUpdateCallHistoryRecord}
+            onDeleteCallHistoryRecord={onDeleteCallHistoryRecord}
+            onUpdateInterestMessageStatus={onUpdateInterestMessageStatus}
+            onDeleteInterestMessage={onDeleteInterestMessage}
+          />
+        </div>
       )}
     </div>
   );

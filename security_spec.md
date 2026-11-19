@@ -28,3 +28,6 @@
 16. **Predefined Plan Pricing Tampering**: Non-admin viewer attempts `create` on `/callPlans/{id}`, or attempts `create` on `/callQueue/{id}` without a valid active `planId` in `/callPlans`, with forged `planPriceCents` / `planDurationMinutes`, or with `paymentStatus != 'authorized'`.
 17. **Call Rating Integrity & Cross-User Spoofing**: Viewer B attempts `update` on `/callHistory/{id}` belonging to Viewer A, attempts to modify `amountCents`/`durationSeconds`/`status` alongside `rating`, passes `rating: 6` or `rating: 0`, or attempts to overwrite an already-rated record.
 18. **Group Room Chat Moderation**: Blocked or muted user attempts to `create` a `/callMessages/{id}` targeting `main_studio_room`, or attempts to spoof `senderUid != callerUid` or `callId != recipientUid` on room broadcasts.
+19. **Public Showcase Config & Gallery Protection**: Non-admin user attempts to `create`, `update`, or `delete` `/studioConfig/public` or `/galleryItems/{itemId}`, or queries `/galleryItems` without filtering `active == true`.
+20. **Admin Ledger Audit**: Non-admin viewer attempts to edit `amountCents`, `durationSeconds`, or `delete` any `/callHistory/{recordId}` document.
+

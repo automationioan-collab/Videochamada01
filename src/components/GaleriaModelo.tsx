@@ -1,21 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   Camera,
   ChevronLeft,
   ChevronRight,
+  Lock,
   Maximize2,
   Video,
   X,
 } from 'lucide-react';
+import { DEFAULT_GALLERY_ITEMS } from '../lib/studioDefaults';
+import type { GalleryCategoryType, GalleryItemRecord } from '../types/studio';
 
-type GalleryCategory = 'all' | 'editorial' | 'portraits' | 'studio';
+type GalleryCategory = 'all' | GalleryCategoryType;
 
-interface GalleryItem {
+interface GalleryDisplayItem {
   id: string;
   indexLabel: string;
   title: string;
   caption: string;
-  category: Exclude<GalleryCategory, 'all'>;
+  category: GalleryCategoryType;
   categoryLabel: string;
   specs: string;
   src: string;
@@ -24,9 +28,12 @@ interface GalleryItem {
 
 interface GaleriaModeloProps {
   modelName?: string;
+  items?: GalleryItemRecord[];
   ctaLabel?: string;
+  privateCtaLabel?: string;
   ctaDisabled?: boolean;
   onPrimaryAction?: () => void;
+  onPrivateAction?: () => void;
 }
 
 const GALLERY_CATEGORIES: ReadonlyArray<{
@@ -39,93 +46,42 @@ const GALLERY_CATEGORIES: ReadonlyArray<{
   { id: 'studio', label: 'Estúdio ao Vivo' },
 ];
 
+const CATEGORY_LABEL_MAP: Record<GalleryCategoryType, string> = {
+  editorial: 'Editorial',
+  portraits: 'Retratos',
+  studio: 'Estúdio ao Vivo',
+};
+
 export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
   modelName = 'Lorena Noir',
+  items: customItems,
   ctaLabel = 'Solicitar Videochamada',
+  privateCtaLabel,
   ctaDisabled = false,
   onPrimaryAction,
+  onPrivateAction,
 }) => {
   const [category, setCategory] = useState<GalleryCategory>('all');
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
 
-  const items: GalleryItem[] = useMemo(
-    () => [
-      {
-        id: 'editorial-noir',
-        indexLabel: '01',
-        title: 'Série Atelier Noir',
-        caption:
-          'Produção principal em alfaiataria de seda preta sob iluminação arquitetônica âmbar.',
-        category: 'editorial',
-        categoryLabel: 'Editorial',
-        specs: 'Leica 50mm · f/1.4 · Luz Quente',
-        src: '/src/assets/images/gallery_editorial_noir_1794948582472.jpg',
-        alt: `${modelName} em retrato editorial no ateliê com blazer preto de seda`,
-      },
-      {
-        id: 'atelier-vertical',
-        indexLabel: '02',
-        title: 'Luz Natural e Veludo',
-        caption:
-          'Composição vertical junto às cortinas de veludo escuro em iluminação suave de fim de tarde.',
-        category: 'editorial',
-        categoryLabel: 'Editorial',
-        specs: 'Formato 3:4 · Luz Difusa de Janela',
-        src: '/src/assets/images/gallery_atelier_candle_1794948583357.jpg',
-        alt: `${modelName} em vestido longo preto junto a cortina de veludo no estúdio`,
-      },
-      {
-        id: 'close-portrait',
-        indexLabel: '03',
-        title: 'Retrato Aproximado',
-        caption:
-          'Enquadramento íntimo de câmera com foco nítido e textura cinematográfica 35mm.',
-        category: 'portraits',
-        categoryLabel: 'Retratos',
-        specs: '35mm · Grão Natural · Rim Âmbar',
-        src: '/src/assets/images/gallery_close_portrait_1794948582088.jpg',
-        alt: `Retrato em close-up editorial de ${modelName} com iluminação âmbar`,
-      },
-      {
-        id: 'studio-hero',
-        indexLabel: '04',
-        title: 'Transmissão ao Vivo 1-para-1',
-        caption:
-          'Enquadramento real da bancada de videochamadas com áudio tratado e vídeo em alta definição.',
-        category: 'portraits',
-        categoryLabel: 'Retratos',
-        specs: 'Câmera Principal · Áudio Studio HD',
-        src: '/src/assets/images/model_studio_hero_1794946401293.jpg',
-        alt: `${modelName} pronta para atendimento por videochamada ao vivo no estúdio`,
-      },
-      {
-        id: 'private-suite',
-        indexLabel: '05',
-        title: 'Cabine de Transmissão 4K',
-        caption:
-          'Óptica mirrorless dedicada e mesa em nogueira escura preparados para sessões privadas.',
-        category: 'studio',
-        categoryLabel: 'Estúdio ao Vivo',
-        specs: 'Sensor Full-Frame · Lente Prime',
-        src: '/src/assets/images/gallery_private_suite_1794948582898.jpg',
-        alt: `Cabine privada de transmissão com câmera cinema e luminária âmbar do estúdio de ${modelName}`,
-      },
-      {
-        id: 'lounge-backdrop',
-        indexLabel: '06',
-        title: 'Salão Maison Aura',
-        caption:
-          'Ambiente reservado do estúdio com acústica tratada e atmosfera acolhedora para conversas exclusivas.',
-        category: 'studio',
-        categoryLabel: 'Estúdio ao Vivo',
-        specs: 'Sala Privada · Acústica Tratada',
-        src: '/src/assets/images/studio_backdrop_lounge_1794946401840.jpg',
-        alt: 'Ambiente interno do salão privado Maison Aura',
-      },
-    ],
-    [modelName]
-  );
+  const items: GalleryDisplayItem[] = useMemo(() => {
+    const activeCustom = (customItems || []).filter((item) => item.active);
+    const source =
+      activeCustom.length > 0 ? activeCustom : DEFAULT_GALLERY_ITEMS;
+
+    return source.map((item, idx) => ({
+      id: item.id,
+      indexLabel: String(idx + 1).padStart(2, '0'),
+      title: item.title,
+      caption: item.caption,
+      category: item.category,
+      categoryLabel: CATEGORY_LABEL_MAP[item.category] || 'Estúdio',
+      specs: item.specs,
+      src: item.src,
+      alt: item.alt || `${modelName} · ${item.title}`,
+    }));
+  }, [customItems, modelName]);
 
   const visibleItems = useMemo(() => {
     if (category === 'all') return items;
@@ -193,22 +149,25 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
     <section
       id="galeria"
       aria-labelledby="galeria-modelo-heading"
-      className="space-y-8 border-t border-white/10 pt-12"
+      className="space-y-8 border-t border-[#F4C2D7]/15 pt-12"
     >
       {/* Editorial Header + Interactive Category Filter */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
         <div className="space-y-2 max-w-2xl">
-          <p className="text-xs font-medium tracking-wide text-[#C9A46B]">
+          <p className="text-xs font-medium tracking-wide text-[#F4C2D7]">
             Vitrine Editorial · {modelName}
           </p>
           <h2
             id="galeria-modelo-heading"
-            className="font-display text-3xl sm:text-4xl font-semibold text-[#F3EFE6] text-balance"
+            className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7] text-balance"
           >
-            Prévia Profissional do Estúdio e Retratos
+            Prévia Profissional do{' '}
+            <span className="italic font-medium text-[#F4C2D7]">Estúdio</span>{' '}
+            e Retratos
           </h2>
-          <p className="text-sm text-[#9BA1AE] leading-relaxed">
-            Explore os ensaios recentes e o cenário oficial de transmissão antes de iniciar sua videochamada privada.
+          <p className="text-sm text-[#C9BAC4] leading-relaxed">
+            Explore os ensaios recentes e o cenário oficial de transmissão antes
+            de iniciar sua videochamada ao vivo ou privativa.
           </p>
         </div>
 
@@ -216,27 +175,37 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
           <div
             role="tablist"
             aria-label="Filtrar galeria da modelo"
-            className="flex items-center gap-1 p-1 bg-[#13151A] border border-white/10 rounded-lg overflow-x-auto"
+            className="flex items-center gap-1 p-1 bg-[#150D1D] border border-[#F4C2D7]/20 rounded-full overflow-x-auto"
           >
-            {GALLERY_CATEGORIES.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={category === tab.id}
-                onClick={() => {
-                  setCategory(tab.id);
-                  setSelectedIndex(null);
-                }}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  category === tab.id
-                    ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                    : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+            {GALLERY_CATEGORIES.map((tab) => {
+              const isSelected = category === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isSelected}
+                  onClick={() => {
+                    setCategory(tab.id);
+                    setSelectedIndex(null);
+                  }}
+                  className={`relative px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    isSelected
+                      ? 'text-[#190B15] font-semibold'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                  }`}
+                >
+                  {isSelected && (
+                    <motion.span
+                      layoutId="galeria-active-tab"
+                      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                      className="absolute inset-0 rounded-full luxury-rose-cta"
+                    />
+                  )}
+                  <span className="relative z-10">{tab.label}</span>
+                </button>
+              );
+            })}
           </div>
 
           {onPrimaryAction && (
@@ -244,10 +213,22 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
               type="button"
               disabled={ctaDisabled}
               onClick={onPrimaryAction}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#1F232C] border border-white/15 text-[#F3EFE6] hover:bg-[#2A303C] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-full bg-[#1A1024] border border-[#F4C2D7]/30 text-[#FAF4F7] hover:bg-[#281837] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Video className="w-3.5 h-3.5 text-[#C9A46B]" />
+              <Video className="w-3.5 h-3.5 text-[#F4C2D7]" />
               <span>{ctaLabel}</span>
+            </button>
+          )}
+
+          {onPrivateAction && privateCtaLabel && (
+            <button
+              type="button"
+              disabled={ctaDisabled}
+              onClick={onPrivateAction}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>{privateCtaLabel}</span>
             </button>
           )}
         </div>
@@ -265,7 +246,7 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
               aria-label={`Ampliar ${item.title}`}
               className={`${getBentoClass(
                 idx
-              )} group relative rounded-xl overflow-hidden bg-[#13151A] border border-white/10 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C9A46B]`}
+              )} group relative tech-reticle tech-glass-interactive rounded-2xl overflow-hidden bg-[#150D1D] border border-[#F4C2D7]/20 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4C2D7]`}
             >
               {!isFailed ? (
                 <img
@@ -273,39 +254,41 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
                   alt={item.alt}
                   referrerPolicy="no-referrer"
                   loading="lazy"
+                  draggable={false}
+                  onContextMenu={(e) => e.preventDefault()}
                   onError={() => markFailed(item.id)}
                   className="w-full h-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.03]"
                 />
               ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-[#161920] to-[#0B0C0F] p-6 text-center space-y-2">
-                  <Camera className="w-8 h-8 text-[#C9A46B]/60" />
-                  <span className="text-xs font-medium text-[#9BA1AE]">
+                <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-[#1A1024] to-[#0B060F] p-6 text-center space-y-2">
+                  <Camera className="w-8 h-8 text-[#F4C2D7]/60" />
+                  <span className="text-xs font-medium text-[#C9BAC4]">
                     {item.title}
                   </span>
                 </div>
               )}
 
               {/* Contrast Scrim */}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#0B0C0F]/95 via-[#0B0C0F]/25 to-transparent pointer-events-none" />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#0B060F]/95 via-[#0B060F]/25 to-transparent pointer-events-none" />
 
               {/* Top-Right Expand Affordance */}
               <span
                 aria-hidden="true"
-                className="absolute top-3.5 right-3.5 p-2 rounded-lg bg-[#0B0C0F]/75 border border-white/15 text-[#F3EFE6] opacity-80 group-hover:opacity-100 group-hover:border-[#C9A46B]/50 transition-opacity"
+                className="absolute top-3.5 right-3.5 p-2 rounded-full bg-[#0B060F]/75 border border-[#F4C2D7]/25 text-[#FAF4F7] opacity-85 group-hover:opacity-100 group-hover:border-[#F4C2D7]/60 transition-opacity"
               >
                 <Maximize2 className="w-3.5 h-3.5" />
               </span>
 
               {/* Clean Unboxed Metadata Overlay */}
               <div className="absolute bottom-0 left-0 right-0 p-5 space-y-1">
-                <p className="text-[11px] font-mono tabular-nums text-[#E2C799] truncate">
+                <p className="text-[11px] font-mono tabular-nums text-[#F4C2D7] truncate">
                   {item.indexLabel} · {item.categoryLabel} · {item.specs}
                 </p>
-                <h3 className="font-display text-xl sm:text-2xl font-semibold text-[#F3EFE6]">
+                <h3 className="font-display text-xl sm:text-2xl font-semibold text-[#FAF4F7]">
                   {item.title}
                 </h3>
                 {(idx === 0 || category !== 'all') && (
-                  <p className="text-xs text-[#C8CCD4] line-clamp-2 max-w-md">
+                  <p className="text-xs text-[#C9BAC4] line-clamp-2 max-w-md">
                     {item.caption}
                   </p>
                 )}
@@ -316,29 +299,39 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
       </div>
 
       {/* Fullscreen Lightbox Modal */}
-      {activePhoto && selectedIndex !== null && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="lightbox-photo-title"
-          onClick={handleCloseLightbox}
-          className="fixed inset-0 z-50 bg-[#050608]/95 backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="max-w-5xl w-full bg-[#13151A] border border-white/15 rounded-xl overflow-hidden flex flex-col max-h-[92vh]"
+      <AnimatePresence>
+        {activePhoto && selectedIndex !== null && (
+          <motion.div
+            key="lightbox-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="lightbox-photo-title"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            onClick={handleCloseLightbox}
+            className="fixed inset-0 z-50 bg-[#07030A]/90 backdrop-blur-md flex items-center justify-center p-4 sm:p-8"
           >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              onClick={(e) => e.stopPropagation()}
+              className="max-w-5xl w-full luxury-card tech-reticle border border-[#F4C2D7]/30 rounded-2xl overflow-hidden flex flex-col max-h-[92vh]"
+            >
             {/* Lightbox Header */}
-            <div className="px-5 py-3.5 border-b border-white/10 flex items-center justify-between gap-4">
+            <div className="px-5 py-3.5 border-b border-[#F4C2D7]/15 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0 text-xs">
-                <span className="font-mono tabular-nums text-[#E2C799] shrink-0">
+                <span className="font-mono tabular-nums text-[#F4C2D7] shrink-0">
                   {String(selectedIndex + 1).padStart(2, '0')} /{' '}
                   {String(visibleItems.length).padStart(2, '0')}
                 </span>
-                <span className="text-[#727988]" aria-hidden="true">
+                <span className="text-[#938291]" aria-hidden="true">
                   ·
                 </span>
-                <span className="text-[#9BA1AE] truncate">
+                <span className="text-[#C9BAC4] truncate">
                   {activePhoto.categoryLabel} · {activePhoto.specs}
                 </span>
               </div>
@@ -347,7 +340,7 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
                 type="button"
                 onClick={handleCloseLightbox}
                 aria-label="Fechar visualização"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#0B0C0F] border border-white/15 text-[#F3EFE6] hover:border-white/30 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#0B060F] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:border-[#F4C2D7]/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
                 <span>Fechar</span>
@@ -355,21 +348,34 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
             </div>
 
             {/* Lightbox Photo Stage */}
-            <div className="relative flex-1 bg-[#0B0C0F] flex items-center justify-center min-h-[280px] overflow-hidden">
+            <div
+              data-protected-media="true"
+              onContextMenu={(e) => e.preventDefault()}
+              className="relative flex-1 bg-[#0B060F] flex items-center justify-center min-h-[280px] overflow-hidden select-none"
+            >
               {!failedIds.has(activePhoto.id) ? (
                 <img
                   src={activePhoto.src}
                   alt={activePhoto.alt}
                   referrerPolicy="no-referrer"
+                  draggable={false}
+                  onContextMenu={(e) => e.preventDefault()}
                   onError={() => markFailed(activePhoto.id)}
                   className="max-h-[62vh] w-auto max-w-full object-contain"
                 />
               ) : (
                 <div className="p-16 flex flex-col items-center justify-center text-center space-y-2">
-                  <Camera className="w-10 h-10 text-[#C9A46B]/60" />
-                  <p className="text-sm text-[#9BA1AE]">{activePhoto.title}</p>
+                  <Camera className="w-10 h-10 text-[#F4C2D7]/60" />
+                  <p className="text-sm text-[#C9BAC4]">{activePhoto.title}</p>
                 </div>
               )}
+
+              <div
+                aria-hidden="true"
+                onContextMenu={(e) => e.preventDefault()}
+                onDragStart={(e) => e.preventDefault()}
+                className="absolute inset-0 z-10 select-none"
+              />
 
               {visibleItems.length > 1 && (
                 <>
@@ -377,7 +383,7 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
                     type="button"
                     onClick={handlePrev}
                     aria-label="Foto anterior"
-                    className="absolute left-3 top-1/2 -translate-y-1/2 p-2.5 rounded-lg bg-[#0B0C0F]/80 border border-white/15 text-[#F3EFE6] hover:border-[#C9A46B] transition-colors cursor-pointer"
+                    className="absolute left-3 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-[#0B060F]/80 border border-[#F4C2D7]/25 text-[#FAF4F7] hover:border-[#F4C2D7] transition-colors cursor-pointer"
                   >
                     <ChevronLeft className="w-5 h-5" />
                   </button>
@@ -385,7 +391,7 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
                     type="button"
                     onClick={handleNext}
                     aria-label="Próxima foto"
-                    className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 rounded-lg bg-[#0B0C0F]/80 border border-white/15 text-[#F3EFE6] hover:border-[#C9A46B] transition-colors cursor-pointer"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-[#0B060F]/80 border border-[#F4C2D7]/25 text-[#FAF4F7] hover:border-[#F4C2D7] transition-colors cursor-pointer"
                   >
                     <ChevronRight className="w-5 h-5" />
                   </button>
@@ -394,37 +400,55 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
             </div>
 
             {/* Lightbox Footer Caption + Direct CTA */}
-            <div className="p-5 sm:px-6 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="p-5 sm:px-6 border-t border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1 min-w-0">
                 <h3
                   id="lightbox-photo-title"
-                  className="font-display text-2xl font-semibold text-[#F3EFE6]"
+                  className="font-display text-2xl font-semibold text-[#FAF4F7]"
                 >
                   {activePhoto.title}
                 </h3>
-                <p className="text-xs text-[#9BA1AE] leading-relaxed">
+                <p className="text-xs text-[#C9BAC4] leading-relaxed">
                   {activePhoto.caption}
                 </p>
               </div>
 
-              {onPrimaryAction && (
-                <button
-                  type="button"
-                  disabled={ctaDisabled}
-                  onClick={() => {
-                    handleCloseLightbox();
-                    onPrimaryAction();
-                  }}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Video className="w-3.5 h-3.5" />
-                  <span>{ctaLabel}</span>
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                {onPrimaryAction && (
+                  <button
+                    type="button"
+                    disabled={ctaDisabled}
+                    onClick={() => {
+                      handleCloseLightbox();
+                      onPrimaryAction();
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Video className="w-3.5 h-3.5" />
+                    <span>{ctaLabel}</span>
+                  </button>
+                )}
+
+                {onPrivateAction && privateCtaLabel && (
+                  <button
+                    type="button"
+                    disabled={ctaDisabled}
+                    onClick={() => {
+                      handleCloseLightbox();
+                      onPrivateAction();
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-full bg-[#1A1024] border border-[#F4C2D7]/40 text-[#FAF4F7] hover:border-[#F4C2D7] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-[#F4C2D7]" />
+                    <span>{privateCtaLabel}</span>
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </section>
   );
 };

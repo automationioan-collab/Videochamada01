@@ -161,20 +161,20 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
   return (
     <section
       aria-labelledby="call-plans-heading"
-      className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden"
+      className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
     >
-      <div className="p-6 border-b border-white/10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <CreditCard className="w-4 h-4 text-[#C9A46B] shrink-0" />
+            <CreditCard className="w-4 h-4 text-[#F4C2D7] shrink-0" />
             <h2
               id="call-plans-heading"
-              className="font-display text-2xl font-semibold text-[#F3EFE6]"
+              className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]"
             >
               Planos Pré-Definidos de Videochamada
             </h2>
           </div>
-          <p className="text-xs text-[#9BA1AE]">
+          <p className="text-xs text-[#C9BAC4]">
             Todas as videochamadas de internautas exigem a escolha e pré-autorização de um dos pacotes abaixo ({activeCount} ativo{activeCount === 1 ? '' : 's'}).
           </p>
         </div>
@@ -194,7 +194,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
               setShowForm(true);
             }
           }}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
         >
           {showForm ? (
             <>
@@ -213,13 +213,13 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
       {showForm && (
         <form
           onSubmit={handleSubmit}
-          className="p-6 bg-[#0F1116] border-b border-white/10 space-y-4"
+          className="p-6 bg-[#150D1D] border-b border-[#F4C2D7]/15 space-y-4"
         >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
             <div className="md:col-span-5 space-y-1.5">
               <label
                 htmlFor="plan-name"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Nome do plano
               </label>
@@ -231,14 +231,14 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Ex.: Sessão Privada · 30 min"
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <div className="md:col-span-2 space-y-1.5">
               <label
                 htmlFor="plan-duration"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Duração (min)
               </label>
@@ -250,14 +250,14 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 max={240}
                 value={durationMinutes}
                 onChange={(e) => setDurationMinutes(e.target.value)}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm font-mono tabular-nums text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <div className="md:col-span-3 space-y-1.5">
               <label
                 htmlFor="plan-price"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Valor (R$)
               </label>
@@ -268,14 +268,14 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 value={priceBrl}
                 onChange={(e) => setPriceBrl(e.target.value)}
                 placeholder="159.00"
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm font-mono tabular-nums text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
 
             <div className="md:col-span-2 space-y-1.5">
               <label
                 htmlFor="plan-order"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Ordem
               </label>
@@ -286,7 +286,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 max={100}
                 value={sortOrder}
                 onChange={(e) => setSortOrder(e.target.value)}
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm font-mono tabular-nums text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm font-mono tabular-nums text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
           </div>
@@ -295,7 +295,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
             <div className="flex-1 space-y-1.5">
               <label
                 htmlFor="plan-desc"
-                className="block text-xs font-medium text-[#9BA1AE]"
+                className="block text-xs font-medium text-[#C9BAC4]"
               >
                 Descrição exibida ao internauta
               </label>
@@ -307,13 +307,13 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Ex.: Atendimento exclusivo 1-para-1 em vídeo HD e chat privado."
-                className="w-full bg-[#0B0C0F] border border-white/10 rounded-lg px-3.5 py-2 text-sm text-[#F3EFE6] focus:outline-none focus:border-[#C9A46B]"
+                className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-3.5 py-2 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
               />
             </div>
             <button
               type="submit"
               disabled={saving}
-              className="px-5 py-2 text-xs font-semibold rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[38px]"
+              className="px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-45 transition-all whitespace-nowrap shrink-0 cursor-pointer h-[38px]"
             >
               {saving
                 ? 'Salvando...'
@@ -337,15 +337,15 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
 
       {plans.length === 0 ? (
         <div className="p-10 text-center space-y-1.5">
-          <p className="text-sm font-medium text-[#F3EFE6]">
+          <p className="text-sm font-medium text-[#FAF4F7]">
             Nenhum plano cadastrado ainda.
           </p>
-          <p className="text-xs text-[#9BA1AE]">
+          <p className="text-xs text-[#C9BAC4]">
             Adicione um plano acima para liberar a cobrança das videochamadas.
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/10">
+        <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-[#F4C2D7]/15">
           {plans.map((plan) => (
             <div
               key={plan.id}
@@ -355,32 +355,32 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <span
                     className={`text-xs font-medium ${
-                      plan.active ? 'text-[#86EFAC]' : 'text-[#9BA1AE]'
+                      plan.active ? 'text-[#86EFAC]' : 'text-[#938291]'
                     }`}
                   >
                     {plan.active ? 'Ativo na vitrine' : 'Pausado'}
                   </span>
-                  <span className="text-xs font-mono tabular-nums text-[#E2C799]">
+                  <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
                     {plan.durationMinutes} min
                   </span>
                 </div>
-                <h3 className="font-display text-xl font-semibold text-[#F3EFE6]">
+                <h3 className="font-display text-xl font-semibold text-[#FAF4F7]">
                   {plan.name}
                 </h3>
-                <p className="text-2xl font-semibold font-mono tabular-nums text-[#F3EFE6]">
+                <p className="text-2xl font-semibold font-mono tabular-nums text-[#FAF4F7]">
                   {BRL_FORMATTER.format(plan.priceCents / 100)}
                 </p>
-                <p className="text-xs text-[#9BA1AE] leading-relaxed">
+                <p className="text-xs text-[#C9BAC4] leading-relaxed">
                   {plan.description}
                 </p>
               </div>
 
-              <div className="flex items-center justify-between gap-2 pt-3 border-t border-white/10">
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-[#F4C2D7]/15">
                 <button
                   type="button"
                   disabled={saving}
                   onClick={() => void handleToggleActive(plan)}
-                  className="px-3 py-1.5 text-xs font-medium rounded-md bg-[#161920] border border-white/10 text-[#C8CCD4] hover:text-[#F3EFE6] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {plan.active ? 'Pausar' : 'Ativar'}
                 </button>
@@ -391,7 +391,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                     disabled={saving}
                     onClick={() => openEdit(plan)}
                     aria-label={`Editar ${plan.name}`}
-                    className="p-1.5 rounded-md bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-[#F3EFE6] transition-colors cursor-pointer"
+                    className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors cursor-pointer"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
                   </button>
@@ -400,7 +400,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
                     disabled={saving}
                     onClick={() => void handleDelete(plan)}
                     aria-label={`Excluir ${plan.name}`}
-                    className="p-1.5 rounded-md bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors cursor-pointer"
+                    className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

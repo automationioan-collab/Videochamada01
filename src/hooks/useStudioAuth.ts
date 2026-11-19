@@ -26,6 +26,15 @@ import {
   googleAuthProvider,
   handleFirestoreError,
 } from '../lib/firebase';
+import {
+  DEFAULT_SCHEDULE_PERIODS,
+  sanitizeHolidayDates,
+  sanitizeSchedulePeriods,
+} from '../lib/schedule';
+import {
+  DEFAULT_GALLERY_ITEMS,
+  DEFAULT_STUDIO_CONFIG,
+} from '../lib/studioDefaults';
 import type {
   AccessStatus,
   CallHistoryRecord,
@@ -35,12 +44,15 @@ import type {
   CallPlan,
   CallRequest,
   CallStatus,
+  GalleryCategoryType,
+  GalleryItemRecord,
   InterestMessage,
   InterestMessageStatus,
-  StudioCallMode,
+  StudioConfig,
   StudioProfile,
   StudioRole,
   StudioState,
+  StudioStateUpdatePatch,
 } from '../types/studio';
 
 const DEFAULT_PREDEFINED_PLANS: ReadonlyArray<{
@@ -84,10 +96,13 @@ export function useStudioAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [listenerError, setListenerError] = useState<Error | null>(null);
   const [myProfile, setMyProfile] = useState<StudioProfile | null>(null);
   const [modelProfile, setModelProfile] = useState<StudioProfile | null>(null);
   const [allProfiles, setAllProfiles] = useState<StudioProfile[]>([]);
   const [studioState, setStudioState] = useState<StudioState | null>(null);
+  const [studioConfig, setStudioConfig] = useState<StudioConfig | null>(null);
+  const [galleryItems, setGalleryItems] = useState<GalleryItemRecord[]>([]);
   const [callQueue, setCallQueue] = useState<CallRequest[]>([]);
   const [callMessages, setCallMessages] = useState<CallMessage[]>([]);
   const [callHistory, setCallHistory] = useState<CallHistoryRecord[]>([]);
@@ -95,6 +110,26 @@ export function useStudioAuth() {
     []
   );
   const [callPlans, setCallPlans] = useState<CallPlan[]>([]);
+
+  const reportListenerError = useCallback(
+    (
+      err: unknown,
+      operationType: OperationType,
+      path: string,
+      isPublicFallback = false
+    ) => {
+      try {
+        handleFirestoreError(err, operationType, path);
+      } catch (caught) {
+        if (!isPublicFallback) {
+          setListenerError(
+            caught instanceof Error ? caught : new Error(String(caught))
+          );
+        }
+      }
+    },
+    []
+  );
 
   const isAdmin = useMemo(() => {
     return Boolean(
@@ -143,9 +178,10 @@ export function useStudioAuth() {
           updatedAt: serverTimestamp(),
         });
       } else {
+        const existingData = snap.data() as StudioProfile;
         await updateDoc(profileRef, {
-          displayName: cleanName,
-          photoUrl: cleanPhoto,
+          displayName: existingData.displayName || cleanName,
+          photoUrl: existingData.photoUrl || cleanPhoto,
           isOnline: true,
           updatedAt: serverTimestamp(),
         });
@@ -203,6 +239,8 @@ export function useStudioAuth() {
             scheduleTimezone:
               Intl.DateTimeFormat().resolvedOptions().timeZone ||
               'America/Sao_Paulo',
+            schedulePeriods: DEFAULT_SCHEDULE_PERIODS.map((p) => ({ ...p })),
+            holidayDates: [],
             dndActive: false,
             dndUntilMs: 0,
             dndScheduleEnabled: false,
@@ -242,18 +280,61 @@ export function useStudioAuth() {
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, 'callPlans');
       }
+
+      // Seed public studioConfig/public on first admin login if empty
+      try {
+        const configRef = doc(db, 'studioConfig', 'public');
+        const configSnap = await getDoc(configRef);
+        if (!configSnap.exists()) {
+          await setDoc(configRef, {
+            modelUid: firebaseUser.uid,
+            ...DEFAULT_STUDIO_CONFIG,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'studioConfig/public');
+      }
+
+      // Seed editorial gallery items on first admin login if empty
+      try {
+        const gallerySnap = await getDocs(collection(db, 'galleryItems'));
+        if (gallerySnap.empty) {
+          await Promise.all(
+            DEFAULT_GALLERY_ITEMS.map((item) =>
+              setDoc(doc(db, 'galleryItems', item.id), {
+                ...item,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            )
+          );
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'galleryItems');
+      }
     }
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    let settled = false;
+    const bootTimer = window.setTimeout(() => {
+      if (!settled) {
+        setAuthLoading(false);
+      }
+    }, 3500);
+
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      settled = true;
+      window.clearTimeout(bootTimer);
       setUser(firebaseUser);
+      setListenerError(null);
+      setAuthLoading(false);
+
       if (firebaseUser) {
-        try {
-          await syncUserDocuments(firebaseUser);
-        } catch (err) {
+        void syncUserDocuments(firebaseUser).catch((err) => {
           console.error('Erro ao sincronizar perfil:', err);
-        }
+        });
       } else {
         setMyProfile(null);
         setModelProfile(null);
@@ -265,10 +346,53 @@ export function useStudioAuth() {
         setInterestMessages([]);
         setCallPlans([]);
       }
-      setAuthLoading(false);
     });
-    return () => unsubscribe();
+
+    return () => {
+      window.clearTimeout(bootTimer);
+      unsubscribe();
+    };
   }, [syncUserDocuments]);
+
+  // Public non-PII showcase config & gallery listeners (degrade gracefully to defaults on failure)
+  useEffect(() => {
+    const unsubConfig = onSnapshot(
+      doc(db, 'studioConfig', 'public'),
+      (snap) => {
+        if (snap.exists()) {
+          setStudioConfig(snap.data() as StudioConfig);
+        } else {
+          setStudioConfig(null);
+        }
+      },
+      (err) => {
+        setStudioConfig(null);
+        reportListenerError(err, OperationType.GET, 'studioConfig/public', true);
+      }
+    );
+
+    const galleryQuery = isAdmin
+      ? collection(db, 'galleryItems')
+      : query(collection(db, 'galleryItems'), where('active', '==', true));
+
+    const unsubGallery = onSnapshot(
+      galleryQuery,
+      (snap) => {
+        const list = snap.docs.map((d) => d.data() as GalleryItemRecord);
+        list.sort((a, b) => a.sortOrder - b.sortOrder);
+        setGalleryItems(list);
+      },
+      (err) => {
+        setGalleryItems([]);
+        reportListenerError(err, OperationType.LIST, 'galleryItems', true);
+      }
+    );
+
+    return () => {
+      unsubConfig();
+      unsubGallery();
+    };
+  }, [isAdmin, reportListenerError]);
 
   // Attach Firestore real-time listeners strictly after authentication
   useEffect(() => {
@@ -286,7 +410,7 @@ export function useStudioAuth() {
           }
         },
         (err) =>
-          handleFirestoreError(
+          reportListenerError(
             err,
             OperationType.GET,
             `studioProfiles/${user.uid}`
@@ -306,7 +430,7 @@ export function useStudioAuth() {
           }
         },
         (err) =>
-          handleFirestoreError(err, OperationType.GET, 'studioState/main')
+          reportListenerError(err, OperationType.GET, 'studioState/main')
       )
     );
 
@@ -322,7 +446,7 @@ export function useStudioAuth() {
           }
         },
         (err) =>
-          handleFirestoreError(err, OperationType.LIST, 'studioProfiles(model)')
+          reportListenerError(err, OperationType.LIST, 'studioProfiles(model)')
       )
     );
 
@@ -336,7 +460,7 @@ export function useStudioAuth() {
             plans.sort((a, b) => a.sortOrder - b.sortOrder);
             setCallPlans(plans);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'callPlans')
+          (err) => reportListenerError(err, OperationType.LIST, 'callPlans')
         )
       );
 
@@ -348,7 +472,7 @@ export function useStudioAuth() {
             setAllProfiles(list);
           },
           (err) =>
-            handleFirestoreError(err, OperationType.LIST, 'studioProfiles')
+            reportListenerError(err, OperationType.LIST, 'studioProfiles')
         )
       );
 
@@ -364,7 +488,7 @@ export function useStudioAuth() {
             });
             setCallQueue(items);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'callQueue')
+          (err) => reportListenerError(err, OperationType.LIST, 'callQueue')
         )
       );
 
@@ -380,7 +504,7 @@ export function useStudioAuth() {
             });
             setCallMessages(msgs);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'callMessages')
+          (err) => reportListenerError(err, OperationType.LIST, 'callMessages')
         )
       );
 
@@ -396,7 +520,7 @@ export function useStudioAuth() {
             });
             setCallHistory(records);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'callHistory')
+          (err) => reportListenerError(err, OperationType.LIST, 'callHistory')
         )
       );
 
@@ -413,7 +537,7 @@ export function useStudioAuth() {
             setInterestMessages(msgs);
           },
           (err) =>
-            handleFirestoreError(err, OperationType.LIST, 'interestMessages')
+            reportListenerError(err, OperationType.LIST, 'interestMessages')
         )
       );
     } else {
@@ -426,7 +550,7 @@ export function useStudioAuth() {
             setCallPlans(plans);
           },
           (err) =>
-            handleFirestoreError(err, OperationType.LIST, 'callPlans(active)')
+            reportListenerError(err, OperationType.LIST, 'callPlans(active)')
         )
       );
 
@@ -446,7 +570,7 @@ export function useStudioAuth() {
             setInterestMessages(msgs);
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               `interestMessages(userId=${user.uid})`
@@ -468,7 +592,7 @@ export function useStudioAuth() {
             setCallQueue(items);
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               `callQueue(userId=${user.uid})`
@@ -490,7 +614,7 @@ export function useStudioAuth() {
             setCallHistory(records);
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               `callHistory(userId=${user.uid})`
@@ -526,7 +650,7 @@ export function useStudioAuth() {
             mergeMessages();
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               `callMessages(sender=${user.uid})`
@@ -545,7 +669,7 @@ export function useStudioAuth() {
             mergeMessages();
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               `callMessages(recipient=${user.uid})`
@@ -564,7 +688,7 @@ export function useStudioAuth() {
             mergeMessages();
           },
           (err) =>
-            handleFirestoreError(
+            reportListenerError(
               err,
               OperationType.LIST,
               'callMessages(recipient=main_studio_room)'
@@ -578,17 +702,37 @@ export function useStudioAuth() {
         unsub();
       }
     };
-  }, [user, isAdmin]);
+  }, [user, isAdmin, reportListenerError]);
 
   const loginWithGoogle = useCallback(async () => {
     setAuthError(null);
     try {
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Não foi possível concluir o login com Google.';
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: string }).code || '')
+          : '';
+      let msg = 'Não foi possível concluir o login com Google.';
+      if (code === 'auth/popup-blocked') {
+        msg =
+          'O navegador bloqueou a janela de login do Google. Libere pop-ups para este site e tente novamente.';
+      } else if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        msg = 'A janela de login foi fechada antes da conclusão.';
+      } else if (code === 'auth/unauthorized-domain') {
+        msg =
+          'Este domínio ainda não está autorizado para autenticação Google no projeto Firebase.';
+      } else if (code === 'auth/operation-not-supported-in-this-environment') {
+        msg =
+          'Ambiente sem suporte a pop-up/cookies de terceiros. Abra o site em uma nova aba para entrar.';
+      } else if (code === 'auth/network-request-failed') {
+        msg = 'Falha de conexão com a autenticação Google. Verifique sua rede.';
+      } else if (err instanceof Error && err.message) {
+        msg = err.message;
+      }
       setAuthError(msg);
     }
   }, []);
@@ -608,33 +752,37 @@ export function useStudioAuth() {
   }, [user]);
 
   const updateStudioState = useCallback(
-    async (
-      patch: Partial<{
-        modelName: string;
-        isLive: boolean;
-        callMode: StudioCallMode;
-        headline: string;
-        activeCallId: string;
-        activeCallUserId: string;
-        activeCallUserName: string;
-        autoScheduleEnabled: boolean;
-        scheduleStartTime: string;
-        scheduleEndTime: string;
-        scheduleDays: string;
-        scheduleTimezone: string;
-        dndActive: boolean;
-        dndUntilMs: number;
-        dndScheduleEnabled: boolean;
-        dndStartTime: string;
-        dndEndTime: string;
-      }>
-    ) => {
+    async (patch: StudioStateUpdatePatch) => {
       if (!user || !isAdmin) return;
+      const sanitizedPatch: Record<string, unknown> = {
+        ...patch,
+        updatedAt: serverTimestamp(),
+      };
+      if (patch.schedulePeriods !== undefined) {
+        const cleanPeriods = sanitizeSchedulePeriods(patch.schedulePeriods);
+        sanitizedPatch.schedulePeriods = cleanPeriods;
+        const primary = cleanPeriods.find((p) => p.enabled) ?? cleanPeriods[0];
+        if (primary) {
+          if (patch.scheduleStartTime === undefined) {
+            sanitizedPatch.scheduleStartTime = primary.startTime;
+          }
+          if (patch.scheduleEndTime === undefined) {
+            sanitizedPatch.scheduleEndTime = primary.endTime;
+          }
+          if (patch.scheduleDays === undefined) {
+            sanitizedPatch.scheduleDays = primary.days;
+          }
+        } else {
+          if (patch.scheduleDays === undefined) {
+            sanitizedPatch.scheduleDays = '';
+          }
+        }
+      }
+      if (patch.holidayDates !== undefined) {
+        sanitizedPatch.holidayDates = sanitizeHolidayDates(patch.holidayDates);
+      }
       try {
-        await updateDoc(doc(db, 'studioState', 'main'), {
-          ...patch,
-          updatedAt: serverTimestamp(),
-        });
+        await updateDoc(doc(db, 'studioState', 'main'), sanitizedPatch);
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, 'studioState/main');
       }
@@ -646,17 +794,30 @@ export function useStudioAuth() {
     async (
       targetUid: string,
       patch: Partial<{
+        displayName: string;
+        photoUrl: string;
         accessStatus: AccessStatus;
         role: StudioRole;
         notes: string;
       }>
     ) => {
       if (!user || !isAdmin) return;
+      const sanitizedPatch: Record<string, unknown> = {
+        ...patch,
+        updatedAt: serverTimestamp(),
+      };
+      if (typeof patch.displayName === 'string') {
+        sanitizedPatch.displayName =
+          patch.displayName.trim().slice(0, 80) || 'Participante';
+      }
+      if (typeof patch.photoUrl === 'string') {
+        sanitizedPatch.photoUrl = patch.photoUrl.trim().slice(0, 500);
+      }
+      if (typeof patch.notes === 'string') {
+        sanitizedPatch.notes = patch.notes.trim().slice(0, 300);
+      }
       try {
-        await updateDoc(doc(db, 'studioProfiles', targetUid), {
-          ...patch,
-          updatedAt: serverTimestamp(),
-        });
+        await updateDoc(doc(db, 'studioProfiles', targetUid), sanitizedPatch);
       } catch (err) {
         handleFirestoreError(
           err,
@@ -667,6 +828,219 @@ export function useStudioAuth() {
     },
     [user, isAdmin]
   );
+
+  const deleteUserProfile = useCallback(
+    async (targetUid: string) => {
+      if (!user || !isAdmin || targetUid === user.uid) return;
+      try {
+        await deleteDoc(doc(db, 'studioProfiles', targetUid));
+      } catch (err) {
+        handleFirestoreError(
+          err,
+          OperationType.DELETE,
+          `studioProfiles/${targetUid}`
+        );
+      }
+    },
+    [user, isAdmin]
+  );
+
+  const saveStudioConfig = useCallback(
+    async (patch: Partial<Omit<StudioConfig, 'modelUid' | 'updatedAt'>>) => {
+      if (!user || !isAdmin) return;
+      const merged = {
+        ...DEFAULT_STUDIO_CONFIG,
+        ...(studioConfig || {}),
+        ...patch,
+      };
+      const cleanModelName =
+        merged.modelName.trim().slice(0, 80) || DEFAULT_STUDIO_CONFIG.modelName;
+      const cleanBrand =
+        merged.studioBrand.trim().slice(0, 60) ||
+        DEFAULT_STUDIO_CONFIG.studioBrand;
+      const cleanHeroTitle =
+        merged.heroTitle.trim().slice(0, 120) ||
+        DEFAULT_STUDIO_CONFIG.heroTitle;
+      const cleanHeroSubtitle =
+        merged.heroSubtitle.trim().slice(0, 300) ||
+        DEFAULT_STUDIO_CONFIG.heroSubtitle;
+      const cleanHeadline =
+        merged.headline.trim().slice(0, 160) || DEFAULT_STUDIO_CONFIG.headline;
+      const cleanGroupLabel =
+        merged.groupButtonLabel.trim().slice(0, 60) ||
+        DEFAULT_STUDIO_CONFIG.groupButtonLabel;
+      const cleanPrivateLabel =
+        merged.privateButtonLabel.trim().slice(0, 60) ||
+        DEFAULT_STUDIO_CONFIG.privateButtonLabel;
+      const safeRate = Math.max(
+        100,
+        Math.min(1000000, Math.round(merged.ratePerMinuteCents || 1500))
+      );
+
+      const configRef = doc(db, 'studioConfig', 'public');
+      try {
+        if (studioConfig) {
+          await updateDoc(configRef, {
+            studioBrand: cleanBrand,
+            modelName: cleanModelName,
+            modelAvatarUrl: (merged.modelAvatarUrl || '').trim().slice(0, 500),
+            heroImageUrl: (merged.heroImageUrl || '').trim().slice(0, 500),
+            loungeImageUrl: (merged.loungeImageUrl || '').trim().slice(0, 500),
+            modelBio: (merged.modelBio || '').trim().slice(0, 300),
+            heroTitle: cleanHeroTitle,
+            heroSubtitle: cleanHeroSubtitle,
+            headline: cleanHeadline,
+            groupButtonLabel: cleanGroupLabel,
+            privateButtonLabel: cleanPrivateLabel,
+            ratePerMinuteCents: safeRate,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(configRef, {
+            modelUid: user.uid,
+            studioBrand: cleanBrand,
+            modelName: cleanModelName,
+            modelAvatarUrl: (merged.modelAvatarUrl || '').trim().slice(0, 500),
+            heroImageUrl: (merged.heroImageUrl || '').trim().slice(0, 500),
+            loungeImageUrl: (merged.loungeImageUrl || '').trim().slice(0, 500),
+            modelBio: (merged.modelBio || '').trim().slice(0, 300),
+            heroTitle: cleanHeroTitle,
+            heroSubtitle: cleanHeroSubtitle,
+            headline: cleanHeadline,
+            groupButtonLabel: cleanGroupLabel,
+            privateButtonLabel: cleanPrivateLabel,
+            ratePerMinuteCents: safeRate,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'studioConfig/public');
+      }
+
+      // Synchronize headline & model name into live studioState and model profile
+      try {
+        await updateDoc(doc(db, 'studioState', 'main'), {
+          modelName: cleanModelName,
+          headline: cleanHeadline.slice(0, 140),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Ignore if studioState not yet initialized
+      }
+
+      try {
+        await updateDoc(doc(db, 'studioProfiles', user.uid), {
+          displayName: cleanModelName,
+          photoUrl: (merged.modelAvatarUrl || '').trim().slice(0, 500),
+          notes: (merged.modelBio || '').trim().slice(0, 300),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Ignore transient profile sync error
+      }
+    },
+    [isAdmin, studioConfig, user]
+  );
+
+  const saveGalleryItem = useCallback(
+    async (input: {
+      id?: string;
+      title: string;
+      caption: string;
+      category: GalleryCategoryType;
+      specs: string;
+      src: string;
+      alt: string;
+      sortOrder: number;
+      active: boolean;
+    }) => {
+      if (!user || !isAdmin) return;
+      const cleanTitle = input.title.trim().slice(0, 80);
+      const cleanCaption = input.caption.trim().slice(0, 240);
+      const cleanSpecs = input.specs.trim().slice(0, 80) || 'Estúdio Oficial';
+      const cleanSrc = input.src.trim().slice(0, 500);
+      const cleanAlt =
+        input.alt.trim().slice(0, 160) || `${cleanTitle} · Galeria do Estúdio`;
+      if (!cleanTitle || !cleanCaption || !cleanSrc) return;
+
+      const safeOrder = Math.max(0, Math.min(100, Math.round(input.sortOrder)));
+
+      if (input.id) {
+        try {
+          await updateDoc(doc(db, 'galleryItems', input.id), {
+            title: cleanTitle,
+            caption: cleanCaption,
+            category: input.category,
+            specs: cleanSpecs,
+            src: cleanSrc,
+            alt: cleanAlt,
+            sortOrder: safeOrder,
+            active: input.active,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          handleFirestoreError(
+            err,
+            OperationType.UPDATE,
+            `galleryItems/${input.id}`
+          );
+        }
+      } else {
+        const newId = `gal_${Date.now()}`;
+        try {
+          await setDoc(doc(db, 'galleryItems', newId), {
+            id: newId,
+            title: cleanTitle,
+            caption: cleanCaption,
+            category: input.category,
+            specs: cleanSpecs,
+            src: cleanSrc,
+            alt: cleanAlt,
+            sortOrder: safeOrder,
+            active: input.active,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          handleFirestoreError(
+            err,
+            OperationType.CREATE,
+            `galleryItems/${newId}`
+          );
+        }
+      }
+    },
+    [isAdmin, user]
+  );
+
+  const deleteGalleryItem = useCallback(
+    async (itemId: string) => {
+      if (!user || !isAdmin) return;
+      try {
+        await deleteDoc(doc(db, 'galleryItems', itemId));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `galleryItems/${itemId}`);
+      }
+    },
+    [isAdmin, user]
+  );
+
+  const restoreDefaultGallery = useCallback(async () => {
+    if (!user || !isAdmin) return;
+    try {
+      await Promise.all(
+        DEFAULT_GALLERY_ITEMS.map((item) =>
+          setDoc(doc(db, 'galleryItems', item.id), {
+            ...item,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          })
+        )
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'galleryItems');
+    }
+  }, [isAdmin, user]);
 
   const requestVideoCall = useCallback(
     async (topic: string, plan: CallPlan) => {
@@ -721,6 +1095,22 @@ export function useStudioAuth() {
         handleFirestoreError(
           err,
           OperationType.UPDATE,
+          `callQueue/${requestId}`
+        );
+      }
+    },
+    [isAdmin, user]
+  );
+
+  const deleteCallRequest = useCallback(
+    async (requestId: string) => {
+      if (!user || !isAdmin) return;
+      try {
+        await deleteDoc(doc(db, 'callQueue', requestId));
+      } catch (err) {
+        handleFirestoreError(
+          err,
+          OperationType.DELETE,
           `callQueue/${requestId}`
         );
       }
@@ -903,6 +1293,61 @@ export function useStudioAuth() {
     [user, isAdmin]
   );
 
+  const updateCallHistoryRecord = useCallback(
+    async (
+      recordId: string,
+      patch: Partial<{
+        durationSeconds: number;
+        amountCents: number;
+        status: CallHistoryStatus;
+      }>
+    ) => {
+      if (!user || !isAdmin) return;
+      const cleanPatch: Record<string, unknown> = {};
+      if (typeof patch.durationSeconds === 'number') {
+        cleanPatch.durationSeconds = Math.max(
+          0,
+          Math.min(86400, Math.round(patch.durationSeconds))
+        );
+      }
+      if (typeof patch.amountCents === 'number') {
+        cleanPatch.amountCents = Math.max(
+          0,
+          Math.min(100000000, Math.round(patch.amountCents))
+        );
+      }
+      if (patch.status) {
+        cleanPatch.status = patch.status;
+      }
+      try {
+        await updateDoc(doc(db, 'callHistory', recordId), cleanPatch);
+      } catch (err) {
+        handleFirestoreError(
+          err,
+          OperationType.UPDATE,
+          `callHistory/${recordId}`
+        );
+      }
+    },
+    [user, isAdmin]
+  );
+
+  const deleteCallHistoryRecord = useCallback(
+    async (recordId: string) => {
+      if (!user || !isAdmin) return;
+      try {
+        await deleteDoc(doc(db, 'callHistory', recordId));
+      } catch (err) {
+        handleFirestoreError(
+          err,
+          OperationType.DELETE,
+          `callHistory/${recordId}`
+        );
+      }
+    },
+    [user, isAdmin]
+  );
+
   const submitCallRating = useCallback(
     async (recordId: string, rating: number, comment?: string) => {
       if (!user) return;
@@ -999,11 +1444,14 @@ export function useStudioAuth() {
     user,
     authLoading,
     authError,
+    listenerError,
     isAdmin,
     myProfile,
     modelProfile,
     allProfiles,
     studioState,
+    studioConfig,
+    galleryItems,
     callQueue,
     callMessages,
     callHistory,
@@ -1012,14 +1460,22 @@ export function useStudioAuth() {
     loginWithGoogle,
     logout,
     updateStudioState,
+    saveStudioConfig,
+    saveGalleryItem,
+    deleteGalleryItem,
+    restoreDefaultGallery,
     updateUserControl,
+    deleteUserProfile,
     requestVideoCall,
     updateCallStatus,
+    deleteCallRequest,
     saveCallPlan,
     deleteCallPlan,
     sendCallMessage,
     recordCallHistory,
     updateCallHistoryStatus,
+    updateCallHistoryRecord,
+    deleteCallHistoryRecord,
     submitCallRating,
     sendInterestMessage,
     updateInterestMessageStatus,

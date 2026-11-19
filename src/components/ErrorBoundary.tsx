@@ -42,21 +42,21 @@ export class ErrorBoundary extends React.Component<
       }
 
       return (
-        <div className="min-h-screen bg-[#0B0C0F] text-[#F3EFE6] flex items-center justify-center p-6">
-          <div className="max-w-lg w-full bg-[#13151A] border border-white/10 rounded-xl p-8 space-y-5">
-            <h1 className="font-display text-3xl font-semibold text-[#F3EFE6]">
+        <div className="min-h-screen luxury-canvas text-[#FAF4F7] flex items-center justify-center p-6">
+          <div className="max-w-lg w-full luxury-card border border-[#F4C2D7]/20 rounded-2xl p-8 space-y-5">
+            <h1 className="font-display text-3xl font-semibold text-[#FAF4F7]">
               Interrupção no Estúdio
             </h1>
-            <p className="text-sm text-[#9BA1AE] leading-relaxed">
+            <p className="text-sm text-[#C9BAC4] leading-relaxed">
               Detectamos uma falha de permissão ou conexão com o banco de dados em tempo real.
             </p>
-            <div className="bg-[#0B0C0F] border border-white/10 rounded-lg p-4 text-xs font-mono text-[#E2C799] break-words">
+            <div className="bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl p-4 text-xs font-mono text-[#F4C2D7] break-words">
               {readable}
             </div>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="px-5 py-2.5 text-sm font-medium rounded-lg bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D8B67F] transition-colors cursor-pointer"
+              className="px-6 py-2.5 text-sm font-semibold rounded-full luxury-rose-cta transition-colors cursor-pointer"
             >
               Recarregar Estúdio
             </button>

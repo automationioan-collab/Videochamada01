@@ -79,22 +79,22 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
   }, [messages, filter]);
 
   return (
-    <section className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden">
-      <div className="px-6 py-4 border-b border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+      <div className="px-6 py-4 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-2.5">
-          <Inbox className="w-4 h-4 text-[#C9A46B] shrink-0" />
+          <Inbox className="w-4 h-4 text-[#F4C2D7] shrink-0" />
           <div>
-            <h2 className="text-sm font-semibold text-[#F3EFE6]">
+            <h2 className="text-sm font-semibold text-[#FAF4F7]">
               Mensagens de Interesse (Enquanto Offline)
             </h2>
-            <p className="text-xs text-[#9BA1AE] tabular-nums">
+            <p className="text-xs text-[#C9BAC4] tabular-nums">
               {unreadCount} não lida{unreadCount === 1 ? '' : 's'} ·{' '}
               {messages.length} total
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg self-start sm:self-auto">
+        <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full self-start sm:self-auto">
           {(
             [
               { id: 'all', label: 'Todas' },
@@ -106,10 +106,10 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
               key={tab.id}
               type="button"
               onClick={() => setFilter(tab.id)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 filter === tab.id
-                  ? 'bg-[#1F232C] text-[#F3EFE6]'
-                  : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                  ? 'bg-[#281837] text-[#FAF4F7]'
+                  : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
               }`}
             >
               {tab.label}
@@ -120,15 +120,15 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
 
       {filtered.length === 0 ? (
         <div className="p-10 text-center space-y-1.5">
-          <p className="text-sm font-medium text-[#F3EFE6]">
+          <p className="text-sm font-medium text-[#FAF4F7]">
             Nenhuma mensagem de interesse neste filtro.
           </p>
-          <p className="text-xs text-[#9BA1AE]">
+          <p className="text-xs text-[#C9BAC4]">
             Quando o estúdio estiver em Descanso ou Offline, as mensagens deixadas pelos internautas aparecerão aqui.
           </p>
         </div>
       ) : (
-        <div className="divide-y divide-white/5">
+        <div className="divide-y divide-[#F4C2D7]/10">
           {filtered.map((item) => {
             const isOnline = onlineMap.has(item.userId);
             return (
@@ -142,32 +142,32 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                       src={item.userPhotoUrl}
                       alt={item.userName}
                       referrerPolicy="no-referrer"
-                      className="w-9 h-9 rounded-full object-cover shrink-0 mt-0.5"
+                      className="w-9 h-9 rounded-full object-cover border border-[#F4C2D7]/25 shrink-0 mt-0.5"
                     />
                   ) : (
-                    <div className="w-9 h-9 rounded-full bg-[#1B1E26] flex items-center justify-center text-xs font-semibold text-[#C9A46B] shrink-0 mt-0.5">
+                    <div className="w-9 h-9 rounded-full bg-[#21142D] border border-[#F4C2D7]/25 flex items-center justify-center text-xs font-semibold text-[#F4C2D7] shrink-0 mt-0.5">
                       {item.userName.slice(0, 1).toUpperCase()}
                     </div>
                   )}
 
                   <div className="space-y-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                      <span className="font-semibold text-[#F3EFE6]">
+                      <span className="font-semibold text-[#FAF4F7]">
                         {item.userName}
                       </span>
-                      <span className="text-[#727988]" aria-hidden="true">
+                      <span className="text-[#938291]" aria-hidden="true">
                         ·
                       </span>
-                      <span className="text-[#E2C799]">
+                      <span className="text-[#F4C2D7]">
                         {item.preferredTime}
                       </span>
-                      <span className="text-[#727988]" aria-hidden="true">
+                      <span className="text-[#938291]" aria-hidden="true">
                         ·
                       </span>
-                      <span className="font-mono tabular-nums text-[#9BA1AE]">
+                      <span className="font-mono tabular-nums text-[#C9BAC4]">
                         {formatDate(item)}
                       </span>
-                      <span className="text-[#727988]" aria-hidden="true">
+                      <span className="text-[#938291]" aria-hidden="true">
                         ·
                       </span>
                       <span
@@ -176,13 +176,13 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                             ? 'text-[#86EFAC]'
                             : item.status === 'unread'
                               ? 'text-[#FCD34D]'
-                              : 'text-[#C8CCD4]'
+                              : 'text-[#C9BAC4]'
                         }
                       >
                         {STATUS_LABEL[item.status]}
                       </span>
                     </div>
-                    <p className="text-sm text-[#E5E2DC] break-words">
+                    <p className="text-sm text-[#FAF4F7]/90 break-words">
                       {item.message}
                     </p>
                   </div>
@@ -200,7 +200,7 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                           photoUrl: item.userPhotoUrl,
                         });
                       }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md bg-[#C9A46B] text-[#0B0C0F] hover:bg-[#D7B57E] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <PhoneCall className="w-3.5 h-3.5" />
                       <span>Chamar agora</span>
@@ -211,9 +211,9 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => void onUpdateStatus(item.id, 'reviewed')}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-[#161920] border border-white/10 text-[#F3EFE6] hover:bg-[#1F232C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      <Check className="w-3.5 h-3.5 text-[#E2C799]" />
+                      <Check className="w-3.5 h-3.5 text-[#F4C2D7]" />
                       <span>Marcar lida</span>
                     </button>
                   )}
@@ -222,7 +222,7 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => void onUpdateStatus(item.id, 'contacted')}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-[#161920] border border-white/10 text-[#86EFAC] hover:bg-[#1F232C] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#86EFAC] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <CheckCheck className="w-3.5 h-3.5" />
                       <span>Marcar retornada</span>
@@ -233,7 +233,7 @@ export const InterestMessagesPanel: React.FC<InterestMessagesPanelProps> = ({
                     type="button"
                     aria-label={`Remover mensagem de ${item.userName}`}
                     onClick={() => void onDeleteMessage(item.id)}
-                    className="p-1.5 rounded-md bg-[#161920] border border-white/10 text-[#9BA1AE] hover:text-red-300 transition-colors cursor-pointer"
+                    className="p-1.5 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

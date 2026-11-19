@@ -138,6 +138,66 @@
           "minLength": 1,
           "maxLength": 60
         },
+        "schedulePeriods": {
+          "type": "array",
+          "maxItems": 14,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-zA-Z0-9_\\-]+$"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "startTime": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 5,
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              },
+              "endTime": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 5,
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              },
+              "days": {
+                "type": "string",
+                "maxLength": 20,
+                "pattern": "^([0-6](,[0-6])*)?$"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": ["id", "startTime", "endTime", "days", "enabled"]
+          }
+        },
+        "holidayDates": {
+          "type": "array",
+          "maxItems": 60,
+          "items": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 10,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 40
+              }
+            },
+            "required": ["date"]
+          }
+        },
         "dndActive": {
           "type": "boolean"
         },
@@ -484,6 +544,135 @@
         }
       },
       "required": ["id", "name", "description", "durationMinutes", "priceCents", "currency", "active", "sortOrder", "createdAt", "updatedAt"]
+    },
+    "StudioConfig": {
+      "title": "StudioConfig",
+      "description": "Public non-PII studio showcase configuration editable by the model admin (site texts, profile metadata, hero/lounge media, and default rate).",
+      "type": "object",
+      "properties": {
+        "modelUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studioBrand": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "modelName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "modelAvatarUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "heroImageUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "loungeImageUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "modelBio": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "heroTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "heroSubtitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "groupButtonLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "privateButtonLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "ratePerMinuteCents": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["modelUid", "studioBrand", "modelName", "heroTitle", "heroSubtitle", "headline", "groupButtonLabel", "privateButtonLabel", "ratePerMinuteCents", "updatedAt"]
+    },
+    "GalleryItem": {
+      "title": "GalleryItem",
+      "description": "Model editorial photo showcase item displayed in GaleriaModelo and editable in admin.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "caption": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "category": {
+          "type": "string",
+          "enum": ["editorial", "portraits", "studio"]
+        },
+        "specs": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "src": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "alt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "sortOrder": {
+          "type": "integer"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "title", "caption", "category", "specs", "src", "alt", "sortOrder", "active", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -498,6 +687,14 @@
     "/studioState/{stateId}": {
       "schema": { "$ref": "#/entities/StudioState" },
       "description": "Live studio availability and active video call banner."
+    },
+    "/studioConfig/{configId}": {
+      "schema": { "$ref": "#/entities/StudioConfig" },
+      "description": "Public non-PII studio showcase configuration managed by the model admin."
+    },
+    "/galleryItems/{itemId}": {
+      "schema": { "$ref": "#/entities/GalleryItem" },
+      "description": "Public model showcase gallery photos editable by the model admin."
     },
     "/callQueue/{requestId}": {
       "schema": { "$ref": "#/entities/CallRequest" },

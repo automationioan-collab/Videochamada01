@@ -81,32 +81,32 @@ const RevenueTooltip: React.FC<CustomTooltipProps> = ({ active, payload }) => {
   if (!point) return null;
 
   return (
-    <div className="bg-[#0B0C0F] border border-white/15 rounded-lg p-3.5 text-xs space-y-2 min-w-[210px]">
-      <p className="font-medium text-[#F3EFE6] border-b border-white/10 pb-1.5">
+    <div className="bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl p-3.5 text-xs space-y-2 min-w-[210px]">
+      <p className="font-medium text-[#FAF4F7] border-b border-[#F4C2D7]/15 pb-1.5">
         {point.fullDate}
       </p>
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[#9BA1AE]">Receita acumulada</span>
-          <span className="font-mono tabular-nums font-semibold text-[#E2C799]">
+          <span className="text-[#C9BAC4]">Receita acumulada</span>
+          <span className="font-mono tabular-nums font-semibold text-[#F4C2D7]">
             {BRL_FORMATTER.format(point.cumulativeRevenueBrl)}
           </span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[#9BA1AE]">Receita do dia</span>
+          <span className="text-[#C9BAC4]">Receita do dia</span>
           <span className="font-mono tabular-nums text-[#86EFAC]">
             {BRL_FORMATTER.format(point.dailyRevenueBrl)}
           </span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[#9BA1AE]">Chamadas finalizadas</span>
-          <span className="font-mono tabular-nums text-[#F3EFE6]">
+          <span className="text-[#C9BAC4]">Chamadas finalizadas</span>
+          <span className="font-mono tabular-nums text-[#FAF4F7]">
             {point.callsCount}
           </span>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-[#9BA1AE]">Duração no dia</span>
-          <span className="font-mono tabular-nums text-[#C8CCD4]">
+          <span className="text-[#C9BAC4]">Duração no dia</span>
+          <span className="font-mono tabular-nums text-[#C9BAC4]">
             {formatDurationShort(point.durationSeconds)}
           </span>
         </div>
@@ -148,7 +148,6 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
           earliest.getMonth(),
           earliest.getDate()
         );
-        // Ensure at least 7 days span for readable progression
         const minSeven = new Date(todayStart);
         minSeven.setDate(minSeven.getDate() - 6);
         if (startDate > minSeven) {
@@ -257,24 +256,24 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
   return (
     <section
       aria-labelledby="revenue-dashboard-heading"
-      className="bg-[#13151A] border border-white/10 rounded-xl overflow-hidden"
+      className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
     >
       {/* Header & Controls */}
-      <div className="p-6 border-b border-white/10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1">
           <h2
             id="revenue-dashboard-heading"
-            className="font-display text-2xl font-semibold text-[#F3EFE6]"
+            className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]"
           >
             Dashboard de Receita
           </h2>
-          <p className="text-xs text-[#9BA1AE]">
+          <p className="text-xs text-[#C9BAC4]">
             Evolução da receita acumulada e volume de videochamadas finalizadas ao longo do tempo.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
             {(
               [
                 { id: 'cumulative', label: 'Receita Acumulada' },
@@ -285,10 +284,10 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                 key={mode.id}
                 type="button"
                 onClick={() => setViewMode(mode.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === mode.id
-                    ? 'bg-[#1F232C] text-[#F3EFE6]'
-                    : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                    ? 'bg-[#281837] text-[#FAF4F7]'
+                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                 }`}
               >
                 {mode.label}
@@ -296,7 +295,7 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-[#0B0C0F] border border-white/10 rounded-lg">
+          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
             {(
               [
                 { id: '7d', label: '7 dias' },
@@ -308,10 +307,10 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                 key={opt.id}
                 type="button"
                 onClick={() => setRange(opt.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   range === opt.id
-                    ? 'bg-[#C9A46B] text-[#0B0C0F]'
-                    : 'text-[#9BA1AE] hover:text-[#F3EFE6]'
+                    ? 'luxury-rose-cta font-semibold'
+                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
                 }`}
               >
                 {opt.label}
@@ -322,27 +321,27 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
       </div>
 
       {/* Summary KPI Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-white/10 border-b border-white/10">
+      <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-[#F4C2D7]/15 border-b border-[#F4C2D7]/15">
         <div className="p-5 space-y-1">
-          <p className="text-xs text-[#9BA1AE]">Receita no Período</p>
-          <p className="text-2xl font-semibold font-mono tabular-nums text-[#E2C799]">
+          <p className="text-xs text-[#938291]">Receita no Período</p>
+          <p className="text-2xl font-semibold font-mono tabular-nums text-[#F4C2D7]">
             {BRL_FORMATTER.format(summary.periodRevenueCents / 100)}
           </p>
         </div>
 
         <div className="p-5 space-y-1">
-          <p className="text-xs text-[#9BA1AE]">Ticket Médio</p>
-          <p className="text-2xl font-semibold font-mono tabular-nums text-[#F3EFE6]">
+          <p className="text-xs text-[#938291]">Ticket Médio</p>
+          <p className="text-2xl font-semibold font-mono tabular-nums text-[#FAF4F7]">
             {BRL_FORMATTER.format(summary.averageTicketCents / 100)}
           </p>
         </div>
 
         <div className="p-5 space-y-1">
-          <p className="text-xs text-[#9BA1AE]">Chamadas Finalizadas</p>
+          <p className="text-xs text-[#938291]">Chamadas Finalizadas</p>
           <p className="text-2xl font-semibold font-mono tabular-nums text-[#86EFAC]">
             {summary.periodCompletedCalls}
             {summary.periodRefundedCalls > 0 && (
-              <span className="text-xs font-normal text-[#9BA1AE] ml-2">
+              <span className="text-xs font-normal text-[#C9BAC4] ml-2">
                 ({summary.periodRefundedCalls} reembolsada
                 {summary.periodRefundedCalls === 1 ? '' : 's'})
               </span>
@@ -351,8 +350,8 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
         </div>
 
         <div className="p-5 space-y-1">
-          <p className="text-xs text-[#9BA1AE]">Duração Média</p>
-          <p className="text-2xl font-semibold font-mono tabular-nums text-[#C8CCD4]">
+          <p className="text-xs text-[#938291]">Duração Média</p>
+          <p className="text-2xl font-semibold font-mono tabular-nums text-[#C9BAC4]">
             {formatDurationShort(summary.averageDurationSeconds)}
           </p>
         </div>
@@ -361,22 +360,22 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
       {/* Chart Viewport */}
       <div className="p-6">
         {!hasAnyHistory ? (
-          <div className="h-[280px] flex flex-col items-center justify-center text-center space-y-2 border border-dashed border-white/10 rounded-lg p-6">
-            <p className="text-sm font-medium text-[#F3EFE6]">
+          <div className="h-[280px] flex flex-col items-center justify-center text-center space-y-2 border border-dashed border-[#F4C2D7]/20 rounded-xl p-6">
+            <p className="text-sm font-medium text-[#FAF4F7]">
               Sem transações finalizadas para exibir no gráfico.
             </p>
-            <p className="text-xs text-[#9BA1AE] max-w-md">
+            <p className="text-xs text-[#C9BAC4] max-w-md">
               Assim que uma videochamada for encerrada ou registrada no histórico, o gráfico de receita acumulada e volume de chamadas será atualizado automaticamente.
             </p>
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4 text-xs text-[#9BA1AE]">
+            <div className="flex flex-wrap items-center justify-between gap-4 text-xs text-[#C9BAC4]">
               <div className="flex items-center gap-5">
                 <span className="inline-flex items-center gap-2">
                   <span
                     aria-hidden="true"
-                    className="w-3 h-0.5 bg-[#C9A46B] inline-block"
+                    className="w-3 h-0.5 bg-[#F4C2D7] inline-block"
                   />
                   <span>
                     {viewMode === 'cumulative'
@@ -392,7 +391,7 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                   <span>Chamadas Finalizadas</span>
                 </span>
               </div>
-              <span className="font-mono tabular-nums text-[11px] text-[#727988]">
+              <span className="font-mono tabular-nums text-[11px] text-[#938291]">
                 {chartData.length} dias exibidos
               </span>
             </div>
@@ -413,23 +412,23 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                     >
                       <stop
                         offset="5%"
-                        stopColor="#C9A46B"
-                        stopOpacity={0.32}
+                        stopColor="#F4C2D7"
+                        stopOpacity={0.34}
                       />
                       <stop
                         offset="95%"
-                        stopColor="#C9A46B"
+                        stopColor="#F4C2D7"
                         stopOpacity={0.02}
                       />
                     </linearGradient>
                   </defs>
                   <CartesianGrid
-                    stroke="rgba(255,255,255,0.06)"
+                    stroke="rgba(244, 194, 215, 0.08)"
                     vertical={false}
                   />
                   <XAxis
                     dataKey="label"
-                    stroke="#727988"
+                    stroke="#938291"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -437,7 +436,7 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                   />
                   <YAxis
                     yAxisId="revenue"
-                    stroke="#9BA1AE"
+                    stroke="#C9BAC4"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -447,7 +446,7 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                   <YAxis
                     yAxisId="calls"
                     orientation="right"
-                    stroke="#727988"
+                    stroke="#938291"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -472,11 +471,11 @@ export const RevenueDashboard: React.FC<RevenueDashboardProps> = ({
                         : 'dailyRevenueBrl'
                     }
                     name="Receita (R$)"
-                    stroke="#C9A46B"
+                    stroke="#F4C2D7"
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#auraRevenueFill)"
-                    activeDot={{ r: 4, fill: '#E2C799', stroke: '#0B0C0F' }}
+                    activeDot={{ r: 4, fill: '#F8D6E3', stroke: '#0B060F' }}
                   />
                 </ComposedChart>
               </ResponsiveContainer>

@@ -2,7 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { ArrowRight, Contrast } from 'lucide-react';
 
-export type WorkspaceTab = 'studio' | 'call' | 'users' | 'queue' | 'admin';
+export type WorkspaceTab = 'studio' | 'call' | 'queue';
 
 interface HeaderProps {
   studioBrand?: string;
@@ -34,52 +34,21 @@ export const Header: React.FC<HeaderProps> = ({
   const navItems: Array<{ label: string; active: boolean; onClick: () => void }> =
     isAuthenticated
       ? isAdmin
-        ? isAdminRoute
-          ? [
-              {
-                label: 'Administração',
-                active: true,
-                onClick: () => onNavigateRoute('/admin'),
+        ? [
+            {
+              label: 'Administração da Modelo',
+              active: isAdminRoute,
+              onClick: () => onNavigateRoute('/admin'),
+            },
+            {
+              label: 'Página do Internauta',
+              active: !isAdminRoute,
+              onClick: () => {
+                onNavigateRoute('/');
+                onSelectTab('studio');
               },
-              {
-                label: 'Recepção Pública',
-                active: false,
-                onClick: () => {
-                  onNavigateRoute('/');
-                  onSelectTab('studio');
-                },
-              },
-              {
-                label: 'Usuários',
-                active: false,
-                onClick: () => {
-                  onNavigateRoute('/');
-                  onSelectTab('users');
-                },
-              },
-            ]
-          : [
-              {
-                label: 'Estúdio',
-                active: activeTab === 'studio',
-                onClick: () => onSelectTab('studio'),
-              },
-              {
-                label: 'Videochamada',
-                active: activeTab === 'call',
-                onClick: () => onSelectTab('call'),
-              },
-              {
-                label: 'Usuários',
-                active: activeTab === 'users',
-                onClick: () => onSelectTab('users'),
-              },
-              {
-                label: 'Administração',
-                active: false,
-                onClick: () => onNavigateRoute('/admin'),
-              },
-            ]
+            },
+          ]
         : [
             {
               label: 'Recepção',
@@ -100,29 +69,36 @@ export const Header: React.FC<HeaderProps> = ({
       : [];
 
   return (
-    <header className="sticky top-0 z-30 bg-[#0B060F]/75 backdrop-blur-xl border-b border-[#F4C2D7]/15 shadow-[0_12px_36px_-18px_rgba(0,0,0,0.8)]">
+    <header className="sticky top-0 z-30 bg-[#060818]/80 backdrop-blur-2xl border-b border-[#818CF8]/20 shadow-[0_14px_40px_-18px_rgba(2,6,23,0.88)]">
       <div className="max-w-[1440px] mx-auto px-6 h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Lotus Brand Mark + Single-line Wordmark */}
+        {/* Zone 1: Geometric Luminous Emblem + Single-line Wordmark */}
         <button
           type="button"
           onClick={() => {
-            onNavigateRoute('/');
-            onSelectTab('studio');
+            if (isAuthenticated && isAdmin) {
+              onNavigateRoute('/admin');
+            } else {
+              onNavigateRoute('/');
+              onSelectTab('studio');
+            }
           }}
-          className="group inline-flex items-center gap-2.5 font-display text-2xl font-semibold tracking-wide text-[#FAF4F7] whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4C2D7] rounded"
+          className="group inline-flex items-center gap-2.5 font-display text-xl sm:text-2xl font-bold tracking-tight text-[#F8FAFC] whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8] rounded"
         >
-          <svg
+          <span
             aria-hidden="true"
-            viewBox="0 0 28 24"
-            className="w-6 h-5 text-[#F4C2D7] shrink-0 transition-transform duration-200 group-hover:scale-105 drop-shadow-[0_0_8px_rgba(244,194,215,0.45)]"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
+            className="w-8 h-8 rounded-xl neo-icon-badge inline-flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-105"
           >
-            <path d="M14 3c2.5 3.6 3.5 7 3.5 10.5S15.8 19.5 14 21c-1.8-1.5-3.5-4-3.5-7.5S11.5 6.6 14 3Z" />
-            <path d="M10.5 17.5C6.8 16.8 4 13.8 3 9.5c3.5.4 6.2 2.2 7.5 5.2" />
-            <path d="M17.5 17.5c3.7-.7 6.5-3.7 7.5-8-3.5.4-6.2 2.2-7.5 5.2" />
-          </svg>
+            <svg
+              viewBox="0 0 24 24"
+              className="w-4 h-4 text-[#E0E7FF]"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            >
+              <path d="M12 3L4.5 7.5v9L12 21l7.5-4.5v-9L12 3Z" />
+              <path d="M12 12l7.5-4.5M12 12v9M12 12L4.5 7.5" />
+            </svg>
+          </span>
           <span>{studioBrand}</span>
         </button>
 
@@ -139,8 +115,8 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={item.onClick}
                 className={`relative py-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   item.active
-                    ? 'text-[#FAF4F7]'
-                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                    ? 'text-[#F8FAFC]'
+                    : 'text-[#B6C2E2] hover:text-[#F8FAFC]'
                 }`}
               >
                 <span>{item.label}</span>
@@ -148,66 +124,67 @@ export const Header: React.FC<HeaderProps> = ({
                   <motion.span
                     layoutId="header-active-nav"
                     transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                    className="absolute inset-x-0 -bottom-0.5 h-[1.5px] rounded-full bg-gradient-to-r from-[#F4C2D7]/40 via-[#F8D6E3] to-[#F4C2D7]/40 shadow-[0_0_10px_rgba(244,194,215,0.7)]"
+                    className="absolute inset-x-0 -bottom-0.5 h-[2px] rounded-full bg-gradient-to-r from-[#818CF8]/40 via-[#38BDF8] to-[#818CF8]/40 shadow-[0_0_12px_rgba(56,189,248,0.75)]"
                   />
                 )}
               </button>
             ))}
           </nav>
+        ) : isAdminRoute ? (
+          <nav
+            aria-label="Navegação exclusiva da modelo"
+            className="hidden md:flex items-center gap-7 text-sm font-medium text-[#B6C2E2]"
+          >
+            <span className="text-[#A5B4FC] whitespace-nowrap shrink-0">
+              Administração Exclusiva da Modelo
+            </span>
+            <button
+              type="button"
+              onClick={() => onNavigateRoute('/')}
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Ir para Página do Internauta
+            </button>
+          </nav>
         ) : (
           <nav
             aria-label="Navegação institucional"
-            className="hidden md:flex items-center gap-7 text-sm font-medium text-[#C9BAC4]"
+            className="hidden md:flex items-center gap-7 text-sm font-medium text-[#B6C2E2]"
           >
             <a
+              href="#profissionais"
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
+            >
+              Profissionais
+            </a>
+            <a
               href="#estudio"
-              onClick={() => {
-                if (isAdminRoute) onNavigateRoute('/');
-              }}
-              className="hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0"
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
             >
               O Estúdio
             </a>
             <a
               href="#experiencias"
-              onClick={() => {
-                if (isAdminRoute) onNavigateRoute('/');
-              }}
-              className="hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0"
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
             >
               Experiências
             </a>
             <a
               href="#galeria"
-              onClick={() => {
-                if (isAdminRoute) onNavigateRoute('/');
-              }}
-              className="hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0"
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
             >
               Galeria
             </a>
             <a
               href="#planos"
-              onClick={() => {
-                if (isAdminRoute) onNavigateRoute('/');
-              }}
-              className="hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0"
+              className="hover:text-[#F8FAFC] transition-colors whitespace-nowrap shrink-0"
             >
               Planos
             </a>
-            <button
-              type="button"
-              onClick={() => onNavigateRoute(isAdminRoute ? '/' : '/admin')}
-              className={`hover:text-[#FAF4F7] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                isAdminRoute ? 'text-[#F4C2D7]' : ''
-              }`}
-            >
-              {isAdminRoute ? 'Área do Internauta' : 'Área da Modelo'}
-            </button>
           </nav>
         )}
 
-        {/* Zone 3: Primary action (+ admin high-contrast toggle when authenticated as model admin) */}
+        {/* Zone 3: Single primary action (+ admin high-contrast toggle when authenticated as model admin) */}
         <div className="flex items-center gap-2.5 shrink-0">
           {isAuthenticated && isAdmin && onToggleHighContrastAdmin && (
             <button
@@ -215,10 +192,10 @@ export const Header: React.FC<HeaderProps> = ({
               aria-pressed={highContrastAdmin}
               onClick={onToggleHighContrastAdmin}
               title="Alternar tema de alto contraste para o painel administrativo"
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4C2D7] ${
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8] ${
                 highContrastAdmin
                   ? 'bg-[#FDE047] border-[#FDE047] text-[#000000]'
-                  : 'bg-[#150D1D] border-[#F4C2D7]/25 text-[#FAF4F7] hover:border-[#F4C2D7]/60'
+                  : 'bg-[#0D132B] border-[#818CF8]/30 text-[#F8FAFC] hover:border-[#38BDF8]/65'
               }`}
             >
               <Contrast className="w-3.5 h-3.5 shrink-0" />
@@ -230,7 +207,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={onLogout}
-              className="px-4 py-2 text-xs font-medium text-[#FAF4F7] bg-[#1A1024] border border-[#F4C2D7]/25 rounded-full hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F4C2D7]"
+              className="px-4 py-2 text-xs font-medium text-[#F8FAFC] bg-[#0F1736] border border-[#818CF8]/30 rounded-full hover:bg-[#19234D] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
             >
               Sair
             </button>
@@ -238,7 +215,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={onLogin}
-              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FAF4F7]"
+              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             >
               <span>Entrar no Estúdio</span>
               <ArrowRight className="w-3.5 h-3.5 shrink-0" />
@@ -251,7 +228,7 @@ export const Header: React.FC<HeaderProps> = ({
       {isAuthenticated && (
         <nav
           aria-label="Navegação móvel"
-          className="md:hidden flex items-center gap-4 px-6 pb-2.5 overflow-x-auto text-xs font-medium border-t border-[#F4C2D7]/10 pt-2"
+          className="md:hidden flex items-center gap-4 px-6 pb-2.5 overflow-x-auto text-xs font-medium border-t border-[#818CF8]/15 pt-2"
         >
           {navItems.map((item) => (
             <button
@@ -259,7 +236,7 @@ export const Header: React.FC<HeaderProps> = ({
               type="button"
               onClick={item.onClick}
               className={`whitespace-nowrap shrink-0 cursor-pointer ${
-                item.active ? 'text-[#F4C2D7]' : 'text-[#C9BAC4]'
+                item.active ? 'text-[#38BDF8]' : 'text-[#B6C2E2]'
               }`}
             >
               {item.label}
@@ -267,7 +244,7 @@ export const Header: React.FC<HeaderProps> = ({
           ))}
         </nav>
       )}
-      <div aria-hidden="true" className="tech-ambient-layer tech-horizon-line opacity-65" />
+      <div aria-hidden="true" className="tech-ambient-layer tech-horizon-line opacity-75" />
     </header>
   );
 };

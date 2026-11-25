@@ -8,8 +8,12 @@ import {
   VideoOff,
   Camera,
 } from 'lucide-react';
+import { TipGoalProgressCard } from './TipGoalProgressCard';
+import type { PixConfirmationResponse } from './PixPaymentModal';
 import type {
   CallMessage,
+  PixChargeKind,
+  PixChargeRecord,
   RoomParticipant,
   StudioProfile,
   StudioState,
@@ -17,6 +21,7 @@ import type {
 
 interface VideoCallStageProps {
   isAdmin: boolean;
+  modelId?: string;
   isGroupRoom?: boolean;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
@@ -46,6 +51,32 @@ interface VideoCallStageProps {
   onToggleCam: () => void;
   onEndCall: () => void;
   onSendMessage: (text: string) => Promise<void>;
+  onSendTip?: (
+    modelId: string,
+    input: {
+      amountCents: number;
+      paymentMethod: 'pix' | 'card';
+      message?: string;
+    }
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onCreatePixCharge?: (input: {
+    modelId: string;
+    kind: PixChargeKind;
+    amountCents?: number;
+    planId?: string;
+    topic?: string;
+    callMode?: 'group' | 'private';
+    note?: string;
+  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+  onCheckPixCharge?: (
+    modelId: string,
+    chargeId: string
+  ) => Promise<PixConfirmationResponse>;
+  onConfirmPixCharge?: (
+    modelId: string,
+    chargeId: string
+  ) => Promise<PixConfirmationResponse>;
+  onCancelPixCharge?: (modelId: string, chargeId: string) => Promise<void>;
 }
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
@@ -156,6 +187,7 @@ const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({
 
 export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   isAdmin,
+  modelId,
   isGroupRoom = false,
   myProfile,
   modelProfile,
@@ -181,6 +213,11 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   onToggleCam,
   onEndCall,
   onSendMessage,
+  onSendTip,
+  onCreatePixCharge,
+  onCheckPixCharge,
+  onConfirmPixCharge,
+  onCancelPixCharge,
 }) => {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -521,6 +558,28 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
             </p>
           </div>
         </div>
+
+        {studioState?.tipGoalEnabled && (
+          <div className="p-3 border-b border-[#F4C2D7]/15 bg-[#0B060F]/45">
+            <TipGoalProgressCard
+              modelId={modelId || 'lorena_noir'}
+              modelName={
+                studioState.modelName ||
+                modelProfile?.displayName ||
+                activePartnerName ||
+                'Lorena Noir'
+              }
+              studioState={studioState}
+              isAuthenticated={!isAdmin}
+              compact={true}
+              onSendTip={isAdmin ? undefined : onSendTip}
+              onCreatePixCharge={isAdmin ? undefined : onCreatePixCharge}
+              onCheckPixCharge={isAdmin ? undefined : onCheckPixCharge}
+              onConfirmPixCharge={isAdmin ? undefined : onConfirmPixCharge}
+              onCancelPixCharge={isAdmin ? undefined : onCancelPixCharge}
+            />
+          </div>
+        )}
 
         <div
           ref={chatScrollRef}

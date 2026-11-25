@@ -37,6 +37,15 @@ export interface ScheduleHolidayDate {
   label?: string;
 }
 
+export interface DailyPausePeriod {
+  id: string;
+  label?: string;
+  startTime: string;
+  endTime: string;
+  days: string;
+  enabled: boolean;
+}
+
 export interface StudioState {
   modelUid: string;
   modelName: string;
@@ -53,11 +62,25 @@ export interface StudioState {
   scheduleTimezone?: string;
   schedulePeriods?: SchedulePeriod[];
   holidayDates?: ScheduleHolidayDate[];
+  dailyPausePeriods?: DailyPausePeriod[];
+  weeklyBlockedDays?: number[];
+  pauseWarningEnabled?: boolean;
+  pauseWarningMinutes?: number;
+  pauseWarningMessage?: string;
   dndActive?: boolean;
   dndUntilMs?: number;
   dndScheduleEnabled?: boolean;
   dndStartTime?: string;
   dndEndTime?: string;
+  tipGoalEnabled?: boolean;
+  tipGoalTitle?: string;
+  tipGoalDescription?: string;
+  tipGoalTargetCents?: number;
+  tipGoalCurrentCents?: number;
+  tipGoalRewardText?: string;
+  tipGoalContributorsCount?: number;
+  tipGoalLastTipName?: string;
+  tipGoalLastTipAmountCents?: number;
   updatedAt: Timestamp;
 }
 
@@ -76,11 +99,25 @@ export type StudioStateUpdatePatch = Partial<{
   scheduleTimezone: string;
   schedulePeriods: SchedulePeriod[];
   holidayDates: ScheduleHolidayDate[];
+  dailyPausePeriods: DailyPausePeriod[];
+  weeklyBlockedDays: number[];
+  pauseWarningEnabled: boolean;
+  pauseWarningMinutes: number;
+  pauseWarningMessage: string;
   dndActive: boolean;
   dndUntilMs: number;
   dndScheduleEnabled: boolean;
   dndStartTime: string;
   dndEndTime: string;
+  tipGoalEnabled: boolean;
+  tipGoalTitle: string;
+  tipGoalDescription: string;
+  tipGoalTargetCents: number;
+  tipGoalCurrentCents: number;
+  tipGoalRewardText: string;
+  tipGoalContributorsCount: number;
+  tipGoalLastTipName: string;
+  tipGoalLastTipAmountCents: number;
 }>;
 
 export type CallPaymentStatus = 'authorized' | 'captured' | 'refunded';
@@ -187,19 +224,101 @@ export interface InterestMessage {
 }
 
 export type GalleryCategoryType = 'editorial' | 'portraits' | 'studio';
+export type MediaAssetType = 'photo' | 'video';
+export type MediaVisibility = 'public' | 'private';
+export type PublicApprovalStatus = 'approved' | 'pending' | 'rejected';
+
+export interface ModelBasicInfo {
+  age?: string;
+  location?: string;
+  languages?: string;
+  height?: string;
+  appearance?: string;
+  specialty?: string;
+  availabilityNote?: string;
+}
 
 export interface GalleryItemRecord {
   id: string;
   title: string;
   caption: string;
   category: GalleryCategoryType;
+  mediaType?: MediaAssetType;
   specs: string;
   src: string;
   alt: string;
   sortOrder: number;
   active: boolean;
+  approvalStatus?: PublicApprovalStatus;
+  moderationNote?: string;
+  reviewedAt?: number;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+}
+
+export interface PrivateAlbumItemRecord {
+  id: string;
+  title: string;
+  caption: string;
+  mediaType: MediaAssetType;
+  src: string;
+  thumbnailUrl?: string;
+  sortOrder: number;
+  active: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface PrivateAlbumSummary {
+  enabled: boolean;
+  hasPassword: boolean;
+  itemCount: number;
+  photoCount: number;
+  videoCount: number;
+  hint?: string;
+  priceCents?: number;
+  hasPaidAccess?: boolean;
+}
+
+export interface PendingGalleryReviewItem {
+  modelId: string;
+  modelName: string;
+  studioBrand: string;
+  item: GalleryItemRecord;
+}
+
+export type PixKeyType = 'cpf' | 'cnpj' | 'email' | 'phone' | 'evp';
+export type PixChargeKind = 'private_album' | 'tip' | 'call_plan';
+export type PixChargeStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
+
+export interface PixChargeRecord {
+  id: string;
+  txid: string;
+  modelId: string;
+  userId: string;
+  userName: string;
+  kind: PixChargeKind;
+  amountCents: number;
+  description: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  topic?: string;
+  callMode?: 'group' | 'private';
+  note?: string;
+  status: PixChargeStatus;
+  provider: 'bacen' | 'mercadopago';
+  brCode: string;
+  qrCodeDataUrl: string;
+  pixKeyMasked: string;
+  pixKeyTypeUsed: PixKeyType;
+  merchantName: string;
+  merchantCity: string;
+  usingDemoKey?: boolean;
+  callRequestId?: string;
+  createdAt: number;
+  expiresAt: number;
+  paidAt?: number;
 }
 
 export interface StudioConfig {
@@ -210,12 +329,18 @@ export interface StudioConfig {
   heroImageUrl?: string;
   loungeImageUrl?: string;
   modelBio?: string;
+  basicInfo?: ModelBasicInfo;
   heroTitle: string;
   heroSubtitle: string;
   headline: string;
   groupButtonLabel: string;
   privateButtonLabel: string;
   ratePerMinuteCents: number;
+  privateAlbumPriceCents?: number;
+  pixKey?: string;
+  pixKeyType?: PixKeyType;
+  pixMerchantName?: string;
+  pixMerchantCity?: string;
   updatedAt?: Timestamp;
 }
 
@@ -230,3 +355,94 @@ export interface QueueWaitSummary {
   totalEstimatedWaitSeconds: number;
   updatedAtMs: number;
 }
+
+export interface ModelPlanPreview {
+  id: string;
+  name: string;
+  durationMinutes: number;
+  priceCents: number;
+}
+
+export interface ModelAccountSummary {
+  id: string;
+  slug: string;
+  displayName: string;
+  loginUsername: string;
+  hasPassword: boolean;
+  isPrimary: boolean;
+  active: boolean;
+  adminThemeColor?: string;
+  studioBrand: string;
+  avatarUrl?: string;
+  heroImageUrl?: string;
+  loungeImageUrl?: string;
+  modelBio?: string;
+  basicInfo?: ModelBasicInfo;
+  heroTitle?: string;
+  heroSubtitle?: string;
+  headline?: string;
+  groupButtonLabel?: string;
+  privateButtonLabel?: string;
+  pendingGalleryCount?: number;
+  privateAlbumSummary?: PrivateAlbumSummary;
+  privateAlbumPriceCents?: number;
+  ratePerMinuteCents?: number;
+  minPlanPriceCents?: number;
+  activePlansCount?: number;
+  plansPreview?: ModelPlanPreview[];
+  createdAt: string;
+  updatedAt: string;
+  metrics?: {
+    totalCalls: number;
+    totalRevenueCents: number;
+    waitingCount: number;
+    unreadMessagesCount: number;
+    onlineNow: boolean;
+    roomParticipantsCount: number;
+    pendingGalleryCount?: number;
+    privateAlbumCount?: number;
+  };
+}
+
+export interface PublicRatingRecord {
+  id: string;
+  rating: number;
+  comment?: string;
+  planName?: string;
+  createdAtMs: number;
+}
+
+export interface PublicModelSummary {
+  id: string;
+  slug: string;
+  displayName: string;
+  studioBrand: string;
+  avatarUrl: string;
+  heroImageUrl: string;
+  bio: string;
+  basicInfo?: ModelBasicInfo;
+  headline: string;
+  isLive: boolean;
+  callMode: StudioCallMode;
+  dndActive: boolean;
+  modelOnline: boolean;
+  roomParticipantCount: number;
+  ratePerMinuteCents: number;
+  activePlansCount: number;
+  minPlanPriceCents?: number;
+  plansPreview?: ModelPlanPreview[];
+  privateAlbumSummary?: PrivateAlbumSummary;
+  publicGalleryCount?: number;
+  ratingAverage?: number;
+  ratingCount?: number;
+  tipGoal?: {
+    enabled: boolean;
+    title: string;
+    description?: string;
+    targetCents: number;
+    currentCents: number;
+    rewardText?: string;
+    contributorsCount?: number;
+  };
+}
+

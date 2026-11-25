@@ -105,6 +105,13 @@ interface UserControlPanelProps {
     status: InterestMessageStatus
   ) => Promise<void>;
   onDeleteInterestMessage: (messageId: string) => Promise<void>;
+  showStudioControls?: boolean;
+  showDndPanel?: boolean;
+  showUsersTable?: boolean;
+  showRevenueDashboard?: boolean;
+  showCallPlans?: boolean;
+  showCallHistory?: boolean;
+  showInterestMessages?: boolean;
 }
 
 type UserFilter = 'all' | 'online' | 'vip' | 'restricted';
@@ -166,6 +173,13 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
   onDeleteCallHistoryRecord,
   onUpdateInterestMessageStatus,
   onDeleteInterestMessage,
+  showStudioControls = true,
+  showDndPanel = true,
+  showUsersTable = true,
+  showRevenueDashboard = true,
+  showCallPlans = true,
+  showCallHistory = true,
+  showInterestMessages = true,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<UserFilter>('all');
@@ -337,7 +351,8 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
   return (
     <div className="space-y-8">
       {/* Studio Availability Controls */}
-      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-6 space-y-6">
+      {showStudioControls && (
+        <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-6 space-y-6">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-[#F4C2D7]/15">
           <div className="space-y-1">
             <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
@@ -449,15 +464,19 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           </div>
         </div>
       </section>
+      )}
 
       {/* Scheduled Do Not Disturb Mode */}
-      <DoNotDisturbPanel
-        studioState={studioState}
-        onUpdateStudioState={onUpdateStudioState}
-      />
+      {showDndPanel && (
+        <DoNotDisturbPanel
+          studioState={studioState}
+          onUpdateStudioState={onUpdateStudioState}
+        />
+      )}
 
       {/* Real-Time Users Table */}
-      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
+      {showUsersTable && (
+        <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
         <div className="p-5 border-b border-[#F4C2D7]/15 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="relative flex-1 max-w-sm">
             <Search className="w-4 h-4 text-[#938291] absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -826,22 +845,26 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           </div>
         )}
       </section>
+      )}
 
       {/* Recharts Revenue & Call History Dashboard */}
-      <RevenueDashboard callHistory={callHistory} />
+      {showRevenueDashboard && <RevenueDashboard callHistory={callHistory} />}
 
       {/* Predefined Paid Call Plans Manager */}
-      <CallPlansManager
-        plans={callPlans}
-        onSavePlan={onSavePlan}
-        onDeletePlan={onDeletePlan}
-      />
+      {showCallPlans && (
+        <CallPlansManager
+          plans={callPlans}
+          onSavePlan={onSavePlan}
+          onDeletePlan={onDeletePlan}
+        />
+      )}
 
       {/* Admin Call History & Finalized Transactions Panel */}
-      <section
-        aria-labelledby="call-history-heading"
-        className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
-      >
+      {showCallHistory && (
+        <section
+          aria-labelledby="call-history-heading"
+          className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden"
+        >
         <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
           <div className="space-y-1">
             <h2
@@ -1320,15 +1343,18 @@ export const UserControlPanel: React.FC<UserControlPanelProps> = ({
           </div>
         )}
       </section>
+      )}
 
       {/* Offline Interest Messages */}
-      <InterestMessagesPanel
-        messages={interestMessages}
-        peers={peers}
-        onUpdateStatus={onUpdateInterestMessageStatus}
-        onDeleteMessage={onDeleteInterestMessage}
-        onDirectCallUser={onDirectCallUser}
-      />
+      {showInterestMessages && (
+        <InterestMessagesPanel
+          messages={interestMessages}
+          peers={peers}
+          onUpdateStatus={onUpdateInterestMessageStatus}
+          onDeleteMessage={onDeleteInterestMessage}
+          onDirectCallUser={onDirectCallUser}
+        />
+      )}
     </div>
   );
 };

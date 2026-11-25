@@ -4,11 +4,13 @@ import { GaleriaModelo } from './GaleriaModelo';
 import { OperatingSchedulePanel } from './OperatingSchedulePanel';
 import {
   formatCountdownClock,
+  getActiveDailyPause,
   getHolidayForDate,
   getNextAvailableTarget,
   getOperatingPeriodSummaryLines,
   getScheduleFromState,
   isDndActiveNow,
+  isWeekdayBlockedNow,
 } from '../lib/schedule';
 import type {
   InterestMessage,
@@ -22,6 +24,8 @@ interface ModelOfflineViewProps {
   isAdmin?: boolean;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
+  modelAvatarUrl?: string;
+  loungeImageUrl?: string;
   studioState: StudioState | null;
   modelOnline: boolean;
   myInterestMessages: InterestMessage[];
@@ -39,11 +43,14 @@ const PREFERRED_WINDOWS = [
   'Qualquer horário',
 ] as const;
 
-const INTEREST_STATUS_LABEL: Record<InterestMessageStatus, string> = {
-  unread: 'Aguardando retorno',
-  reviewed: 'Lida por Lorena Noir',
-  contacted: 'Retorno encaminhado',
-};
+function getInterestStatusLabel(
+  status: InterestMessageStatus,
+  modelName: string
+): string {
+  if (status === 'contacted') return 'Retorno encaminhado';
+  if (status === 'reviewed') return `Lida por ${modelName}`;
+  return 'Aguardando retorno';
+}
 
 function formatMessageDate(msg: InterestMessage) {
   const date = msg.createdAt?.toDate ? msg.createdAt.toDate() : new Date();
@@ -59,6 +66,8 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
   isAdmin = false,
   myProfile,
   modelProfile,
+  modelAvatarUrl,
+  loungeImageUrl,
   studioState,
   modelOnline,
   myInterestMessages,
@@ -106,18 +115,32 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
     () => getHolidayForDate(studioState, nowDate),
     [studioState, nowDate]
   );
+  const weekdayBlockedToday = useMemo(
+    () => isWeekdayBlockedNow(studioState, nowDate),
+    [studioState, nowDate]
+  );
+  const activeDailyPause = useMemo(
+    () => getActiveDailyPause(studioState, nowDate),
+    [studioState, nowDate]
+  );
 
-  const statusReason = dndActive
-    ? 'Modo Não Perturbe'
-    : holidayToday
-      ? holidayToday.label
-        ? `Feriado · ${holidayToday.label}`
-        : 'Feriado / Data de Descanso'
-      : isExplicitRest
-        ? 'Em Descanso'
-        : !modelOnline
-          ? 'Offline no momento'
-          : 'Sala Pausada';
+  const statusReason = activeDailyPause
+    ? activeDailyPause.label
+      ? `Pausa Diária · ${activeDailyPause.label}`
+      : `Pausa Diária até ${activeDailyPause.endTime}`
+    : dndActive
+      ? 'Modo Não Perturbe'
+      : holidayToday
+        ? holidayToday.label
+          ? `Feriado · ${holidayToday.label}`
+          : 'Feriado / Data de Descanso'
+        : weekdayBlockedToday
+          ? 'Folga Semanal Programada'
+          : isExplicitRest
+            ? 'Em Descanso'
+            : !modelOnline
+              ? 'Offline no momento'
+              : 'Sala Pausada';
 
   const handleSubmitInterest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -162,7 +185,11 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
             <div className="flex items-center gap-4">
               {!avatarFailed ? (
                 <img
-                  src="/src/assets/images/model_avatar_camila_1794946401641.jpg"
+                  src={
+                    modelAvatarUrl ||
+                    modelProfile?.photoUrl ||
+                    '/src/assets/images/model_avatar_camila_1794946401641.jpg'
+                  }
                   alt={displayModelName}
                   referrerPolicy="no-referrer"
                   onError={() => setAvatarFailed(true)}
@@ -186,26 +213,36 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
                   </span>
                 </p>
                 <h2 className="font-display text-3xl font-semibold text-[#FAF4F7] text-balance">
-                  {dndActive
-                    ? 'Novas solicitações bloqueadas temporariamente'
-                    : holidayToday
-                      ? 'Estúdio em descanso por data programada'
-                      : 'Atendimento em pausa temporária'}
+                  {activeDailyPause
+                    ? `Em pausa diária programada até ${activeDailyPause.endTime}`
+                    : dndActive
+                      ? 'Novas solicitações bloqueadas temporariamente'
+                      : holidayToday
+                        ? 'Estúdio em descanso por data programada'
+                        : weekdayBlockedToday
+                          ? 'Dia reservado para descanso semanal'
+                          : 'Atendimento em pausa temporária'}
                 </h2>
               </div>
             </div>
 
             <p className="text-sm text-[#C9BAC4] leading-relaxed">
-              {dndActive
-                ? `${displayModelName} ativou o modo Não Perturbe agendado. Novas solicitações de chamada estão bloqueadas automaticamente até o próximo horário permitido, mas você pode deixar sua mensagem de interesse.`
-                : holidayToday
-                  ? `${displayModelName} reservou a data de hoje${
-                      holidayToday.label ? ` (${holidayToday.label})` : ''
-                    } para descanso programado. Deixe sua mensagem de interesse abaixo para atendimento prioritário no retorno.`
-                  : `${
-                      studioState?.headline ||
-                      `${displayModelName} não está recebendo videochamadas ao vivo neste instante.`
-                    } Deixe sua mensagem de interesse abaixo para que ela priorize seu atendimento assim que retornar ao estúdio.`}
+              {activeDailyPause
+                ? `${displayModelName} está em pausa diária${
+                    activeDailyPause.label ? ` (${activeDailyPause.label})` : ''
+                  } das ${activeDailyPause.startTime} às ${activeDailyPause.endTime}. Deixe sua mensagem abaixo para atendimento prioritário no retorno.`
+                : dndActive
+                  ? `${displayModelName} ativou o modo Não Perturbe agendado. Novas solicitações de chamada estão bloqueadas automaticamente até o próximo horário permitido, mas você pode deixar sua mensagem de interesse.`
+                  : holidayToday
+                    ? `${displayModelName} reservou a data de hoje${
+                        holidayToday.label ? ` (${holidayToday.label})` : ''
+                      } para descanso programado. Deixe sua mensagem de interesse abaixo para atendimento prioritário no retorno.`
+                    : weekdayBlockedToday
+                      ? `${displayModelName} não atende neste dia da semana conforme sua agenda recorrente. Deixe sua mensagem de interesse abaixo para ser chamado no próximo dia útil.`
+                      : `${
+                          studioState?.headline ||
+                          `${displayModelName} não está recebendo videochamadas ao vivo neste instante.`
+                        } Deixe sua mensagem de interesse abaixo para que ela priorize seu atendimento assim que retornar ao estúdio.`}
             </p>
 
             {/* Real-time Countdown Banner when next availability is known */}
@@ -364,7 +401,10 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
         <aside className="lg:col-span-5 relative rounded-2xl overflow-hidden bg-[#150D1D] border border-[#F4C2D7]/20 min-h-[340px]">
           {!loungeFailed ? (
             <img
-              src="/src/assets/images/studio_backdrop_lounge_1794946401840.jpg"
+              src={
+                loungeImageUrl ||
+                '/src/assets/images/studio_backdrop_lounge_1794946401840.jpg'
+              }
               alt="Salão em pausa"
               referrerPolicy="no-referrer"
               onError={() => setLoungeFailed(true)}
@@ -434,7 +474,7 @@ export const ModelOfflineView: React.FC<ModelOfflineViewProps> = ({
                         : 'text-[#C9BAC4]'
                   }`}
                 >
-                  {INTEREST_STATUS_LABEL[item.status]}
+                  {getInterestStatusLabel(item.status, displayModelName)}
                 </span>
               </div>
             ))}

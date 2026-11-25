@@ -3,6 +3,7 @@ import {
   Camera,
   CheckCircle2,
   Clock,
+  Crown,
   Mic,
   MicOff,
   PhoneOff,
@@ -24,6 +25,7 @@ interface SalaDeEsperaProps {
   modelAvatarUrl?: string;
   loungeImageUrl?: string;
   modelOnline: boolean;
+  isVip?: boolean;
   studioState: StudioState | null;
   queueSummary: QueueWaitSummary;
   wsConnected: boolean;
@@ -74,6 +76,7 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
   modelAvatarUrl,
   loungeImageUrl,
   modelOnline,
+  isVip = false,
   studioState,
   queueSummary,
   wsConnected,
@@ -206,7 +209,13 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
       className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch"
     >
       {/* Left Column: Visual Countdown, Queue Pipeline & Controls */}
-      <TechSpotlightCard className="lg:col-span-7 luxury-card border border-[#F4C2D7]/25 rounded-2xl p-6 sm:p-8 flex flex-col justify-between space-y-6">
+      <TechSpotlightCard
+        className={`lg:col-span-7 luxury-card rounded-2xl p-6 sm:p-8 flex flex-col justify-between space-y-6 ${
+          isVip
+            ? 'border border-[#FBBF24]/45 shadow-[0_22px_55px_-24px_rgba(251,191,36,0.28)]'
+            : 'border border-[#F4C2D7]/25'
+        }`}
+      >
         <div className="space-y-6">
           {/* Top Model Context Header */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#F4C2D7]/15">
@@ -217,7 +226,11 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
                   alt={modelName}
                   referrerPolicy="no-referrer"
                   onError={() => setAvatarFailed(true)}
-                  className="w-12 h-12 rounded-full object-cover border border-[#F4C2D7]/35 shrink-0"
+                  className={`w-12 h-12 rounded-full object-cover shrink-0 ${
+                    isVip
+                      ? 'border-2 border-[#FBBF24]/70'
+                      : 'border border-[#F4C2D7]/35'
+                  }`}
                 />
               ) : (
                 <div className="w-12 h-12 rounded-full bg-[#21142D] flex items-center justify-center font-display text-xl text-[#F4C2D7] shrink-0">
@@ -225,11 +238,22 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
                 </div>
               )}
               <div className="min-w-0">
-                <p className="text-xs font-medium text-[#F4C2D7]">
-                  {isAccepted
-                    ? 'Sua vez chegou · Chamada Liberada'
-                    : 'Sala de Espera · Fila em Tempo Real'}
-                </p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-xs font-medium text-[#F4C2D7]">
+                    {isAccepted
+                      ? 'Sua vez chegou · Chamada Liberada'
+                      : 'Sala de Espera · Fila em Tempo Real'}
+                  </p>
+                  {isVip && (
+                    <span
+                      title="Cliente VIP com prioridade na fila"
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#FDE68A]"
+                    >
+                      <Crown className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                      <span>VIP · Prioridade</span>
+                    </span>
+                  )}
+                </div>
                 <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7] truncate">
                   {isAccepted ? (
                     <>
@@ -246,18 +270,35 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
               </div>
             </div>
 
-            <div className="text-left sm:text-right shrink-0 space-y-0.5">
-              <p className="text-xs font-mono tabular-nums text-[#FAF4F7]">
-                {modelOnline ? 'Modelo online no estúdio' : 'Recepção ativa'}
-              </p>
-              <p className="text-[11px] font-mono tabular-nums text-[#938291]">
-                {totalInQueue} na fila · Posição {effectivePosition}º
-              </p>
+            <div className="flex items-center gap-3 shrink-0">
+              {isVip && (
+                <div
+                  aria-label="Ícone de destaque VIP"
+                  title="Status VIP com notificação prioritária"
+                  className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#FDE68A]/20 via-[#FBBF24]/10 to-[#21142D] border border-[#FBBF24]/55 flex items-center justify-center shadow-[0_0_24px_-6px_rgba(251,191,36,0.5)] shrink-0"
+                >
+                  <Crown className="w-5 h-5 text-[#FBBF24]" />
+                </div>
+              )}
+              <div className="text-left sm:text-right space-y-0.5">
+                <p className="text-xs font-mono tabular-nums text-[#FAF4F7]">
+                  {modelOnline ? 'Modelo online no estúdio' : 'Recepção ativa'}
+                </p>
+                <p className="text-[11px] font-mono tabular-nums text-[#938291]">
+                  {totalInQueue} na fila · Posição {effectivePosition}º
+                </p>
+              </div>
             </div>
           </div>
 
           {/* Focal Countdown Ring + Live Queue Metrics */}
-          <div className="p-5 sm:p-6 rounded-2xl bg-[#0B060F] border border-[#F4C2D7]/20 flex flex-col sm:flex-row items-center gap-6">
+          <div
+            className={`p-5 sm:p-6 rounded-2xl bg-[#0B060F] flex flex-col sm:flex-row items-center gap-6 ${
+              isVip
+                ? 'border border-[#FBBF24]/35'
+                : 'border border-[#F4C2D7]/20'
+            }`}
+          >
             <div className="relative w-36 h-36 shrink-0 flex items-center justify-center">
               <svg
                 viewBox="0 0 132 132"
@@ -277,7 +318,9 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
                   cy="66"
                   r={ringRadius}
                   fill="none"
-                  stroke={isAccepted ? '#86EFAC' : '#F4C2D7'}
+                  stroke={
+                    isAccepted ? '#86EFAC' : isVip ? '#FBBF24' : '#F4C2D7'
+                  }
                   strokeWidth="6"
                   strokeLinecap="round"
                   strokeDasharray={ringCircumference}
@@ -287,14 +330,18 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-2">
                 <span className="text-[10px] font-medium text-[#938291]">
-                  {isAccepted ? 'Status' : 'Espera est.'}
+                  {isAccepted ? 'Status' : isVip ? 'Espera VIP' : 'Espera est.'}
                 </span>
                 <span className="text-2xl font-semibold font-mono tabular-nums text-[#FAF4F7]">
                   {isAccepted
                     ? '00:00'
                     : formatCountdown(remainingWaitSeconds)}
                 </span>
-                <span className="text-[10px] font-mono tabular-nums text-[#F4C2D7]">
+                <span
+                  className={`text-[10px] font-mono tabular-nums ${
+                    isVip && !isAccepted ? 'text-[#FDE68A]' : 'text-[#F4C2D7]'
+                  }`}
+                >
                   {isAccepted
                     ? 'Liberado'
                     : remainingWaitSeconds === 0
@@ -305,6 +352,16 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
             </div>
 
             <div className="flex-1 w-full space-y-4">
+              {isVip && !isAccepted && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#2D1B3D] via-[#21142D] to-[#1A1024] border border-[#FBBF24]/45 flex items-center gap-2.5">
+                  <Crown className="w-4 h-4 text-[#FBBF24] shrink-0" />
+                  <p className="text-xs text-[#FDE68A] leading-snug">
+                    <strong className="font-semibold">Destaque VIP ativo:</strong>{' '}
+                    {modelName} recebeu notificação prioritária da sua entrada na fila.
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-1">
                 <p className="text-sm font-semibold text-[#FAF4F7]">
                   {isAccepted
@@ -326,7 +383,9 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
                     ? 'Sua sala exclusiva está pronta. Clique no botão abaixo para abrir o vídeo imediatamente.'
                     : hasActiveStudioCall || effectiveAheadCount > 0
                       ? 'A contagem regressiva é atualizada automaticamente conforme a chamada atual e os atendimentos anteriores avançam.'
-                      : 'Sua solicitação foi notificada ao painel da modelo. Mantenha esta janela aberta para entrar assim que ela aceitar.'}
+                      : isVip
+                        ? 'Sua solicitação VIP foi enviada com destaque prioritário ao painel da modelo. Mantenha esta janela aberta para entrar assim que ela aceitar.'
+                        : 'Sua solicitação foi notificada ao painel da modelo. Mantenha esta janela aberta para entrar assim que ela aceitar.'}
                 </p>
               </div>
 
@@ -415,10 +474,21 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
               )}
 
               {/* Visitor's Highlighted Slot */}
-              <div className="px-3.5 py-2 rounded-lg bg-[#281837] border border-[#F4C2D7] text-xs font-semibold text-[#FAF4F7] shrink-0 flex items-center gap-2 whitespace-nowrap">
-                <Clock className="w-3.5 h-3.5 text-[#F4C2D7]" />
+              <div
+                className={`px-3.5 py-2 rounded-lg border text-xs font-semibold shrink-0 flex items-center gap-2 whitespace-nowrap ${
+                  isVip
+                    ? 'bg-gradient-to-r from-[#2D1B3D] to-[#21142D] border-[#FBBF24]/65 text-[#FDE68A] shadow-[0_0_18px_-6px_rgba(251,191,36,0.45)]'
+                    : 'bg-[#281837] border-[#F4C2D7] text-[#FAF4F7]'
+                }`}
+              >
+                {isVip ? (
+                  <Crown className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                ) : (
+                  <Clock className="w-3.5 h-3.5 text-[#F4C2D7] shrink-0" />
+                )}
                 <span>
-                  Você · {isAccepted ? 'Pronto' : `${effectivePosition}º`}
+                  {isVip ? 'Você · VIP' : 'Você'} ·{' '}
+                  {isAccepted ? 'Pronto' : `${effectivePosition}º`}
                 </span>
               </div>
 
@@ -635,6 +705,14 @@ export const SalaDeEspera: React.FC<SalaDeEsperaProps> = ({
                 Plano {request.planName || 'selecionado'} pré-autorizado
               </span>
             </li>
+            {isVip && (
+              <li className="flex items-center gap-2 text-[#FDE68A]">
+                <Crown className="w-3.5 h-3.5 shrink-0 text-[#FBBF24]" />
+                <span>
+                  Prioridade VIP ativa · Notificação enviada a {modelName}
+                </span>
+              </li>
+            )}
           </ul>
           {mediaError && (
             <p className="text-xs text-amber-200 pt-1">{mediaError}</p>

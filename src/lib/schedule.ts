@@ -1,4 +1,5 @@
 import type {
+  DailyPausePeriod,
   ScheduleHolidayDate,
   SchedulePeriod,
   StudioState,
@@ -12,6 +13,11 @@ export interface OperatingSchedule {
   scheduleTimezone: string;
   schedulePeriods: SchedulePeriod[];
   holidayDates: ScheduleHolidayDate[];
+  dailyPausePeriods: DailyPausePeriod[];
+  weeklyBlockedDays: number[];
+  pauseWarningEnabled: boolean;
+  pauseWarningMinutes: number;
+  pauseWarningMessage: string;
 }
 
 export interface DndSchedule {
@@ -43,6 +49,8 @@ export const DEFAULT_SCHEDULE_PERIODS: SchedulePeriod[] = [
   },
 ];
 
+export const DEFAULT_PAUSE_WARNING_MINUTES = 5;
+
 export const DEFAULT_SCHEDULE: OperatingSchedule = {
   autoScheduleEnabled: false,
   scheduleStartTime: '14:00',
@@ -51,6 +59,11 @@ export const DEFAULT_SCHEDULE: OperatingSchedule = {
   scheduleTimezone: 'America/Sao_Paulo',
   schedulePeriods: DEFAULT_SCHEDULE_PERIODS,
   holidayDates: [],
+  dailyPausePeriods: [],
+  weeklyBlockedDays: [],
+  pauseWarningEnabled: false,
+  pauseWarningMinutes: DEFAULT_PAUSE_WARNING_MINUTES,
+  pauseWarningMessage: '',
 };
 
 export const DEFAULT_DND: DndSchedule = {
@@ -67,6 +80,7 @@ const DATE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const PERIOD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 export const MAX_SCHEDULE_PERIODS = 14;
 export const MAX_HOLIDAY_DATES = 60;
+export const MAX_DAILY_PAUSE_PERIODS = 14;
 
 export function sanitizeTimeHHMM(value: string | undefined, fallback: string): string {
   if (value && TIME_PATTERN.test(value)) return value;
@@ -203,6 +217,76 @@ export function getHolidayDatesFromState(
   return sanitizeHolidayDates(state?.holidayDates);
 }
 
+export function sanitizeDailyPausePeriod(
+  raw: Partial<DailyPausePeriod> | undefined,
+  index: number
+): DailyPausePeriod {
+  const rawId = typeof raw?.id === 'string' ? raw.id.trim() : '';
+  const safeId = PERIOD_ID_PATTERN.test(rawId) ? rawId : `pausa_${index + 1}`;
+  const cleanLabel =
+    typeof raw?.label === 'string' ? raw.label.trim().slice(0, 40) : '';
+  const period: DailyPausePeriod = {
+    id: safeId,
+    startTime: sanitizeTimeHHMM(raw?.startTime, '12:00'),
+    endTime: sanitizeTimeHHMM(raw?.endTime, '13:00'),
+    days: sanitizeDaysString(raw?.days, '0,1,2,3,4,5,6'),
+    enabled: raw?.enabled !== false,
+  };
+  if (cleanLabel) {
+    period.label = cleanLabel;
+  }
+  return period;
+}
+
+export function sanitizeDailyPausePeriods(
+  periods: ReadonlyArray<Partial<DailyPausePeriod>> | undefined
+): DailyPausePeriod[] {
+  if (!Array.isArray(periods)) return [];
+  const seenIds = new Set<string>();
+  const sanitized: DailyPausePeriod[] = [];
+  for (
+    let i = 0;
+    i < periods.length && sanitized.length < MAX_DAILY_PAUSE_PERIODS;
+    i += 1
+  ) {
+    const item = sanitizeDailyPausePeriod(periods[i], i);
+    let uniqueId = item.id;
+    let suffix = 2;
+    while (seenIds.has(uniqueId)) {
+      uniqueId = `${item.id.slice(0, 56)}_${suffix}`;
+      suffix += 1;
+    }
+    seenIds.add(uniqueId);
+    sanitized.push({ ...item, id: uniqueId });
+  }
+  return sanitized;
+}
+
+export function getDailyPausePeriodsFromState(
+  state: StudioState | null
+): DailyPausePeriod[] {
+  return sanitizeDailyPausePeriods(state?.dailyPausePeriods);
+}
+
+export function sanitizeWeeklyBlockedDays(
+  days: ReadonlyArray<number> | undefined
+): number[] {
+  if (!Array.isArray(days)) return [];
+  return Array.from(
+    new Set(
+      days
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+    )
+  ).sort((a, b) => a - b);
+}
+
+export function getWeeklyBlockedDaysFromState(
+  state: StudioState | null
+): number[] {
+  return sanitizeWeeklyBlockedDays(state?.weeklyBlockedDays);
+}
+
 export function getScheduleFromState(state: StudioState | null): OperatingSchedule {
   const periods = getSchedulePeriodsFromState(state);
   const primary = periods.find((p) => p.enabled) ?? periods[0];
@@ -228,6 +312,18 @@ export function getScheduleFromState(state: StudioState | null): OperatingSchedu
       DEFAULT_SCHEDULE.scheduleTimezone,
     schedulePeriods: periods,
     holidayDates: getHolidayDatesFromState(state),
+    dailyPausePeriods: getDailyPausePeriodsFromState(state),
+    weeklyBlockedDays: getWeeklyBlockedDaysFromState(state),
+    pauseWarningEnabled: Boolean(state?.pauseWarningEnabled),
+    pauseWarningMinutes:
+      typeof state?.pauseWarningMinutes === 'number' &&
+      Number.isFinite(state.pauseWarningMinutes)
+        ? Math.max(1, Math.min(30, Math.round(state.pauseWarningMinutes)))
+        : DEFAULT_PAUSE_WARNING_MINUTES,
+    pauseWarningMessage:
+      typeof state?.pauseWarningMessage === 'string'
+        ? state.pauseWarningMessage.trim().slice(0, 160)
+        : '',
   };
 }
 
@@ -241,7 +337,13 @@ export function serializeSchedulePeriodsDigest(state: StudioState | null): strin
   const holidaysPart = schedule.holidayDates
     .map((h) => `${h.date}:${h.label ?? ''}`)
     .join('|');
-  return `${schedule.autoScheduleEnabled}_${schedule.scheduleTimezone}_${periodsPart}__${holidaysPart}`;
+  const pausesPart = schedule.dailyPausePeriods
+    .map(
+      (p) => `${p.id}:${p.enabled ? 1 : 0}:${p.days}:${p.startTime}-${p.endTime}`
+    )
+    .join('|');
+  const blockedDaysPart = schedule.weeklyBlockedDays.join(',');
+  return `${schedule.autoScheduleEnabled}_${schedule.scheduleTimezone}_${periodsPart}__${holidaysPart}__${pausesPart}__${blockedDaysPart}__${schedule.pauseWarningEnabled ? 1 : 0}:${schedule.pauseWarningMinutes}`;
 }
 
 export function getDndFromState(state: StudioState | null): DndSchedule {
@@ -400,11 +502,38 @@ export function isHolidayDateNow(
   return getHolidayForDate(state, now) !== null;
 }
 
+export function isWeekdayBlockedNow(
+  state: StudioState | null,
+  now: Date = new Date()
+): boolean {
+  const schedule = getScheduleFromState(state);
+  if (schedule.weeklyBlockedDays.length === 0) return false;
+  const { weekday } = getTimeInTimezone(now, schedule.scheduleTimezone);
+  return schedule.weeklyBlockedDays.includes(weekday);
+}
+
+export function getActiveDailyPause(
+  state: StudioState | null,
+  now: Date = new Date()
+): DailyPausePeriod | null {
+  const schedule = getScheduleFromState(state);
+  const enabledPauses = schedule.dailyPausePeriods.filter((p) => p.enabled);
+  if (enabledPauses.length === 0) return null;
+  const { weekday, minutes } = getTimeInTimezone(now, schedule.scheduleTimezone);
+  return (
+    enabledPauses.find((pause) =>
+      isWithinSchedulePeriod(pause, weekday, minutes)
+    ) ?? null
+  );
+}
+
 export function isWithinOperatingHours(
   state: StudioState | null,
   now: Date = new Date()
 ): boolean {
   if (isHolidayDateNow(state, now)) return false;
+  if (isWeekdayBlockedNow(state, now)) return false;
+  if (getActiveDailyPause(state, now) !== null) return false;
   const schedule = getScheduleFromState(state);
   const enabledPeriods = schedule.schedulePeriods.filter((p) => p.enabled);
   if (enabledPeriods.length === 0) return false;
@@ -434,13 +563,30 @@ export function isDndActiveNow(
   ) {
     return true;
   }
-  return dnd.dndActive && dnd.dndUntilMs === 0 && !dnd.dndScheduleEnabled;
+  if (getActiveDailyPause(state, now) !== null) {
+    return true;
+  }
+  const hasEnabledDailyPauses = schedule.dailyPausePeriods.some(
+    (p) => p.enabled && parseScheduleDays(p.days).length > 0
+  );
+  return (
+    dnd.dndActive &&
+    dnd.dndUntilMs === 0 &&
+    !dnd.dndScheduleEnabled &&
+    !hasEnabledDailyPauses
+  );
 }
 
 export interface NextAvailableTarget {
   nextAvailableMs: number | null;
   formattedReturnTime: string;
-  reason: 'dnd_timed' | 'dnd_daily' | 'holiday' | 'outside_hours' | null;
+  reason:
+    | 'dnd_timed'
+    | 'dnd_daily'
+    | 'holiday'
+    | 'weekday_blocked'
+    | 'outside_hours'
+    | null;
 }
 
 export function getNextAvailableTarget(
@@ -452,18 +598,26 @@ export function getNextAvailableTarget(
   const nowMs = now.getTime();
   const timedActive = dnd.dndUntilMs > nowMs;
   const dailyDndActive =
-    dnd.dndScheduleEnabled &&
-    isWithinDailyWindow(
-      now,
-      dnd.dndStartTime,
-      dnd.dndEndTime,
-      schedule.scheduleTimezone
-    );
+    (dnd.dndScheduleEnabled &&
+      isWithinDailyWindow(
+        now,
+        dnd.dndStartTime,
+        dnd.dndEndTime,
+        schedule.scheduleTimezone
+      )) ||
+    getActiveDailyPause(state, now) !== null;
   const holidayActive = isHolidayDateNow(state, now);
+  const weekdayBlocked = isWeekdayBlockedNow(state, now);
   const outsideHours =
     schedule.autoScheduleEnabled && !isWithinOperatingHours(state, now);
 
-  if (!timedActive && !dailyDndActive && !holidayActive && !outsideHours) {
+  if (
+    !timedActive &&
+    !dailyDndActive &&
+    !holidayActive &&
+    !weekdayBlocked &&
+    !outsideHours
+  ) {
     return {
       nextAvailableMs: null,
       formattedReturnTime: '',
@@ -477,7 +631,9 @@ export function getNextAvailableTarget(
       ? 'dnd_daily'
       : holidayActive
         ? 'holiday'
-        : 'outside_hours';
+        : weekdayBlocked
+          ? 'weekday_blocked'
+          : 'outside_hours';
 
   const isAllowedAt = (ms: number) => {
     const dt = new Date(ms);
@@ -493,7 +649,9 @@ export function getNextAvailableTarget(
     ) {
       return false;
     }
+    if (getActiveDailyPause(state, dt) !== null) return false;
     if (isHolidayDateNow(state, dt)) return false;
+    if (isWeekdayBlockedNow(state, dt)) return false;
     if (schedule.autoScheduleEnabled && !isWithinOperatingHours(state, dt)) {
       return false;
     }
@@ -536,6 +694,150 @@ export function getNextAvailableTarget(
     formattedReturnTime,
     reason,
   };
+}
+
+export interface UpcomingBlockWarning {
+  kind:
+    | 'daily_pause'
+    | 'dnd_daily'
+    | 'holiday'
+    | 'weekday_blocked'
+    | 'schedule_end';
+  label: string;
+  startsAtMs: number;
+  remainingMs: number;
+  startTime: string;
+  endTime: string;
+  customMessage: string;
+}
+
+function formatClockHHMMInTimezone(dt: Date, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat('pt-BR', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(dt);
+  } catch {
+    return `${dt.getHours().toString().padStart(2, '0')}:${dt
+      .getMinutes()
+      .toString()
+      .padStart(2, '0')}`;
+  }
+}
+
+export function getUpcomingBlockWarning(
+  state: StudioState | null,
+  now: Date = new Date()
+): UpcomingBlockWarning | null {
+  const schedule = getScheduleFromState(state);
+  if (!schedule.pauseWarningEnabled) return null;
+  const dnd = getDndFromState(state);
+
+  // If already blocked/offline right now, do not show pre-block warning
+  if (
+    isHolidayDateNow(state, now) ||
+    isWeekdayBlockedNow(state, now) ||
+    isDndActiveNow(state, now) ||
+    (schedule.autoScheduleEnabled && !isWithinOperatingHours(state, now))
+  ) {
+    return null;
+  }
+
+  const nowMs = now.getTime();
+  const leadMinutes = schedule.pauseWarningMinutes || DEFAULT_PAUSE_WARNING_MINUTES;
+  const maxLeadMs = leadMinutes * 60_000;
+  const curMinFloorMs = Math.floor(nowMs / 60_000) * 60_000;
+
+  for (let m = 1; m <= leadMinutes + 1; m += 1) {
+    const probeMs = curMinFloorMs + m * 60_000;
+    const remainingMs = probeMs - nowMs;
+    if (remainingMs <= 0 || remainingMs > maxLeadMs) continue;
+    const dt = new Date(probeMs);
+
+    const activePause = getActiveDailyPause(state, dt);
+    if (activePause) {
+      return {
+        kind: 'daily_pause',
+        label: activePause.label || 'Pausa diária programada',
+        startsAtMs: probeMs,
+        remainingMs,
+        startTime: activePause.startTime,
+        endTime: activePause.endTime,
+        customMessage: schedule.pauseWarningMessage,
+      };
+    }
+
+    if (
+      dnd.dndScheduleEnabled &&
+      isWithinDailyWindow(
+        dt,
+        dnd.dndStartTime,
+        dnd.dndEndTime,
+        schedule.scheduleTimezone
+      )
+    ) {
+      return {
+        kind: 'dnd_daily',
+        label: 'Modo Não Perturbe agendado',
+        startsAtMs: probeMs,
+        remainingMs,
+        startTime: dnd.dndStartTime,
+        endTime: dnd.dndEndTime,
+        customMessage: schedule.pauseWarningMessage,
+      };
+    }
+
+    const holiday = getHolidayForDate(state, dt);
+    if (holiday) {
+      return {
+        kind: 'holiday',
+        label: holiday.label
+          ? `Feriado · ${holiday.label}`
+          : 'Feriado / Folga programada',
+        startsAtMs: probeMs,
+        remainingMs,
+        startTime: '00:00',
+        endTime: '23:59',
+        customMessage: schedule.pauseWarningMessage,
+      };
+    }
+
+    if (isWeekdayBlockedNow(state, dt)) {
+      return {
+        kind: 'weekday_blocked',
+        label: 'Folga semanal recorrente',
+        startsAtMs: probeMs,
+        remainingMs,
+        startTime: '00:00',
+        endTime: '23:59',
+        customMessage: schedule.pauseWarningMessage,
+      };
+    }
+
+    if (schedule.autoScheduleEnabled && !isWithinOperatingHours(state, dt)) {
+      return {
+        kind: 'schedule_end',
+        label: 'Encerramento do horário de atendimento',
+        startsAtMs: probeMs,
+        remainingMs,
+        startTime: formatClockHHMMInTimezone(dt, schedule.scheduleTimezone),
+        endTime: '',
+        customMessage: schedule.pauseWarningMessage,
+      };
+    }
+  }
+
+  return null;
+}
+
+export function formatMinutesSecondsClock(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins.toString().padStart(2, '0')}:${secs
+    .toString()
+    .padStart(2, '0')}`;
 }
 
 function formatReturnTimestamp(

@@ -11,6 +11,7 @@ import type { CallPlan } from '../types/studio';
 
 interface CallPlansManagerProps {
   plans: CallPlan[];
+  modelName?: string;
   onSavePlan: (input: {
     id?: string;
     name: string;
@@ -30,6 +31,7 @@ const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
 
 export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
   plans,
+  modelName,
   onSavePlan,
   onDeletePlan,
 }) => {
@@ -171,7 +173,7 @@ export const CallPlansManager: React.FC<CallPlansManagerProps> = ({
               id="call-plans-heading"
               className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]"
             >
-              Planos Pré-Definidos de Videochamada
+              Planos Pré-Definidos{modelName ? ` · ${modelName}` : ' de Videochamada'}
             </h2>
           </div>
           <p className="text-xs text-[#C9BAC4]">

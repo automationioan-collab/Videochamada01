@@ -61,22 +61,35 @@ export interface RoomEvent {
 
 interface UseWebSocketStudioOptions {
   user: User | null;
+  modelToken: string | null;
+  modelAuthId: string | null;
+  selectedModelId: string;
+  isSuperAdminOperating: boolean;
   profile: StudioProfile | null;
   onSignal: (signal: SignalPayload) => void;
   onModerationEffect: (effect: ModerationEffect) => void;
   onPresenceEvent?: (event: PresenceEvent) => void;
   onRoomEvent?: (event: RoomEvent) => void;
+  onStudioRefresh?: (modelId: string) => void;
+  onModelsRefresh?: () => void;
 }
 
 export function useWebSocketStudio({
   user,
+  modelToken,
+  modelAuthId,
+  selectedModelId,
+  isSuperAdminOperating,
   profile,
   onSignal,
   onModerationEffect,
   onPresenceEvent,
   onRoomEvent,
+  onStudioRefresh,
+  onModelsRefresh,
 }: UseWebSocketStudioOptions) {
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsActorUid, setWsActorUid] = useState<string | null>(null);
   const [peers, setPeers] = useState<PresencePeer[]>([]);
   const [roomParticipants, setRoomParticipants] = useState<RoomParticipant[]>(
     []
@@ -88,6 +101,7 @@ export function useWebSocketStudio({
   const heartbeatRef = useRef<number | null>(null);
   const hasInitialPresenceRef = useRef(false);
   const previousPeersRef = useRef<Map<string, PresencePeer>>(new Map());
+  const selfActorUidRef = useRef<string | null>(null);
 
   const onSignalRef = useRef(onSignal);
   onSignalRef.current = onSignal;
@@ -101,12 +115,24 @@ export function useWebSocketStudio({
   const onRoomEventRef = useRef(onRoomEvent);
   onRoomEventRef.current = onRoomEvent;
 
+  const onStudioRefreshRef = useRef(onStudioRefresh);
+  onStudioRefreshRef.current = onStudioRefresh;
+
+  const onModelsRefreshRef = useRef(onModelsRefresh);
+  onModelsRefreshRef.current = onModelsRefresh;
+
   const profileRef = useRef(profile);
   profileRef.current = profile;
 
+  const selectedModelIdRef = useRef(selectedModelId);
+  selectedModelIdRef.current = selectedModelId;
+
   useEffect(() => {
-    if (!user) {
+    const hasAuth = Boolean(modelToken || user);
+    if (!hasAuth) {
       setWsConnected(false);
+      setWsActorUid(null);
+      selfActorUidRef.current = null;
       setPeers([]);
       setRoomParticipants([]);
       setQueueSummary(EMPTY_QUEUE_SUMMARY);
@@ -136,24 +162,38 @@ export function useWebSocketStudio({
           return;
         }
         try {
-          const token = await user.getIdToken();
           const p = profileRef.current;
-          socket.send(
-            JSON.stringify({
-              type: 'auth',
-              token,
-              profile: p
-                ? {
-                    displayName: p.displayName,
-                    photoUrl: p.photoUrl || '',
-                    accessStatus: p.accessStatus,
-                  }
-                : {
-                    displayName: user.displayName || 'Participante',
-                    photoUrl: user.photoURL || '',
-                  },
-            })
-          );
+          if (modelToken) {
+            socket.send(
+              JSON.stringify({
+                type: 'auth',
+                authMode: 'model_session',
+                token: modelToken,
+                modelId: modelAuthId || selectedModelIdRef.current,
+              })
+            );
+          } else if (user) {
+            const token = await user.getIdToken();
+            socket.send(
+              JSON.stringify({
+                type: 'auth',
+                authMode: 'firebase',
+                token,
+                modelId: selectedModelIdRef.current,
+                operatingAsAdmin: isSuperAdminOperating,
+                profile: p
+                  ? {
+                      displayName: p.displayName,
+                      photoUrl: p.photoUrl || '',
+                      accessStatus: p.accessStatus,
+                    }
+                  : {
+                      displayName: user.displayName || 'Participante',
+                      photoUrl: user.photoURL || '',
+                    },
+              })
+            );
+          }
           retryMs = 1000;
 
           if (heartbeatRef.current) window.clearInterval(heartbeatRef.current);
@@ -178,7 +218,22 @@ export function useWebSocketStudio({
         const type = data.type as string;
         if (type === 'auth:ok') {
           hasInitialPresenceRef.current = false;
+          const uid = typeof data.uid === 'string' ? data.uid : null;
+          selfActorUidRef.current = uid;
+          setWsActorUid(uid);
           setWsConnected(true);
+          return;
+        }
+        if (type === 'studio:refresh') {
+          const mid =
+            typeof data.modelId === 'string'
+              ? data.modelId
+              : selectedModelIdRef.current;
+          onStudioRefreshRef.current?.(mid);
+          return;
+        }
+        if (type === 'models:refresh') {
+          onModelsRefreshRef.current?.();
           return;
         }
         if (type === 'presence:sync' && Array.isArray(data.peers)) {
@@ -188,15 +243,16 @@ export function useWebSocketStudio({
             nextMap.set(p.uid, p);
           }
 
+          const mySelfUid = selfActorUidRef.current || user?.uid || '';
           if (hasInitialPresenceRef.current && onPresenceEventRef.current) {
             const prevMap = previousPeersRef.current;
             for (const p of nextPeers) {
-              if (p.uid !== user.uid && !prevMap.has(p.uid)) {
+              if (p.uid !== mySelfUid && !prevMap.has(p.uid)) {
                 onPresenceEventRef.current({ kind: 'joined', peer: p });
               }
             }
             for (const [prevUid, prevPeer] of prevMap.entries()) {
-              if (prevUid !== user.uid && !nextMap.has(prevUid)) {
+              if (prevUid !== mySelfUid && !nextMap.has(prevUid)) {
                 onPresenceEventRef.current({ kind: 'left', peer: prevPeer });
               }
             }
@@ -211,14 +267,21 @@ export function useWebSocketStudio({
           setRoomParticipants(data.participants as RoomParticipant[]);
           return;
         }
-        if (type === 'queue:sync' && data.summary && typeof data.summary === 'object') {
+        if (
+          type === 'queue:sync' &&
+          data.summary &&
+          typeof data.summary === 'object'
+        ) {
           setQueueSummary(data.summary as QueueWaitSummary);
           return;
         }
         if (type === 'room:peer_joined' && data.participant) {
           onRoomEventRef.current?.({
             kind: 'peer_joined',
-            roomId: typeof data.roomId === 'string' ? data.roomId : 'main_studio_room',
+            roomId:
+              typeof data.roomId === 'string'
+                ? data.roomId
+                : `room_${selectedModelIdRef.current}`,
             participant: data.participant as RoomParticipant,
           });
           return;
@@ -226,7 +289,10 @@ export function useWebSocketStudio({
         if (type === 'room:peer_left' && data.participant) {
           onRoomEventRef.current?.({
             kind: 'peer_left',
-            roomId: typeof data.roomId === 'string' ? data.roomId : 'main_studio_room',
+            roomId:
+              typeof data.roomId === 'string'
+                ? data.roomId
+                : `room_${selectedModelIdRef.current}`,
             participant: data.participant as RoomParticipant,
           });
           return;
@@ -281,7 +347,23 @@ export function useWebSocketStudio({
         wsRef.current = null;
       }
     };
-  }, [user]);
+  }, [user, modelToken, modelAuthId, isSuperAdminOperating]);
+
+  // Switch active visitor model room over open WebSocket
+  useEffect(() => {
+    if (modelToken || isSuperAdminOperating) return;
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN && selectedModelId) {
+      hasInitialPresenceRef.current = false;
+      previousPeersRef.current = new Map();
+      socket.send(
+        JSON.stringify({
+          type: 'model:select',
+          modelId: selectedModelId,
+        })
+      );
+    }
+  }, [isSuperAdminOperating, modelToken, selectedModelId]);
 
   // Sync accessStatus changes to WebSocket presence when profile updates
   useEffect(() => {
@@ -316,7 +398,7 @@ export function useWebSocketStudio({
     }) => {
       return sendWs({
         type: 'room:join',
-        roomId: meta?.roomId || 'main_studio_room',
+        roomId: meta?.roomId || `room_${selectedModelIdRef.current}`,
         ...(meta?.callId ? { callId: meta.callId } : {}),
         ...(meta?.planId ? { planId: meta.planId } : {}),
         ...(meta?.planName ? { planName: meta.planName } : {}),
@@ -332,10 +414,10 @@ export function useWebSocketStudio({
   );
 
   const leaveRoom = useCallback(
-    (roomId = 'main_studio_room') => {
+    (roomId?: string) => {
       return sendWs({
         type: 'room:leave',
-        roomId,
+        roomId: roomId || `room_${selectedModelIdRef.current}`,
       });
     },
     [sendWs]
@@ -363,6 +445,7 @@ export function useWebSocketStudio({
       callId?: string;
       planDurationMinutes?: number;
       createdAtMs?: number;
+      isVip?: boolean;
     }) => {
       return sendWs({
         type: 'queue:entry',
@@ -372,6 +455,7 @@ export function useWebSocketStudio({
           ? { planDurationMinutes: entry.planDurationMinutes }
           : {}),
         ...(entry.createdAtMs ? { createdAtMs: entry.createdAtMs } : {}),
+        ...(typeof entry.isVip === 'boolean' ? { isVip: entry.isVip } : {}),
       });
     },
     [sendWs]
@@ -384,6 +468,7 @@ export function useWebSocketStudio({
         uid: string;
         planDurationMinutes: number;
         createdAtMs: number;
+        isVip?: boolean;
       }>;
       activeCall: {
         callId: string;
@@ -402,6 +487,7 @@ export function useWebSocketStudio({
 
   return {
     wsConnected,
+    wsActorUid,
     peers,
     roomParticipants,
     queueSummary,

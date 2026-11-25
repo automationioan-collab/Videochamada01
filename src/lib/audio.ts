@@ -3,7 +3,11 @@ const SOUND_STORAGE_KEY = 'maison_aura_sound_enabled';
 let audioCtx: AudioContext | null = null;
 let lastPlayedAt = 0;
 
-export type NotificationSoundKind = 'user_joined' | 'incoming_call' | 'test';
+export type NotificationSoundKind =
+  | 'user_joined'
+  | 'incoming_call'
+  | 'vip_priority'
+  | 'test';
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -96,6 +100,15 @@ export function playNotificationDing(
       // Crisp crystalline ascending chime (E5 -> B5)
       scheduleTone(ctx, t0, 659.25, 0.38, 0.16, 'sine');
       scheduleTone(ctx, t0 + 0.09, 987.77, 0.5, 0.14, 'triangle');
+      return;
+    }
+
+    if (kind === 'vip_priority') {
+      // Distinct luminous golden triple priority chime (A5 -> C#6 -> E6 -> A6)
+      scheduleTone(ctx, t0, 880, 0.24, 0.2, 'sine');
+      scheduleTone(ctx, t0 + 0.11, 1108.73, 0.26, 0.18, 'triangle');
+      scheduleTone(ctx, t0 + 0.22, 1318.51, 0.32, 0.18, 'sine');
+      scheduleTone(ctx, t0 + 0.34, 1760, 0.52, 0.16, 'triangle');
       return;
     }
 

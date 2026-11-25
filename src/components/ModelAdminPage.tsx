@@ -1,14 +1,29 @@
-import React, { useMemo, useState } from 'react';
-import { motion } from 'motion/react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Ban,
+  BellOff,
   BellRing,
+  CalendarClock,
+  CalendarRange,
+  Camera,
+  CheckCircle2,
+  CreditCard,
+  Crown,
+  Film,
+  Image as ImageIcon,
   Mic,
   MicOff,
+  MoonStar,
   PhoneCall,
   PhoneIncoming,
   PhoneOff,
+  QrCode,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Target,
   Trash2,
+  TrendingUp,
   Users,
   Video,
   Volume2,
@@ -28,7 +43,17 @@ import type {
   GalleryItemRecord,
   InterestMessage,
   InterestMessageStatus,
+  MediaAssetType,
+  MediaVisibility,
+  ModelAccountSummary,
+  ModelBasicInfo,
+  PendingGalleryReviewItem,
+  PixChargeRecord,
+  PixChargeStatus,
   PresencePeer,
+  PrivateAlbumItemRecord,
+  PrivateAlbumSummary,
+  PublicApprovalStatus,
   RoomParticipant,
   StudioConfig,
   StudioProfile,
@@ -37,13 +62,27 @@ import type {
   StudioStateUpdatePatch,
 } from '../types/studio';
 import type { ModerationEffect } from '../hooks/useWebSocketStudio';
-import { getScheduleFromState, isDndActiveNow } from '../lib/schedule';
+import {
+  ADMIN_MODEL_THEMES,
+  getAdminModelTheme,
+} from '../lib/modelThemes';
+import {
+  getActiveDailyPause,
+  getScheduleFromState,
+  isDndActiveNow,
+  isWeekdayBlockedNow,
+} from '../lib/schedule';
 import { AdminSiteEditor } from './AdminSiteEditor';
+import { AgendaManagementPanel } from './AgendaManagementPanel';
 import { CallPlansManager } from './CallPlansManager';
-import { DailyRevenueBarChart } from './DailyRevenueBarChart';
 import { DoNotDisturbPanel } from './DoNotDisturbPanel';
+import { FinancialEarningsDashboard } from './FinancialEarningsDashboard';
 import { InterestMessagesPanel } from './InterestMessagesPanel';
+import { MediaManagementPanel } from './MediaManagementPanel';
 import { OperatingSchedulePanel } from './OperatingSchedulePanel';
+import { SuperAdminModelsPanel } from './SuperAdminModelsPanel';
+import { TechVideoCallButton } from './TechEffects';
+import { TipGoalManagerCard } from './TipGoalManagerCard';
 import { UserControlPanel } from './UserControlPanel';
 import { VideoCallStage } from './VideoCallStage';
 
@@ -62,6 +101,9 @@ interface ModelAdminPageProps {
   studioState: StudioState | null;
   studioConfig: StudioConfig | null;
   galleryItems: GalleryItemRecord[];
+  privateAlbumSummary?: PrivateAlbumSummary | null;
+  privateAlbumItems?: PrivateAlbumItemRecord[];
+  pendingGalleryItems?: PendingGalleryReviewItem[];
   callQueue: CallRequest[];
   callMessages: CallMessage[];
   callHistory: CallHistoryRecord[];
@@ -130,22 +172,75 @@ interface ModelAdminPageProps {
   }) => Promise<void>;
   onDeletePlan: (planId: string) => Promise<void>;
   onUpdateStudioState: (patch: StudioStateUpdatePatch) => Promise<void>;
+  onUploadImage?: (
+    file: File,
+    targetModelId?: string
+  ) => Promise<{ ok: boolean; url?: string; error?: string }>;
+  onUploadMedia?: (
+    file: File,
+    targetModelId?: string,
+    allowVideo?: boolean
+  ) => Promise<{
+    ok: boolean;
+    url?: string;
+    mediaType?: MediaAssetType;
+    error?: string;
+  }>;
   onSaveStudioConfig: (
-    patch: Partial<Omit<StudioConfig, 'modelUid' | 'updatedAt'>>
-  ) => Promise<void>;
+    patch: Partial<Omit<StudioConfig, 'modelUid' | 'updatedAt'>> & {
+      recalculatePlans?: boolean;
+    }
+  ) => Promise<{ ok: boolean; error?: string } | void>;
   onSaveGalleryItem: (input: {
     id?: string;
     title: string;
     caption: string;
     category: GalleryCategoryType;
+    mediaType?: MediaAssetType;
     specs: string;
     src: string;
     alt: string;
     sortOrder: number;
     active: boolean;
-  }) => Promise<void>;
+  }) => Promise<
+    { ok: boolean; approvalStatus?: PublicApprovalStatus; error?: string } | void
+  >;
   onDeleteGalleryItem: (itemId: string) => Promise<void>;
   onRestoreDefaultGallery: () => Promise<void>;
+  onModerateGalleryItem?: (
+    modelId: string,
+    itemId: string,
+    status: 'approved' | 'rejected',
+    note?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onSavePrivateAlbumSettings?: (input: {
+    enabled?: boolean;
+    password?: string;
+    hint?: string;
+    priceCents?: number;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  onSavePrivateAlbumItem?: (input: {
+    id?: string;
+    title: string;
+    caption: string;
+    mediaType: MediaAssetType;
+    src: string;
+    thumbnailUrl?: string;
+    sortOrder: number;
+    active: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  onDeletePrivateAlbumItem?: (itemId: string) => Promise<void>;
+  onToggleMediaVisibility?: (input: {
+    itemId: string;
+    fromVisibility: MediaVisibility;
+    toVisibility: MediaVisibility;
+    category?: GalleryCategoryType;
+  }) => Promise<{
+    ok: boolean;
+    visibility?: MediaVisibility;
+    approvalStatus?: PublicApprovalStatus;
+    error?: string;
+  }>;
   onUpdateUserControl: (
     targetUid: string,
     patch: Partial<{
@@ -190,14 +285,81 @@ interface ModelAdminPageProps {
     status: InterestMessageStatus
   ) => Promise<void>;
   onDeleteInterestMessage: (messageId: string) => Promise<void>;
+  isSuperAdmin?: boolean;
+  activeModelId?: string;
+  activeAdminThemeId?: string;
+  superAdminModels?: ModelAccountSummary[];
+  onCreateModelAccount?: (input: {
+    displayName: string;
+    loginUsername: string;
+    password: string;
+    studioBrand?: string;
+    modelBio?: string;
+    basicInfo?: ModelBasicInfo;
+    headline?: string;
+    heroTitle?: string;
+    heroSubtitle?: string;
+    groupButtonLabel?: string;
+    privateButtonLabel?: string;
+    avatarUrl?: string;
+    heroImageUrl?: string;
+    loungeImageUrl?: string;
+    ratePerMinuteCents?: number;
+    planPrices?: {
+      express10Cents?: number;
+      private20Cents?: number;
+      vip45Cents?: number;
+    };
+    active?: boolean;
+    adminThemeColor?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  onUpdateModelAccount?: (
+    modelId: string,
+    patch: {
+      displayName?: string;
+      loginUsername?: string;
+      newPassword?: string;
+      active?: boolean;
+      studioBrand?: string;
+      avatarUrl?: string;
+      heroImageUrl?: string;
+      loungeImageUrl?: string;
+      modelBio?: string;
+      basicInfo?: ModelBasicInfo;
+      heroTitle?: string;
+      heroSubtitle?: string;
+      headline?: string;
+      groupButtonLabel?: string;
+      privateButtonLabel?: string;
+      adminThemeColor?: string;
+      ratePerMinuteCents?: number;
+      recalculatePlans?: boolean;
+    }
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onDeleteModelAccount?: (
+    modelId: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onSelectModelWorkspace?: (modelId: string) => void;
+  pixCharges?: PixChargeRecord[];
+  onConfirmModelPixCharge?: (
+    chargeId: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onCancelModelPixCharge?: (
+    chargeId: string
+  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
 type AdminSection =
-  | 'reception'
-  | 'site_editor'
+  | 'private_calls'
+  | 'users'
   | 'plans'
-  | 'offline_schedule'
-  | 'management';
+  | 'revenue'
+  | 'tip_goal'
+  | 'agenda'
+  | 'schedule'
+  | 'media'
+  | 'site'
+  | 'models';
 
 export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   myUid,
@@ -209,6 +371,9 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   studioState,
   studioConfig,
   galleryItems,
+  privateAlbumSummary = null,
+  privateAlbumItems = [],
+  pendingGalleryItems = [],
   callQueue,
   callMessages,
   callHistory,
@@ -250,10 +415,17 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onSavePlan,
   onDeletePlan,
   onUpdateStudioState,
+  onUploadImage,
+  onUploadMedia,
   onSaveStudioConfig,
   onSaveGalleryItem,
   onDeleteGalleryItem,
   onRestoreDefaultGallery,
+  onModerateGalleryItem,
+  onSavePrivateAlbumSettings,
+  onSavePrivateAlbumItem,
+  onDeletePrivateAlbumItem,
+  onToggleMediaVisibility,
   onUpdateUserControl,
   onDeleteUserProfile,
   onSendModeration,
@@ -263,17 +435,69 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onDeleteCallHistoryRecord,
   onUpdateInterestMessageStatus,
   onDeleteInterestMessage,
+  isSuperAdmin = false,
+  activeModelId = 'lorena_noir',
+  activeAdminThemeId = 'rose_velvet',
+  superAdminModels = [],
+  onCreateModelAccount,
+  onUpdateModelAccount,
+  onDeleteModelAccount,
+  onSelectModelWorkspace,
+  pixCharges = [],
+  onConfirmModelPixCharge,
+  onCancelModelPixCharge,
 }) => {
-  const [section, setSection] = useState<AdminSection>('reception');
+  const [section, setSection] = useState<AdminSection>('private_calls');
+  const [visitorSearch, setVisitorSearch] = useState('');
+  const [showCameraPreview, setShowCameraPreview] = useState(false);
+  const [rateDraftBrl, setRateDraftBrl] = useState<string>(() =>
+    (ratePerMinuteCents / 100).toFixed(2)
+  );
+  const [savingRate, setSavingRate] = useState(false);
+  const [rateSavedMsg, setRateSavedMsg] = useState<string | null>(null);
+  const [pixActionId, setPixActionId] = useState<string | null>(null);
+  const [pixAdminMsg, setPixAdminMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRateDraftBrl((ratePerMinuteCents / 100).toFixed(2));
+  }, [ratePerMinuteCents, activeModelId]);
+
+  const currentTheme = useMemo(
+    () => getAdminModelTheme(activeAdminThemeId),
+    [activeAdminThemeId]
+  );
+
+  const handleSaveModelRate = async (recalculatePlans: boolean) => {
+    const parsed = Number(rateDraftBrl.replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed < 1) return;
+    const nextCents = Math.max(100, Math.min(1000000, Math.round(parsed * 100)));
+    setSavingRate(true);
+    setRateSavedMsg(null);
+    try {
+      onChangeRatePerMinuteCents(nextCents);
+      await onSaveStudioConfig({
+        ratePerMinuteCents: nextCents,
+        ...(recalculatePlans ? { recalculatePlans: true } : {}),
+      });
+      setRateSavedMsg(
+        recalculatePlans
+          ? `Tarifa salva (${BRL_FORMATTER.format(nextCents / 100)}/min) e pacotes ajustados para esta modelo.`
+          : `Tarifa por minuto salva para ${modelName}: ${BRL_FORMATTER.format(nextCents / 100)}/min.`
+      );
+    } finally {
+      setSavingRate(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isSuperAdmin && section === 'models') {
+      setSection('private_calls');
+    }
+  }, [isSuperAdmin, section]);
 
   const onlineVisitors = useMemo(
     () => peers.filter((p) => p.uid !== myUid),
     [peers, myUid]
-  );
-
-  const waitingRequests = useMemo(
-    () => callQueue.filter((c) => c.status === 'waiting'),
-    [callQueue]
   );
 
   const profileMap = useMemo(() => {
@@ -284,564 +508,1620 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
     return map;
   }, [allProfiles]);
 
+  const filteredOnlineVisitors = useMemo(() => {
+    const q = visitorSearch.trim().toLowerCase();
+    const list = q
+      ? onlineVisitors.filter((v) => v.displayName.toLowerCase().includes(q))
+      : [...onlineVisitors];
+    list.sort((a, b) => {
+      const aVip =
+        (profileMap.get(a.uid)?.accessStatus || a.accessStatus) === 'vip';
+      const bVip =
+        (profileMap.get(b.uid)?.accessStatus || b.accessStatus) === 'vip';
+      if (aVip !== bVip) return aVip ? -1 : 1;
+      return 0;
+    });
+    return list;
+  }, [onlineVisitors, profileMap, visitorSearch]);
+
+  const waitingRequests = useMemo(() => {
+    const waiting = callQueue.filter((c) => c.status === 'waiting');
+    return [...waiting].sort((a, b) => {
+      const aVip = profileMap.get(a.userId)?.accessStatus === 'vip';
+      const bVip = profileMap.get(b.userId)?.accessStatus === 'vip';
+      if (aVip !== bVip) return aVip ? -1 : 1;
+      const ta = a.createdAt?.toMillis?.() ?? 0;
+      const tb = b.createdAt?.toMillis?.() ?? 0;
+      return ta - tb;
+    });
+  }, [callQueue, profileMap]);
+
+  const waitingVipRequests = useMemo(
+    () =>
+      waitingRequests.filter(
+        (req) => profileMap.get(req.userId)?.accessStatus === 'vip'
+      ),
+    [profileMap, waitingRequests]
+  );
+
+  const unreadMessagesCount = useMemo(
+    () => interestMessages.filter((m) => m.status === 'unread').length,
+    [interestMessages]
+  );
+
+  const pendingPixChargesCount = useMemo(
+    () => pixCharges.filter((c) => c.status === 'pending').length,
+    [pixCharges]
+  );
+
   const activePartnerProfile =
     activePartnerUid && !isGroupRoom
       ? profileMap.get(activePartnerUid) || null
       : null;
   const activePartnerMuted = activePartnerProfile?.accessStatus === 'muted';
   const dndActiveNow = isDndActiveNow(studioState);
+  const scheduleSnapshot = getScheduleFromState(studioState);
+  const agendaRulesCount =
+    scheduleSnapshot.dailyPausePeriods.filter((p) => p.enabled).length +
+    scheduleSnapshot.weeklyBlockedDays.length +
+    scheduleSnapshot.holidayDates.length;
+  const agendaBlockingNow =
+    getActiveDailyPause(studioState) !== null ||
+    isWeekdayBlockedNow(studioState);
+  const isLive = studioState?.isLive ?? true;
+  const callMode = studioState?.callMode ?? 'open';
+  const activeModeKey: 'open' | 'queue_only' | 'rest' = !isLive || callMode === 'paused'
+    ? 'rest'
+    : callMode === 'queue_only'
+      ? 'queue_only'
+      : 'open';
+
+  const modelName =
+    studioConfig?.modelName ||
+    studioState?.modelName ||
+    modelProfile?.displayName ||
+    'Lorena Noir';
+  const modelAvatar = studioConfig?.modelAvatarUrl || modelProfile?.photoUrl;
+  const pendingPrivateCount = waitingRequests.length + (incomingRing ? 1 : 0);
+  const hasActiveCall = Boolean(activeCallId) || isGroupRoom;
+  const showStageNow = hasActiveCall || showCameraPreview || Boolean(localStream);
+
+  const firstCallableOnlineVisitor = useMemo(
+    () =>
+      onlineVisitors.find((visitor) => {
+        const status =
+          profileMap.get(visitor.uid)?.accessStatus || visitor.accessStatus;
+        return status !== 'blocked';
+      }) ?? null,
+    [onlineVisitors, profileMap]
+  );
+
+  const firstWaitingIsVip =
+    waitingRequests.length > 0 &&
+    profileMap.get(waitingRequests[0].userId)?.accessStatus === 'vip';
+
+  const callLaunchHint = incomingRing
+    ? `Chamando agora: ${incomingRing.fromName}`
+    : waitingRequests.length > 0
+      ? firstWaitingIsVip
+        ? `Prioridade VIP na fila: ${waitingRequests[0].userName}`
+        : `Próximo na fila: ${waitingRequests[0].userName}`
+      : firstCallableOnlineVisitor
+        ? `Conectar no privado com ${firstCallableOnlineVisitor.displayName}`
+        : 'Abre sua câmera e microfone na sala ao vivo para falar com internautas';
+
+  const handleLorenaEnterVideoCall = async () => {
+    if (incomingRing) {
+      await onAcceptIncomingRing();
+      return;
+    }
+    if (waitingRequests.length > 0) {
+      await onAcceptQueueAndCall(waitingRequests[0]);
+      return;
+    }
+    if (firstCallableOnlineVisitor) {
+      await onDirectCallUser({
+        uid: firstCallableOnlineVisitor.uid,
+        displayName: firstCallableOnlineVisitor.displayName,
+        photoUrl: firstCallableOnlineVisitor.photoUrl,
+      });
+      return;
+    }
+    await onJoinGroupRoomAdmin();
+  };
+
+  const navItems: Array<{
+    id: AdminSection;
+    label: string;
+    hint: string;
+    icon: React.ComponentType<{ className?: string }>;
+    countText?: string;
+    highlight?: boolean;
+  }> = [
+    {
+      id: 'private_calls',
+      label: 'Chamada Privativa',
+      hint: 'Entrar 1-para-1 e atender fila',
+      icon: Video,
+      countText:
+        pendingPrivateCount > 0
+          ? `${pendingPrivateCount}`
+          : onlineVisitors.length > 0
+            ? `${onlineVisitors.length}`
+            : undefined,
+      highlight: pendingPrivateCount > 0 || hasActiveCall,
+    },
+    {
+      id: 'users',
+      label: 'Internautas e Acesso',
+      hint: 'VIP, silenciar e mensagem inicial',
+      icon: Users,
+      countText: `${allProfiles.filter((p) => p.uid !== myUid).length}`,
+    },
+    {
+      id: 'plans',
+      label: 'Planos e Preços',
+      hint: 'Duração e valores das sessões',
+      icon: CreditCard,
+      countText: `${callPlans.filter((p) => p.active).length}`,
+    },
+    {
+      id: 'revenue',
+      label: 'Receita e Histórico',
+      hint: 'PIX, ganhos e sessões',
+      icon: TrendingUp,
+      countText:
+        pendingPixChargesCount > 0 ? `${pendingPixChargesCount} PIX` : undefined,
+      highlight: pendingPixChargesCount > 0,
+    },
+    {
+      id: 'tip_goal',
+      label: 'Meta de Gorjeta',
+      hint: 'Título, valor alvo e descrição',
+      icon: Target,
+      countText: studioState?.tipGoalEnabled
+        ? `${Math.min(
+            100,
+            Math.round(
+              ((studioState.tipGoalCurrentCents || 0) /
+                Math.max(500, studioState.tipGoalTargetCents || 30000)) *
+                100
+            )
+          )}%`
+        : 'Oculta',
+      highlight: Boolean(studioState?.tipGoalEnabled),
+    },
+    {
+      id: 'agenda',
+      label: 'Gerenciamento de Agenda',
+      hint: 'Pausas diárias, dias e feriados',
+      icon: CalendarRange,
+      countText: agendaRulesCount > 0 ? `${agendaRulesCount}` : undefined,
+      highlight: agendaBlockingNow,
+    },
+    {
+      id: 'schedule',
+      label: 'Horários e Descanso',
+      hint: 'Turnos, Não Perturbe e recados',
+      icon: CalendarClock,
+      countText: unreadMessagesCount > 0 ? `${unreadMessagesCount}` : undefined,
+      highlight: dndActiveNow || unreadMessagesCount > 0,
+    },
+    {
+      id: 'media',
+      label: 'Gerenciamento de Mídia',
+      hint: 'Público ou Privado em tempo real',
+      icon: Film,
+      countText: `${galleryItems.length + privateAlbumItems.length}`,
+      highlight: galleryItems.some((g) => g.approvalStatus === 'pending'),
+    },
+    {
+      id: 'site',
+      label: 'Site, Perfil e Álbum',
+      hint: 'Bio, textos e álbum privativo',
+      icon: ImageIcon,
+      countText:
+        galleryItems.some((g) => g.approvalStatus === 'pending')
+          ? `${galleryItems.filter((g) => g.approvalStatus === 'pending').length} pendente`
+          : undefined,
+      highlight: galleryItems.some((g) => g.approvalStatus === 'pending'),
+    },
+    ...(isSuperAdmin
+      ? [
+          {
+            id: 'models' as const,
+            label: 'Modelos e Senhas',
+            hint: 'Contas e autorizações públicas',
+            icon: ShieldCheck,
+            countText:
+              pendingGalleryItems.length > 0
+                ? `${pendingGalleryItems.length} pendente`
+                : superAdminModels.length > 0
+                  ? `${superAdminModels.length}`
+                  : undefined,
+            highlight: pendingGalleryItems.length > 0,
+          },
+        ]
+      : []),
+  ];
+
+  const handleOpenCameraPreview = async () => {
+    if (showCameraPreview && !hasActiveCall) {
+      setShowCameraPreview(false);
+      return;
+    }
+    setShowCameraPreview(true);
+    if (!localStream) {
+      await onAcquireMedia();
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Model Reception Top Control Strip */}
-      <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-5 sm:px-6 flex flex-col xl:flex-row xl:items-center justify-between gap-5">
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-[#F4C2D7]">
-            Administração da Modelo · {studioState?.modelName || 'Lorena Noir'}
-          </p>
-          <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-            Central de Recepção de Videochamadas
-          </h1>
-          <p className="text-xs text-[#C9BAC4] tabular-nums">
-            {onlineVisitors.length} internauta
-            {onlineVisitors.length === 1 ? '' : 's'} online ·{' '}
-            {roomParticipants.length} na sala ao vivo ·{' '}
-            {waitingRequests.length} na fila ·{' '}
-            {dndActiveNow
-              ? 'Modo Não Perturbe ativo'
-              : studioState?.autoScheduleEnabled
-                ? `Agenda automática (${
-                    getScheduleFromState(studioState).schedulePeriods.filter(
-                      (p) => p.enabled
-                    ).length
-                  } períodos)`
-                : wsConnected
-                  ? 'Sinalização em tempo real ativa'
-                  : 'Reconectando'}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {!isGroupRoom && (
-            <button
-              type="button"
-              onClick={() => void onJoinGroupRoomAdmin()}
-              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Video className="w-3.5 h-3.5" />
-              <span>
-                {roomParticipants.length > 0
-                  ? `Entrar na Sala Ao Vivo (${roomParticipants.length})`
-                  : 'Abrir Sala Ao Vivo (Grupo)'}
-              </span>
-            </button>
-          )}
-
-          {/* Availability toggle */}
-          <button
-            type="button"
-            onClick={() =>
-              void onUpdateStudioState({
-                isLive: !(studioState?.isLive ?? true),
-                autoScheduleEnabled: false,
-              })
-            }
-            className={`px-4 py-2 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              studioState?.isLive ?? true
-                ? 'bg-[#16A34A]/20 border-[#16A34A]/50 text-[#86EFAC]'
-                : 'bg-[#1A1024] border-[#F4C2D7]/20 text-[#C9BAC4]'
-            }`}
-          >
-            {studioState?.isLive ?? true
-              ? 'Recebendo Chamadas'
-              : 'Em Descanso (Offline)'}
-          </button>
-
-          {/* Call mode selector */}
-          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
-            {(
-              [
-                { id: 'open', label: 'Chamada Direta' },
-                { id: 'queue_only', label: 'Somente Fila' },
-                { id: 'paused', label: 'Fechado' },
-              ] as const
-            ).map((mode) => (
-              <button
-                key={mode.id}
-                type="button"
-                onClick={() => void onUpdateStudioState({ callMode: mode.id })}
-                className={`px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  (studioState?.callMode ?? 'open') === mode.id
-                    ? 'luxury-rose-cta font-semibold'
-                    : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
-                }`}
-              >
-                {mode.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Audio Notification System Toggle & Test Ding */}
-          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full">
-            <button
-              type="button"
-              aria-pressed={soundEnabled}
-              onClick={onToggleSoundEnabled}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                soundEnabled
-                  ? 'bg-[#16A34A]/20 text-[#86EFAC]'
-                  : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
-              }`}
-            >
-              {soundEnabled ? (
-                <Volume2 className="w-3.5 h-3.5" />
-              ) : (
-                <VolumeX className="w-3.5 h-3.5" />
-              )}
-              <span>{soundEnabled ? 'Ding Ativo' : 'Som Mudo'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={onTestSoundDing}
-              title="Reproduzir som de notificação (ding)"
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-full text-[#F4C2D7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <BellRing className="w-3.5 h-3.5" />
-              <span>Testar</span>
-            </button>
-          </div>
-
-          {/* Admin Sub-View Switch */}
-          <div className="flex items-center gap-1 p-1 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-full overflow-x-auto">
-            {(
-              [
-                { id: 'reception', label: 'Recepção ao Vivo' },
-                { id: 'site_editor', label: 'Site, Perfil e Galeria' },
-                { id: 'plans', label: 'Planos e Preços' },
-                { id: 'offline_schedule', label: 'Horários e Descanso' },
-                { id: 'management', label: 'Usuários e Receita' },
-              ] as const
-            ).map((tab) => {
-              const isSelected = section === tab.id;
+    <div className="space-y-5">
+      {/* Super Admin Color-Coded Model Switcher Strip */}
+      {isSuperAdmin && superAdminModels.length > 0 && onSelectModelWorkspace && (
+        <section
+          aria-label="Alternar modelo pelo tema visual"
+          className="luxury-card border border-[#F4C2D7]/20 rounded-2xl px-4 py-3.5 flex flex-col xl:flex-row xl:items-center justify-between gap-3.5"
+        >
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="text-xs font-medium text-[#C9BAC4] mr-1 whitespace-nowrap">
+              Painéis por Modelo:
+            </span>
+            {superAdminModels.map((m, idx) => {
+              const selected = m.id === activeModelId;
+              const mTheme = getAdminModelTheme(m.adminThemeColor, idx);
               return (
                 <button
-                  key={tab.id}
+                  key={m.id}
                   type="button"
-                  onClick={() => setSection(tab.id)}
-                  className={`relative px-3.5 py-1.5 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    isSelected
-                      ? 'text-[#FAF4F7]'
-                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                  onClick={() => onSelectModelWorkspace(m.id)}
+                  aria-pressed={selected}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs transition-all cursor-pointer whitespace-nowrap ${
+                    selected
+                      ? 'bg-[#21142D] text-[#FAF4F7] font-semibold'
+                      : 'bg-[#0B060F]/80 border-[#F4C2D7]/15 text-[#C9BAC4] hover:text-[#FAF4F7]'
                   }`}
+                  style={
+                    selected
+                      ? { borderColor: mTheme.swatchHex }
+                      : undefined
+                  }
                 >
-                  {isSelected && (
-                    <motion.span
-                      layoutId="admin-section-tab"
-                      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                      className="absolute inset-0 rounded-full bg-[#281837] border border-[#F4C2D7]/35 shadow-[0_0_16px_-4px_rgba(244,194,215,0.4)]"
-                    />
+                  <span
+                    aria-hidden="true"
+                    className="w-2.5 h-2.5 rounded-full shrink-0 border border-white/25"
+                    style={{ backgroundColor: mTheme.swatchHex }}
+                  />
+                  <span>{m.displayName}</span>
+                  {!m.active && (
+                    <span className="text-[11px] text-[#FCA5A5]">· Inativa</span>
                   )}
-                  <span className="relative z-10">{tab.label}</span>
                 </button>
               );
             })}
           </div>
-        </div>
-      </section>
 
-      {section === 'reception' ? (
-        <div className="space-y-6">
-          {/* Active Caller Quick Moderation Bar when in a 1-on-1 call */}
-          {activePartnerUid && !isGroupRoom && (
-            <div className="luxury-card border border-[#F4C2D7]/40 rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
-              <div className="text-xs space-y-0.5">
-                <p className="font-semibold text-[#FAF4F7]">
-                  Atendendo agora: {activePartnerName}
-                </p>
-                <p className="text-[#C9BAC4]">
-                  Modere o áudio ou encerre o acesso do internauta instantaneamente.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextStatus = activePartnerMuted ? 'active' : 'muted';
-                    const wsAction = activePartnerMuted ? 'unmute' : 'mute';
-                    void onUpdateUserControl(activePartnerUid, {
-                      accessStatus: nextStatus,
-                    });
-                    onSendModeration(activePartnerUid, wsAction);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full bg-[#21142D] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
-                >
-                  {activePartnerMuted ? (
-                    <Mic className="w-3.5 h-3.5 text-[#86EFAC]" />
-                  ) : (
-                    <MicOff className="w-3.5 h-3.5 text-[#FCD34D]" />
-                  )}
-                  <span>
-                    {activePartnerMuted ? 'Liberar Áudio' : 'Silenciar Internauta'}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void onUpdateUserControl(activePartnerUid, {
-                      accessStatus: 'blocked',
-                    });
-                    onSendModeration(activePartnerUid, 'block');
-                    void onEndCall();
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-full bg-red-950/40 border border-red-500/35 text-red-200 hover:bg-red-950/60 transition-colors cursor-pointer"
-                >
-                  <Ban className="w-3.5 h-3.5" />
-                  <span>Bloquear e Encerrar</span>
-                </button>
+          {onUpdateModelAccount && (
+            <div className="flex flex-wrap items-center gap-2 shrink-0 xl:border-l xl:border-[#F4C2D7]/15 xl:pl-4">
+              <span className="text-[11px] text-[#C9BAC4] whitespace-nowrap">
+                Cor desta tela:
+              </span>
+              <span
+                className="text-[11px] font-semibold whitespace-nowrap mr-1"
+                style={{ color: currentTheme.accentText }}
+              >
+                {currentTheme.label}
+              </span>
+              <div className="flex items-center gap-1.5">
+                {ADMIN_MODEL_THEMES.map((theme) => {
+                  const isCurrent = theme.id === currentTheme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      title={`Aplicar tema ${theme.label} para ${modelName}`}
+                      aria-label={`Aplicar cor ${theme.label} ao painel de ${modelName}`}
+                      aria-pressed={isCurrent}
+                      onClick={() =>
+                        void onUpdateModelAccount(activeModelId, {
+                          adminThemeColor: theme.id,
+                        })
+                      }
+                      className={`w-5 h-5 rounded-full transition-transform cursor-pointer ${
+                        isCurrent
+                          ? 'ring-2 ring-white ring-offset-2 ring-offset-[#0B060F] scale-110'
+                          : 'opacity-80 hover:opacity-100 hover:scale-105 border border-white/25'
+                      }`}
+                      style={{ backgroundColor: theme.swatchHex }}
+                    />
+                  );
+                })}
               </div>
             </div>
           )}
+        </section>
+      )}
 
-          {/* Video Reception Stage */}
-          <VideoCallStage
-            isAdmin={true}
-            isGroupRoom={isGroupRoom}
-            myProfile={myProfile}
-            modelProfile={modelProfile}
-            studioState={studioState}
-            activeCallId={activeCallId}
-            activePartnerName={activePartnerName}
-            activePartnerUid={activePartnerUid}
-            activePlan={activePlan}
-            localStream={localStream}
-            remoteStream={remoteStream}
-            remoteStreams={remoteStreams}
-            peerConnectionStates={peerConnectionStates}
-            roomParticipants={roomParticipants}
-            micEnabled={micEnabled}
-            camEnabled={camEnabled}
-            mediaError={mediaError}
-            connectionState={connectionState}
-            elapsedSeconds={elapsedSeconds}
-            wsConnected={wsConnected}
-            messages={callMessages}
-            onAcquireMedia={onAcquireMedia}
-            onToggleMic={onToggleMic}
-            onToggleCam={onToggleCam}
-            onEndCall={() => void onEndCall()}
-            onSendMessage={onSendMessage}
-          />
-
-          {/* Scheduled Do Not Disturb Mode */}
-          <DoNotDisturbPanel
-            studioState={studioState}
-            onUpdateStudioState={onUpdateStudioState}
-          />
-
-          {/* Incoming Calls Queue & Online Visitors Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Incoming & Waiting Queue */}
-            <section className="lg:col-span-6 luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#F4C2D7]/15 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <PhoneIncoming className="w-4 h-4 text-[#F4C2D7]" />
-                  <h2 className="text-sm font-semibold text-[#FAF4F7]">
-                    Chamadas Recebidas e Fila
-                  </h2>
-                </div>
-                <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
-                  {waitingRequests.length + (incomingRing ? 1 : 0)} pendente
-                  {waitingRequests.length + (incomingRing ? 1 : 0) === 1
-                    ? ''
-                    : 's'}
+      <div className="flex flex-col lg:flex-row gap-6 items-start">
+      {/* Comfortable Left Navigation & Quick Controls Sidebar */}
+      <aside
+        aria-label="Menu exclusivo da modelo"
+        className="w-full lg:w-[280px] shrink-0 space-y-5 lg:sticky lg:top-22"
+      >
+        {/* Model Identity & Live Connection */}
+        <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center gap-3.5">
+            {modelAvatar ? (
+              <img
+                src={modelAvatar}
+                alt={modelName}
+                referrerPolicy="no-referrer"
+                draggable={false}
+                className="w-11 h-11 rounded-full object-cover border-2 shrink-0 bg-[#1A1024]"
+                style={{ borderColor: currentTheme.swatchHex }}
+              />
+            ) : (
+              <div
+                className="w-11 h-11 rounded-full bg-[#21142D] border-2 flex items-center justify-center font-display text-lg font-semibold shrink-0"
+                style={{
+                  borderColor: currentTheme.swatchHex,
+                  color: currentTheme.accentText,
+                }}
+              >
+                {modelName.slice(0, 1).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex items-center gap-1.5 text-xs text-[#C9BAC4]">
+                <span
+                  aria-hidden="true"
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: currentTheme.swatchHex }}
+                />
+                <span className="truncate">
+                  Painel · {currentTheme.label}
                 </span>
               </div>
+              <h1 className="font-display text-xl font-semibold text-[#FAF4F7] truncate">
+                {modelName}
+              </h1>
+            </div>
+          </div>
 
-              <div className="divide-y divide-[#F4C2D7]/10">
-                {incomingRing && (
-                  <div className="p-5 bg-[#21142D] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="space-y-0.5 min-w-0">
-                      <p className="text-xs font-semibold text-[#F4C2D7]">
-                        Chamando agora
-                      </p>
-                      <p className="text-sm font-semibold text-[#FAF4F7] truncate">
-                        {incomingRing.fromName}
-                      </p>
-                      {incomingRing.planName &&
-                        typeof incomingRing.planPriceCents === 'number' && (
-                          <p className="text-[11px] font-mono tabular-nums text-[#86EFAC]">
-                            {incomingRing.planName} ·{' '}
-                            {BRL_FORMATTER.format(
-                              incomingRing.planPriceCents / 100
-                            )}{' '}
-                            · Pré-autorizado
-                          </p>
-                        )}
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => void onAcceptIncomingRing()}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors cursor-pointer"
+          <div className="pt-3 border-t border-[#F4C2D7]/15 flex items-center justify-between gap-2 text-xs">
+            <span className="inline-flex items-center gap-2 text-[#FAF4F7]">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  dndActiveNow
+                    ? 'bg-[#FCD34D]'
+                    : activeModeKey === 'rest'
+                      ? 'bg-[#938291]'
+                      : wsConnected
+                        ? 'bg-[#86EFAC]'
+                        : 'bg-[#FCD34D]'
+                }`}
+              />
+              <span>
+                {dndActiveNow
+                  ? 'Não Perturbe ativo'
+                  : activeModeKey === 'rest'
+                    ? 'Em descanso'
+                    : activeModeKey === 'queue_only'
+                      ? 'Atendendo por fila'
+                      : 'Atendendo privativas'}
+              </span>
+            </span>
+            <span className="font-mono tabular-nums text-[#C9BAC4]">
+              {onlineVisitors.length} online
+            </span>
+          </div>
+        </section>
+
+        {/* Simple, Human-Friendly Navigation */}
+        <nav
+          aria-label="Seções da administração"
+          className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-2.5 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-visible"
+        >
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isSelected = section === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSection(item.id)}
+                className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl text-left transition-colors shrink-0 lg:w-full cursor-pointer ${
+                  isSelected
+                    ? 'bg-[#21142D] text-[#FAF4F7] border border-[#F4C2D7]/25'
+                    : 'text-[#C9BAC4] hover:text-[#FAF4F7] hover:bg-[#1A1024]/70 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      isSelected ? 'text-[#F4C2D7]' : 'text-[#C9BAC4]'
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold whitespace-nowrap truncate">
+                      {item.label}
+                    </p>
+                    <p className="hidden lg:block text-[11px] text-[#938291] truncate">
+                      {item.hint}
+                    </p>
+                  </div>
+                </div>
+
+                {item.countText && (
+                  <span
+                    className={`text-xs font-mono tabular-nums shrink-0 ${
+                      item.highlight
+                        ? 'text-[#F4C2D7] font-semibold'
+                        : 'text-[#938291]'
+                    }`}
+                  >
+                    {item.countText}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Easy Studio Availability & Sound Controls */}
+        <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-4 space-y-4">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold text-[#FAF4F7]">
+              Status de Atendimento
+            </p>
+            <p className="text-[11px] text-[#938291]">
+              Escolha como os internautas veem seu estúdio agora.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            {(
+              [
+                {
+                  key: 'open',
+                  label: 'Disponível · Chamada Direta',
+                  desc: 'Podem chamar ou entrar na fila',
+                  patch: {
+                    isLive: true,
+                    callMode: 'open' as const,
+                    autoScheduleEnabled: false,
+                  },
+                },
+                {
+                  key: 'queue_only',
+                  label: 'Disponível · Somente Fila',
+                  desc: 'Pedidos ficam na sua fila',
+                  patch: {
+                    isLive: true,
+                    callMode: 'queue_only' as const,
+                    autoScheduleEnabled: false,
+                  },
+                },
+                {
+                  key: 'rest',
+                  label: 'Em Descanso (Offline)',
+                  desc: 'Mostra painel de recados',
+                  patch: {
+                    isLive: false,
+                    autoScheduleEnabled: false,
+                  },
+                },
+              ] as const
+            ).map((option) => {
+              const selected = activeModeKey === option.key;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => void onUpdateStudioState(option.patch)}
+                  className={`w-full px-3.5 py-2.5 rounded-xl text-left transition-colors border cursor-pointer ${
+                    selected
+                      ? option.key === 'rest'
+                        ? 'bg-[#1A1024] border-[#F4C2D7]/30 text-[#FAF4F7]'
+                        : 'bg-[#16A34A]/15 border-[#16A34A]/45 text-[#FAF4F7]'
+                      : 'bg-[#0B060F]/70 border-[#F4C2D7]/10 text-[#C9BAC4] hover:text-[#FAF4F7] hover:border-[#F4C2D7]/20'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium">{option.label}</span>
+                    {selected && (
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          option.key === 'rest' ? 'bg-[#F4C2D7]' : 'bg-[#86EFAC]'
+                        }`}
+                      />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-[#938291] mt-0.5">
+                    {option.desc}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Sound Ding Toggle + Quick Test */}
+          <div className="pt-3 border-t border-[#F4C2D7]/15 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-[#C9BAC4]">
+                Aviso sonoro (Ding)
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-pressed={soundEnabled}
+                  onClick={onToggleSoundEnabled}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    soundEnabled
+                      ? 'bg-[#16A34A]/15 border-[#16A34A]/40 text-[#86EFAC]'
+                      : 'bg-[#1A1024] border-[#F4C2D7]/15 text-[#C9BAC4]'
+                  }`}
+                >
+                  {soundEnabled ? (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5" />
+                  )}
+                  <span>{soundEnabled ? 'Ativo' : 'Mudo'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onTestSoundDing}
+                  title="Testar som de notificação"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-[#1A1024] border border-[#F4C2D7]/15 text-[#F4C2D7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <BellRing className="w-3.5 h-3.5" />
+                  <span>Testar</span>
+                </button>
+              </div>
+            </div>
+
+            {dndActiveNow && (
+              <div className="pt-2 flex items-center justify-between gap-2 text-xs text-[#FCD34D]">
+                <span className="inline-flex items-center gap-1.5">
+                  <BellOff className="w-3.5 h-3.5 shrink-0" />
+                  <span>Não Perturbe ativo</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void onUpdateStudioState({ dndActive: false, dndUntilMs: 0 })
+                  }
+                  className="text-xs font-semibold text-[#FAF4F7] underline underline-offset-2 hover:text-[#F4C2D7] cursor-pointer"
+                >
+                  Desativar
+                </button>
+              </div>
+            )}
+
+            {studioState?.autoScheduleEnabled && (
+              <p className="text-[11px] text-[#C9BAC4] pt-1">
+                Agenda automática ativa (
+                {
+                  getScheduleFromState(studioState).schedulePeriods.filter(
+                    (p) => p.enabled
+                  ).length
+                }{' '}
+                períodos configurados).
+              </p>
+            )}
+          </div>
+        </section>
+      </aside>
+
+      {/* Main Comfortable Workspace Canvas */}
+      <div className="flex-1 min-w-0 w-full space-y-6">
+        {section === 'private_calls' && (
+          <div className="space-y-6">
+            {/* Friendly Section Header with Signature Technological Call CTA */}
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-5">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-5">
+                <div className="space-y-1.5">
+                  <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                    Sala Exclusiva de Chamada Privativa
+                  </h2>
+                  <p className="text-sm text-[#C9BAC4] leading-relaxed">
+                    Entre em videochamada com um clique ou escolha qualquer internauta conectado nas listas abaixo.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  {!hasActiveCall && (
+                    <TechVideoCallButton
+                      size="hero"
+                      label="Entrar na Videochamada"
+                      onClick={() => void handleLorenaEnterVideoCall()}
+                    />
+                  )}
+
+                  {!hasActiveCall && (
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenCameraPreview()}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#FAF4F7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-[#F4C2D7]" />
+                      <span>
+                        {showStageNow ? 'Ocultar Prévia' : 'Testar Câmera'}
+                      </span>
+                    </button>
+                  )}
+
+                  {!isGroupRoom && (
+                    <button
+                      type="button"
+                      onClick={() => void onJoinGroupRoomAdmin()}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Users className="w-3.5 h-3.5 text-[#F4C2D7]" />
+                      <span>
+                        {roomParticipants.length > 0
+                          ? `Sala em Grupo (${roomParticipants.length})`
+                          : 'Abrir Sala em Grupo'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!hasActiveCall && (
+                <div className="pt-4 border-t border-[#F4C2D7]/15 flex flex-wrap items-center justify-between gap-2 text-xs text-[#C9BAC4]">
+                  <span>
+                    <strong className="font-medium text-[#F4C2D7]">
+                      Ação rápida de {modelName}:
+                    </strong>{' '}
+                    {callLaunchHint}
+                  </span>
+                  <span className="font-mono tabular-nums text-[#938291]">
+                    {waitingRequests.length} na fila · {onlineVisitors.length}{' '}
+                    online
+                  </span>
+                </div>
+              )}
+            </section>
+
+            {/* Incoming Private Call Spotlight */}
+            {incomingRing &&
+              (() => {
+                const isVipIncoming =
+                  profileMap.get(incomingRing.fromUid)?.accessStatus === 'vip';
+                return (
+                  <section
+                    role="alert"
+                    className={`luxury-card rounded-2xl p-6 bg-[#21142D] flex flex-col sm:flex-row sm:items-center justify-between gap-5 ${
+                      isVipIncoming
+                        ? 'border border-[#FBBF24]/55 shadow-[0_0_28px_-10px_rgba(251,191,36,0.38)]'
+                        : 'border border-[#F4C2D7]/40'
+                    }`}
+                  >
+                    <div className="space-y-1.5 min-w-0">
+                      <p
+                        className={`text-xs font-semibold inline-flex items-center gap-2 ${
+                          isVipIncoming ? 'text-[#FDE68A]' : 'text-[#F4C2D7]'
+                        }`}
                       >
-                        <Video className="w-3.5 h-3.5" />
-                        <span>Atender Vídeo</span>
-                      </button>
+                        {isVipIncoming ? (
+                          <Crown className="w-4 h-4 text-[#FBBF24] shrink-0" />
+                        ) : (
+                          <PhoneIncoming className="w-4 h-4 shrink-0" />
+                        )}
+                        <span>
+                          {isVipIncoming
+                            ? 'Chamada Privativa VIP Recebida Agora'
+                            : 'Chamada Privativa Recebida Agora'}
+                        </span>
+                      </p>
+                      <h3 className="font-display text-2xl font-semibold text-[#FAF4F7] truncate">
+                        {incomingRing.fromName}
+                      </h3>
+                      {incomingRing.planName &&
+                      typeof incomingRing.planPriceCents === 'number' ? (
+                        <p className="text-xs font-mono tabular-nums text-[#86EFAC]">
+                          {incomingRing.planName} ·{' '}
+                          {BRL_FORMATTER.format(
+                            incomingRing.planPriceCents / 100
+                          )}{' '}
+                          · Pagamento pré-autorizado
+                        </p>
+                      ) : (
+                        <p className="text-xs text-[#C9BAC4]">
+                          Internauta aguardando você aceitar a videochamada privativa.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3 shrink-0">
+                      <TechVideoCallButton
+                        size="hero"
+                        label="Entrar na Videochamada Privativa"
+                        onClick={() => void onAcceptIncomingRing()}
+                      />
                       <button
                         type="button"
                         onClick={onRejectIncomingRing}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium rounded-full bg-[#150D1D] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        <PhoneOff className="w-3.5 h-3.5" />
+                        <PhoneOff className="w-4 h-4" />
                         <span>Recusar</span>
                       </button>
                     </div>
-                  </div>
-                )}
+                  </section>
+                );
+              })()}
 
-                {waitingRequests.length === 0 && !incomingRing ? (
-                  <div className="p-10 text-center space-y-1.5">
-                    <p className="text-sm font-medium text-[#FAF4F7]">
-                      Nenhuma chamada aguardando atendimento.
+            {/* Priority VIP Waiting Room Notification Banner */}
+            {waitingVipRequests.length > 0 && (
+              <section
+                role="alert"
+                aria-label="Notificação prioritária de cliente VIP na Sala de Espera"
+                className="luxury-card border border-[#FBBF24]/55 rounded-2xl p-5 sm:p-6 bg-gradient-to-r from-[#2D1B3D]/90 via-[#21142D]/90 to-[#150D1D] shadow-[0_18px_42px_-18px_rgba(251,191,36,0.35)] flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+              >
+                <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+                  <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#FDE68A]/25 via-[#FBBF24]/15 to-[#21142D] border border-[#FBBF24]/55 flex items-center justify-center shrink-0">
+                    <Crown className="w-5 h-5 text-[#FBBF24]" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-xs font-semibold text-[#FDE68A]">
+                      Notificação Prioritária ·{' '}
+                      {waitingVipRequests.length === 1
+                        ? 'Cliente VIP na Sala de Espera'
+                        : `${waitingVipRequests.length} Clientes VIP na Sala de Espera`}
                     </p>
+                    <p className="text-sm sm:text-base font-semibold text-[#FAF4F7] truncate">
+                      {waitingVipRequests[0].userName} aguarda atendimento VIP prioritário
+                    </p>
+                    <p className="text-xs text-[#C9BAC4] truncate">
+                      {waitingVipRequests[0].planName
+                        ? `${waitingVipRequests[0].planName} · `
+                        : ''}
+                      {waitingVipRequests[0].topic}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="shrink-0">
+                  <TechVideoCallButton
+                    size="hero"
+                    label={`Atender VIP · ${waitingVipRequests[0].userName}`}
+                    onClick={() =>
+                      void onAcceptQueueAndCall(waitingVipRequests[0])
+                    }
+                  />
+                </div>
+              </section>
+            )}
+
+            {/* Quick Moderation Strip during Active 1-on-1 Private Call */}
+            {activePartnerUid && !isGroupRoom && (
+              <section className="luxury-card border border-[#F4C2D7]/25 rounded-2xl px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-semibold text-[#FAF4F7]">
+                    Em chamada privativa com {activePartnerName}
+                  </p>
+                  <p className="text-xs text-[#C9BAC4]">
+                    Controle o microfone do internauta ou encerre imediatamente se precisar.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextStatus = activePartnerMuted ? 'active' : 'muted';
+                      const wsAction = activePartnerMuted ? 'unmute' : 'mute';
+                      void onUpdateUserControl(activePartnerUid, {
+                        accessStatus: nextStatus,
+                      });
+                      onSendModeration(activePartnerUid, wsAction);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#FAF4F7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    {activePartnerMuted ? (
+                      <Mic className="w-3.5 h-3.5 text-[#86EFAC]" />
+                    ) : (
+                      <MicOff className="w-3.5 h-3.5 text-[#FCD34D]" />
+                    )}
+                    <span>
+                      {activePartnerMuted ? 'Liberar Áudio' : 'Silenciar Internauta'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void onUpdateUserControl(activePartnerUid, {
+                        accessStatus: 'blocked',
+                      });
+                      onSendModeration(activePartnerUid, 'block');
+                      void onEndCall();
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full bg-red-950/40 border border-red-500/35 text-red-200 hover:bg-red-950/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>Bloquear e Encerrar</span>
+                  </button>
+                </div>
+              </section>
+            )}
+
+            {/* Video Call Stage (visible when in call or camera test active) */}
+            {showStageNow && (
+              <VideoCallStage
+                isAdmin={true}
+                isGroupRoom={isGroupRoom}
+                myProfile={myProfile}
+                modelProfile={modelProfile}
+                studioState={studioState}
+                activeCallId={activeCallId}
+                activePartnerName={activePartnerName}
+                activePartnerUid={activePartnerUid}
+                activePlan={activePlan}
+                localStream={localStream}
+                remoteStream={remoteStream}
+                remoteStreams={remoteStreams}
+                peerConnectionStates={peerConnectionStates}
+                roomParticipants={roomParticipants}
+                micEnabled={micEnabled}
+                camEnabled={camEnabled}
+                mediaError={mediaError}
+                connectionState={connectionState}
+                elapsedSeconds={elapsedSeconds}
+                wsConnected={wsConnected}
+                messages={callMessages}
+                onAcquireMedia={onAcquireMedia}
+                onToggleMic={onToggleMic}
+                onToggleCam={onToggleCam}
+                onEndCall={() => void onEndCall()}
+                onSendMessage={onSendMessage}
+              />
+            )}
+
+            {/* Two-Column Comfortable Call Entry Lists */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* Left Card: Waiting Private Queue */}
+              <section className="xl:col-span-6 luxury-card border border-[#F4C2D7]/15 rounded-2xl overflow-hidden">
+                <div className="px-6 py-5 border-b border-[#F4C2D7]/15 flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <PhoneIncoming className="w-4 h-4 text-[#F4C2D7]" />
+                      <h3 className="text-base font-semibold text-[#FAF4F7]">
+                        Fila de Chamadas Privativas
+                      </h3>
+                    </div>
                     <p className="text-xs text-[#C9BAC4]">
-                      Quando um internauta contratar um plano e chamar Lorena Noir, o pedido aparecerá aqui em tempo real.
+                      Pedidos com plano selecionado aguardando você aceitar.
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono tabular-nums text-[#F4C2D7] shrink-0">
+                    {waitingRequests.length} aguardando
+                  </span>
+                </div>
+
+                {waitingRequests.length === 0 ? (
+                  <div className="p-8 text-center space-y-2">
+                    <Sparkles className="w-5 h-5 text-[#F4C2D7]/70 mx-auto" />
+                    <p className="text-sm font-medium text-[#FAF4F7]">
+                      Nenhum pedido na fila neste momento
+                    </p>
+                    <p className="text-xs text-[#C9BAC4] max-w-sm mx-auto leading-relaxed">
+                      Quando um internauta escolher um plano e solicitar chamada privativa, ele aparecerá aqui com aviso sonoro.
                     </p>
                   </div>
                 ) : (
-                  waitingRequests.map((req) => {
-                    const isOnline = onlineVisitors.some(
-                      (p) => p.uid === req.userId
-                    );
-                    return (
-                      <div
-                        key={req.id}
-                        className="px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                      >
-                        <div className="min-w-0 space-y-0.5">
-                          <p className="text-sm font-medium text-[#FAF4F7] truncate">
-                            {req.userName}
-                          </p>
-                          <p className="text-xs text-[#C9BAC4] truncate">
-                            {req.topic} · {isOnline ? 'Online agora' : 'Offline'}
-                          </p>
-                          {req.planName &&
-                            typeof req.planPriceCents === 'number' && (
-                              <p className="text-[11px] font-mono tabular-nums text-[#F4C2D7]">
-                                {req.planName} ·{' '}
-                                {BRL_FORMATTER.format(req.planPriceCents / 100)}{' '}
-                                ·{' '}
-                                {req.paymentStatus === 'captured'
-                                  ? 'Cobrado'
-                                  : 'Pré-autorizado'}
+                  <div className="divide-y divide-[#F4C2D7]/10">
+                    {waitingRequests.map((req) => {
+                      const isOnline = onlineVisitors.some(
+                        (p) => p.uid === req.userId
+                      );
+                      const isVipCaller =
+                        profileMap.get(req.userId)?.accessStatus === 'vip';
+                      return (
+                        <div
+                          key={req.id}
+                          className={`p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-colors ${
+                            isVipCaller
+                              ? 'bg-[#21142D]/55 border-l-2 border-l-[#FBBF24] hover:bg-[#281837]/65'
+                              : 'hover:bg-[#FAF4F7]/[0.02]'
+                          }`}
+                        >
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {isVipCaller ? (
+                                <Crown
+                                  aria-label="Cliente VIP"
+                                  className="w-4 h-4 text-[#FBBF24] shrink-0"
+                                />
+                              ) : (
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    isOnline ? 'bg-[#86EFAC]' : 'bg-[#938291]'
+                                  }`}
+                                />
+                              )}
+                              <p className="text-sm font-semibold text-[#FAF4F7] truncate">
+                                {req.userName}
                               </p>
-                            )}
-                        </div>
+                              {isVipCaller && (
+                                <span className="text-xs font-semibold text-[#FDE68A] whitespace-nowrap">
+                                  VIP · Prioridade
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-[#C9BAC4] truncate">
+                              {req.topic} ·{' '}
+                              {isOnline ? 'Online agora' : 'Offline no momento'}
+                            </p>
+                            {req.planName &&
+                              typeof req.planPriceCents === 'number' && (
+                                <p className="text-xs font-mono tabular-nums text-[#F4C2D7]">
+                                  {req.planName} ·{' '}
+                                  {BRL_FORMATTER.format(req.planPriceCents / 100)}{' '}
+                                  ·{' '}
+                                  {req.paymentStatus === 'captured'
+                                    ? 'Cobrado'
+                                    : 'Pré-autorizado'}
+                                </p>
+                              )}
+                          </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => void onAcceptQueueAndCall(req)}
-                            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
-                          >
-                            <Video className="w-3.5 h-3.5" />
-                            <span>Atender</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void onUpdateCallStatus(
-                                req.id,
-                                'rejected',
-                                'refunded'
-                              )
-                            }
-                            aria-label={`Recusar ${req.userName}`}
-                            className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void onDeleteCallRequest(req.id)}
-                            aria-label={`Remover pedido de ${req.userName}`}
-                            className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <TechVideoCallButton
+                              size="compact"
+                              label={
+                                isVipCaller
+                                  ? 'Atender VIP Agora'
+                                  : 'Atender Privativa'
+                              }
+                              onClick={() => void onAcceptQueueAndCall(req)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void onUpdateCallStatus(
+                                  req.id,
+                                  'rejected',
+                                  'refunded'
+                                )
+                              }
+                              title="Recusar solicitação"
+                              aria-label={`Recusar ${req.userName}`}
+                              className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/15 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void onDeleteCallRequest(req.id)}
+                              title="Remover da fila"
+                              aria-label={`Remover pedido de ${req.userName}`}
+                              className="p-2 rounded-full bg-[#1A1024] border border-[#F4C2D7]/15 text-[#C9BAC4] hover:text-red-300 transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
                 )}
-              </div>
+              </section>
+
+              {/* Right Card: Online Visitors for Immediate 1-on-1 Call */}
+              <section className="xl:col-span-6 luxury-card border border-[#F4C2D7]/15 rounded-2xl overflow-hidden">
+                <div className="px-6 py-5 border-b border-[#F4C2D7]/15 space-y-3">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Users className="w-4 h-4 text-[#86EFAC]" />
+                        <h3 className="text-base font-semibold text-[#FAF4F7]">
+                          Internautas Conectados Agora
+                        </h3>
+                      </div>
+                      <p className="text-xs text-[#C9BAC4]">
+                        Chame qualquer visitante online para uma chamada privativa 1-para-1.
+                      </p>
+                    </div>
+                    <span className="text-xs font-mono tabular-nums text-[#86EFAC] shrink-0">
+                      {onlineVisitors.length} online
+                    </span>
+                  </div>
+
+                  {onlineVisitors.length > 3 && (
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-[#938291] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={visitorSearch}
+                        onChange={(e) => setVisitorSearch(e.target.value)}
+                        placeholder="Buscar internauta conectado..."
+                        className="w-full bg-[#0B060F] border border-[#F4C2D7]/15 rounded-full pl-9 pr-4 py-2 text-xs text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {filteredOnlineVisitors.length === 0 ? (
+                  <div className="p-8 text-center space-y-2">
+                    <MoonStar className="w-5 h-5 text-[#C9BAC4]/60 mx-auto" />
+                    <p className="text-sm font-medium text-[#FAF4F7]">
+                      {onlineVisitors.length === 0
+                        ? 'Nenhum internauta online neste instante'
+                        : 'Nenhum internauta encontrado com esse nome'}
+                    </p>
+                    <p className="text-xs text-[#C9BAC4] max-w-sm mx-auto leading-relaxed">
+                      Assim que um visitante entrar no site, o nome dele aparece aqui pronto para chamada privativa.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[#F4C2D7]/10">
+                    {filteredOnlineVisitors.map((visitor) => {
+                      const prof = profileMap.get(visitor.uid);
+                      const status = prof?.accessStatus || visitor.accessStatus;
+                      const isBlocked = status === 'blocked';
+                      return (
+                        <div
+                          key={visitor.uid}
+                          className="p-5 flex items-center justify-between gap-4 hover:bg-[#FAF4F7]/[0.02] transition-colors"
+                        >
+                          <div className="flex items-center gap-3.5 min-w-0">
+                            {visitor.photoUrl ? (
+                              <img
+                                src={visitor.photoUrl}
+                                alt={visitor.displayName}
+                                referrerPolicy="no-referrer"
+                                draggable={false}
+                                className="w-10 h-10 rounded-full object-cover border border-[#F4C2D7]/20 shrink-0 bg-[#1A1024]"
+                              />
+                            ) : (
+                              <div className="w-10 h-10 rounded-full bg-[#21142D] border border-[#F4C2D7]/20 flex items-center justify-center text-sm font-semibold text-[#F4C2D7] shrink-0">
+                                {visitor.displayName.slice(0, 1).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex items-center gap-1.5">
+                                {status === 'vip' && (
+                                  <Crown
+                                    aria-label="Cliente VIP"
+                                    className="w-3.5 h-3.5 text-[#FBBF24] shrink-0"
+                                  />
+                                )}
+                                <p className="text-sm font-semibold text-[#FAF4F7] truncate">
+                                  {visitor.displayName}
+                                </p>
+                              </div>
+                              <p className="text-xs text-[#C9BAC4]">
+                                {visitor.inCallWith
+                                  ? 'Em videochamada'
+                                  : 'Na recepção'}{' '}
+                                ·{' '}
+                                <span
+                                  className={
+                                    status === 'vip'
+                                      ? 'text-[#FDE68A] font-medium'
+                                      : status === 'muted'
+                                        ? 'text-[#FCD34D]'
+                                        : isBlocked
+                                          ? 'text-[#FCA5A5]'
+                                          : 'text-[#86EFAC]'
+                                  }
+                                >
+                                  {status === 'vip'
+                                    ? 'VIP · Prioridade'
+                                    : status === 'muted'
+                                      ? 'Silenciado'
+                                      : isBlocked
+                                        ? 'Bloqueado'
+                                        : 'Ativo'}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+
+                          <TechVideoCallButton
+                            size="compact"
+                            disabled={isBlocked}
+                            label="Chamar no Privado"
+                            icon={<PhoneCall className="w-3 h-3" />}
+                            onClick={() =>
+                              void onDirectCallUser({
+                                uid: visitor.uid,
+                                displayName: visitor.displayName,
+                                photoUrl: visitor.photoUrl,
+                              })
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <TipGoalManagerCard
+              studioState={studioState}
+              modelName={modelName}
+              onUpdateStudioState={onUpdateStudioState}
+            />
+          </div>
+        )}
+
+        {section === 'users' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-1.5">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                Internautas, Acesso e Mensagem da Recepção
+              </h2>
+              <p className="text-sm text-[#C9BAC4]">
+                Edite o texto de boas-vindas do estúdio, marque clientes como VIP, silencie áudios ou bloqueie acessos.
+              </p>
             </section>
 
-            {/* Online Visitors Right Now */}
-            <section className="lg:col-span-6 luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#F4C2D7]/15 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <Users className="w-4 h-4 text-[#86EFAC]" />
-                  <h2 className="text-sm font-semibold text-[#FAF4F7]">
-                    Internautas Conectados Agora
+            <UserControlPanel
+              myUid={myUid}
+              profiles={allProfiles}
+              peers={peers}
+              studioState={studioState}
+              callHistory={callHistory}
+              interestMessages={interestMessages}
+              callPlans={callPlans}
+              ratePerMinuteCents={ratePerMinuteCents}
+              onChangeRatePerMinuteCents={onChangeRatePerMinuteCents}
+              onUpdateStudioState={onUpdateStudioState}
+              onUpdateUserControl={onUpdateUserControl}
+              onDeleteUserProfile={onDeleteUserProfile}
+              onSendModeration={onSendModeration}
+              onDirectCallUser={onDirectCallUser}
+              onSavePlan={onSavePlan}
+              onDeletePlan={onDeletePlan}
+              onRecordCallHistory={onRecordCallHistory}
+              onUpdateCallHistoryStatus={onUpdateCallHistoryStatus}
+              onUpdateCallHistoryRecord={onUpdateCallHistoryRecord}
+              onDeleteCallHistoryRecord={onDeleteCallHistoryRecord}
+              onUpdateInterestMessageStatus={onUpdateInterestMessageStatus}
+              onDeleteInterestMessage={onDeleteInterestMessage}
+              showStudioControls={true}
+              showDndPanel={false}
+              showUsersTable={true}
+              showRevenueDashboard={false}
+              showCallPlans={false}
+              showCallHistory={false}
+              showInterestMessages={false}
+            />
+          </div>
+        )}
+
+        {section === 'plans' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-4">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                    Planos e Preços Exclusivos · {modelName}
                   </h2>
+                  <p className="text-sm text-[#C9BAC4]">
+                    Defina os pacotes e a tarifa por minuto que valem apenas para{' '}
+                    <span className="text-[#FAF4F7] font-medium">{modelName}</span>{' '}
+                    na vitrine pública e nas cobranças.
+                  </p>
                 </div>
-                <span className="text-xs font-mono tabular-nums text-[#86EFAC]">
-                  {onlineVisitors.length} online
+
+                <div className="flex flex-wrap items-center gap-2.5 bg-[#0B060F] border border-[#F4C2D7]/20 rounded-2xl px-4 py-2.5 shrink-0">
+                  <label
+                    htmlFor="admin-rate-per-min"
+                    className="text-xs font-medium text-[#C9BAC4] whitespace-nowrap"
+                  >
+                    Tarifa/min (R$):
+                  </label>
+                  <input
+                    id="admin-rate-per-min"
+                    type="text"
+                    value={rateDraftBrl}
+                    onChange={(e) => setRateDraftBrl(e.target.value)}
+                    className="w-24 bg-[#150D1D] border border-[#F4C2D7]/20 rounded-lg px-2.5 py-1.5 text-sm font-mono tabular-nums text-[#FAF4F7] text-right focus:outline-none focus:border-[#F4C2D7]"
+                  />
+                  <button
+                    type="button"
+                    disabled={savingRate}
+                    onClick={() => void handleSaveModelRate(false)}
+                    className="px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                  >
+                    {savingRate ? 'Salvando...' : 'Salvar Tarifa'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingRate}
+                    onClick={() => void handleSaveModelRate(true)}
+                    className="px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#21142D] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                  >
+                    Salvar + Recalcular Planos
+                  </button>
+                </div>
+              </div>
+
+              {rateSavedMsg && (
+                <p role="status" className="text-xs text-[#86EFAC]">
+                  {rateSavedMsg}
+                </p>
+              )}
+            </section>
+
+            <CallPlansManager
+              plans={callPlans}
+              modelName={modelName}
+              onSavePlan={onSavePlan}
+              onDeletePlan={onDeletePlan}
+            />
+          </div>
+        )}
+
+        {section === 'revenue' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-1.5">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                Dashboard Financeiro e Histórico de Sessões
+              </h2>
+              <p className="text-sm text-[#C9BAC4]">
+                Visualize seus ganhos diários e mensais com base nas chamadas concluídas e gerencie todo o histórico financeiro.
+              </p>
+            </section>
+
+            <TipGoalManagerCard
+              studioState={studioState}
+              modelName={modelName}
+              onUpdateStudioState={onUpdateStudioState}
+            />
+
+            {/* PIX Payments & QR Code Verification Card */}
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl overflow-hidden">
+              <div className="px-6 py-5 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-[#0EA5E9]/15 border border-[#38BDF8]/30 flex items-center justify-center shrink-0">
+                    <QrCode className="w-4 h-4 text-[#38BDF8]" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-xl font-semibold text-[#FAF4F7]">
+                      Pagamentos PIX (QR Code & Confirmação)
+                    </h3>
+                    <p className="text-xs text-[#C9BAC4]">
+                      Acompanhe QR Codes gerados e confirme manualmente caso o internauta já tenha concluído o PIX.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs font-mono tabular-nums text-[#F4C2D7]">
+                  {pendingPixChargesCount} pendente
+                  {pendingPixChargesCount === 1 ? '' : 's'} · {pixCharges.length} no
+                  total
                 </span>
               </div>
 
-              {onlineVisitors.length === 0 ? (
-                <div className="p-10 text-center space-y-1.5">
-                  <p className="text-sm font-medium text-[#FAF4F7]">
-                    Nenhum internauta conectado neste instante.
-                  </p>
-                  <p className="text-xs text-[#C9BAC4]">
-                    Você receberá uma notificação sonora e visual assim que alguém entrar no site.
-                  </p>
+              {pixAdminMsg && (
+                <div className="px-6 py-2.5 bg-[#16A34A]/15 border-b border-[#16A34A]/30 text-xs text-[#86EFAC]">
+                  {pixAdminMsg}
+                </div>
+              )}
+
+              {pixCharges.length === 0 ? (
+                <div className="p-8 text-center text-xs text-[#C9BAC4]">
+                  Nenhum pagamento PIX gerado para esta modelo ainda. Configure sua chave PIX na aba{' '}
+                  <strong className="text-[#FAF4F7]">Site, Perfil e Álbum</strong>{' '}
+                  ou utilize o QR Code padrão automático.
                 </div>
               ) : (
                 <div className="divide-y divide-[#F4C2D7]/10">
-                  {onlineVisitors.map((visitor) => {
-                    const prof = profileMap.get(visitor.uid);
-                    const status = prof?.accessStatus || visitor.accessStatus;
-                    const isBlocked = status === 'blocked';
+                  {pixCharges.slice(0, 20).map((charge) => {
+                    const kindLabel =
+                      charge.kind === 'private_album'
+                        ? 'Álbum Privativo'
+                        : charge.kind === 'tip'
+                          ? 'Gorjeta na Meta'
+                          : charge.planName || 'Plano de Videochamada';
+                    const statusMap: Record<
+                      PixChargeStatus,
+                      { label: string; cls: string }
+                    > = {
+                      pending: {
+                        label: 'Aguardando PIX',
+                        cls: 'text-[#FCD34D]',
+                      },
+                      paid: { label: 'Pago e Liberado', cls: 'text-[#86EFAC]' },
+                      expired: { label: 'Expirado', cls: 'text-[#938291]' },
+                      cancelled: { label: 'Cancelado', cls: 'text-[#FCA5A5]' },
+                    };
+                    const statusUi = statusMap[charge.status];
+                    const busy = pixActionId === charge.id;
+
                     return (
                       <div
-                        key={visitor.uid}
-                        className="px-5 py-3.5 flex items-center justify-between gap-4"
+                        key={charge.id}
+                        className="px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
                       >
-                        <div className="flex items-center gap-3 min-w-0">
-                          {visitor.photoUrl ? (
-                            <img
-                              src={visitor.photoUrl}
-                              alt={visitor.displayName}
-                              referrerPolicy="no-referrer"
-                              className="w-8 h-8 rounded-full object-cover border border-[#F4C2D7]/25 shrink-0"
-                            />
-                          ) : (
-                            <div className="w-8 h-8 rounded-full bg-[#21142D] border border-[#F4C2D7]/25 flex items-center justify-center text-xs font-semibold text-[#F4C2D7] shrink-0">
-                              {visitor.displayName.slice(0, 1).toUpperCase()}
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-[#FAF4F7] truncate">
-                              {visitor.displayName}
-                            </p>
-                            <p className="text-xs text-[#C9BAC4]">
-                              {visitor.inCallWith
-                                ? 'Em videochamada'
-                                : 'Na recepção'}{' '}
-                              ·{' '}
-                              {status === 'vip'
-                                ? 'VIP'
-                                : status === 'muted'
-                                  ? 'Silenciado'
-                                  : isBlocked
-                                    ? 'Bloqueado'
-                                    : 'Ativo'}
-                            </p>
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-semibold text-[#FAF4F7]">
+                              {charge.userName}
+                            </span>
+                            <span className="text-[#938291]">·</span>
+                            <span className="text-[#C9BAC4]">{kindLabel}</span>
+                            <span className="text-[#938291]">·</span>
+                            <span className={`font-medium ${statusUi.cls}`}>
+                              {statusUi.label}
+                            </span>
                           </div>
+                          <p className="text-[11px] font-mono tabular-nums text-[#938291]">
+                            {BRL_FORMATTER.format(charge.amountCents / 100)} ·
+                            Chave: {charge.pixKeyMasked} · TXID: {charge.txid}
+                          </p>
                         </div>
 
-                        <button
-                          type="button"
-                          disabled={isBlocked}
-                          onClick={() =>
-                            void onDirectCallUser({
-                              uid: visitor.uid,
-                              displayName: visitor.displayName,
-                              photoUrl: visitor.photoUrl,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-35 disabled:cursor-not-allowed transition-all whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          <PhoneCall className="w-3.5 h-3.5" />
-                          <span>Chamar</span>
-                        </button>
+                        {charge.status === 'pending' &&
+                          onConfirmModelPixCharge &&
+                          onCancelModelPixCharge && (
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setPixActionId(charge.id);
+                                  setPixAdminMsg(null);
+                                  void onConfirmModelPixCharge(charge.id)
+                                    .then((res) => {
+                                      setPixAdminMsg(
+                                        res.ok
+                                          ? `PIX de ${charge.userName} confirmado e acesso liberado.`
+                                          : res.error || 'Erro ao confirmar PIX.'
+                                      );
+                                    })
+                                    .finally(() => setPixActionId(null));
+                                }}
+                                className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-45 cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Confirmar Recebimento PIX</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setPixActionId(charge.id);
+                                  setPixAdminMsg(null);
+                                  void onCancelModelPixCharge(charge.id)
+                                    .then((res) => {
+                                      setPixAdminMsg(
+                                        res.ok
+                                          ? `Cobrança PIX de ${charge.userName} cancelada.`
+                                          : res.error || 'Erro ao cancelar PIX.'
+                                      );
+                                    })
+                                    .finally(() => setPixActionId(null));
+                                }}
+                                className="px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 disabled:opacity-45 cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          )}
                       </div>
                     );
                   })}
                 </div>
               )}
             </section>
+
+            <FinancialEarningsDashboard
+              callHistory={callHistory}
+              themeAccentColor={currentTheme.accentText}
+              themeAccentSoftColor={currentTheme.accentSoft}
+            />
+
+            <UserControlPanel
+              myUid={myUid}
+              profiles={allProfiles}
+              peers={peers}
+              studioState={studioState}
+              callHistory={callHistory}
+              interestMessages={interestMessages}
+              callPlans={callPlans}
+              ratePerMinuteCents={ratePerMinuteCents}
+              onChangeRatePerMinuteCents={onChangeRatePerMinuteCents}
+              onUpdateStudioState={onUpdateStudioState}
+              onUpdateUserControl={onUpdateUserControl}
+              onDeleteUserProfile={onDeleteUserProfile}
+              onSendModeration={onSendModeration}
+              onDirectCallUser={onDirectCallUser}
+              onSavePlan={onSavePlan}
+              onDeletePlan={onDeletePlan}
+              onRecordCallHistory={onRecordCallHistory}
+              onUpdateCallHistoryStatus={onUpdateCallHistoryStatus}
+              onUpdateCallHistoryRecord={onUpdateCallHistoryRecord}
+              onDeleteCallHistoryRecord={onDeleteCallHistoryRecord}
+              onUpdateInterestMessageStatus={onUpdateInterestMessageStatus}
+              onDeleteInterestMessage={onDeleteInterestMessage}
+              showStudioControls={false}
+              showDndPanel={false}
+              showUsersTable={false}
+              showRevenueDashboard={false}
+              showCallPlans={false}
+              showCallHistory={true}
+              showInterestMessages={false}
+            />
           </div>
+        )}
 
-          {/* 30-Day Captured Revenue Bar Chart */}
-          <DailyRevenueBarChart callHistory={callHistory} callQueue={callQueue} />
+        {section === 'tip_goal' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-4">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                <div className="space-y-1.5">
+                  <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                    Configuração da Meta de Gorjeta · {modelName}
+                  </h2>
+                  <p className="text-sm text-[#C9BAC4]">
+                    Defina o título, o valor alvo e a descrição da meta exclusiva desta modelo para exibição dinâmica na página dos visitantes.
+                  </p>
+                </div>
 
-          {/* Offline Interest Messages */}
-          <InterestMessagesPanel
-            messages={interestMessages}
-            peers={peers}
-            onUpdateStatus={onUpdateInterestMessageStatus}
-            onDeleteMessage={onDeleteInterestMessage}
-            onDirectCallUser={onDirectCallUser}
-          />
-        </div>
-      ) : section === 'site_editor' ? (
-        <AdminSiteEditor
-          modelProfile={modelProfile}
-          studioConfig={studioConfig}
-          galleryItems={galleryItems}
-          onSaveStudioConfig={onSaveStudioConfig}
-          onSaveGalleryItem={onSaveGalleryItem}
-          onDeleteGalleryItem={onDeleteGalleryItem}
-          onRestoreDefaultGallery={onRestoreDefaultGallery}
-        />
-      ) : section === 'plans' ? (
-        <CallPlansManager
-          plans={callPlans}
-          onSavePlan={onSavePlan}
-          onDeletePlan={onDeletePlan}
-        />
-      ) : section === 'offline_schedule' ? (
-        <div className="space-y-8">
-          <OperatingSchedulePanel
+                {isSuperAdmin &&
+                  superAdminModels.length > 1 &&
+                  onSelectModelWorkspace && (
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <span className="text-xs text-[#938291]">
+                        Configurar modelo:
+                      </span>
+                      {superAdminModels.map((m) => {
+                        const isSelected = m.id === activeModelId;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => onSelectModelWorkspace(m.id)}
+                            aria-pressed={isSelected}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              isSelected
+                                ? 'luxury-rose-cta border-transparent font-semibold'
+                                : 'bg-[#0B060F]/80 border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7]'
+                            }`}
+                          >
+                            {m.displayName}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+              </div>
+            </section>
+
+            <TipGoalManagerCard
+              studioState={studioState}
+              modelName={modelName}
+              onUpdateStudioState={onUpdateStudioState}
+            />
+          </div>
+        )}
+
+        {section === 'agenda' && (
+          <AgendaManagementPanel
             studioState={studioState}
+            modelName={modelName}
             onUpdateStudioState={onUpdateStudioState}
           />
-          <DoNotDisturbPanel
-            studioState={studioState}
-            onUpdateStudioState={onUpdateStudioState}
-          />
-          <InterestMessagesPanel
-            messages={interestMessages}
-            peers={peers}
-            onUpdateStatus={onUpdateInterestMessageStatus}
-            onDeleteMessage={onDeleteInterestMessage}
-            onDirectCallUser={onDirectCallUser}
-          />
-        </div>
-      ) : (
-        <div className="space-y-8">
-          <DailyRevenueBarChart callHistory={callHistory} callQueue={callQueue} />
-          <UserControlPanel
-            myUid={myUid}
-            profiles={allProfiles}
-            peers={peers}
-            studioState={studioState}
-            callHistory={callHistory}
-            interestMessages={interestMessages}
-            callPlans={callPlans}
-            ratePerMinuteCents={ratePerMinuteCents}
-            onChangeRatePerMinuteCents={onChangeRatePerMinuteCents}
-            onUpdateStudioState={onUpdateStudioState}
-            onUpdateUserControl={onUpdateUserControl}
-            onDeleteUserProfile={onDeleteUserProfile}
-            onSendModeration={onSendModeration}
-            onDirectCallUser={onDirectCallUser}
-            onSavePlan={onSavePlan}
-            onDeletePlan={onDeletePlan}
-            onRecordCallHistory={onRecordCallHistory}
-            onUpdateCallHistoryStatus={onUpdateCallHistoryStatus}
-            onUpdateCallHistoryRecord={onUpdateCallHistoryRecord}
-            onDeleteCallHistoryRecord={onDeleteCallHistoryRecord}
-            onUpdateInterestMessageStatus={onUpdateInterestMessageStatus}
-            onDeleteInterestMessage={onDeleteInterestMessage}
-          />
-        </div>
-      )}
+        )}
+
+        {section === 'schedule' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-1.5">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                Horários, Feriados, Pausas e Recados
+              </h2>
+              <p className="text-sm text-[#C9BAC4]">
+                Configure seus horários de trabalho automático, datas especiais de descanso, pausas imediatas e leia recados recebidos offline.
+              </p>
+            </section>
+
+            <OperatingSchedulePanel
+              studioState={studioState}
+              onUpdateStudioState={onUpdateStudioState}
+            />
+
+            <DoNotDisturbPanel
+              studioState={studioState}
+              onUpdateStudioState={onUpdateStudioState}
+            />
+
+            <InterestMessagesPanel
+              messages={interestMessages}
+              peers={peers}
+              onUpdateStatus={onUpdateInterestMessageStatus}
+              onDeleteMessage={onDeleteInterestMessage}
+              onDirectCallUser={onDirectCallUser}
+            />
+          </div>
+        )}
+
+        {section === 'media' &&
+          onSavePrivateAlbumItem &&
+          onDeletePrivateAlbumItem &&
+          onToggleMediaVisibility &&
+          onSavePrivateAlbumSettings && (
+            <MediaManagementPanel
+              modelId={activeModelId}
+              isSuperAdmin={isSuperAdmin}
+              galleryItems={galleryItems}
+              privateAlbumItems={privateAlbumItems}
+              privateAlbumSummary={privateAlbumSummary}
+              onUploadMedia={onUploadMedia}
+              onSaveGalleryItem={onSaveGalleryItem}
+              onDeleteGalleryItem={onDeleteGalleryItem}
+              onSavePrivateAlbumItem={onSavePrivateAlbumItem}
+              onDeletePrivateAlbumItem={onDeletePrivateAlbumItem}
+              onToggleMediaVisibility={onToggleMediaVisibility}
+              onSavePrivateAlbumSettings={onSavePrivateAlbumSettings}
+              onModerateGalleryItem={onModerateGalleryItem}
+            />
+          )}
+
+        {section === 'site' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-1.5">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                Aparência do Site, Descrição e Álbuns
+              </h2>
+              <p className="text-sm text-[#C9BAC4]">
+                Atualize sua descrição, informações básicas, galeria pública (sujeita à autorização do administrador) e seu álbum privativo com senha de fotos e vídeos.
+              </p>
+            </section>
+
+            <AdminSiteEditor
+              modelId={activeModelId}
+              isSuperAdmin={isSuperAdmin}
+              modelProfile={modelProfile}
+              studioConfig={studioConfig}
+              galleryItems={galleryItems}
+              privateAlbumSummary={privateAlbumSummary}
+              privateAlbumItems={privateAlbumItems}
+              onUploadImage={onUploadImage}
+              onUploadMedia={onUploadMedia}
+              onSaveStudioConfig={onSaveStudioConfig}
+              onSaveGalleryItem={onSaveGalleryItem}
+              onDeleteGalleryItem={onDeleteGalleryItem}
+              onRestoreDefaultGallery={onRestoreDefaultGallery}
+              onModerateGalleryItem={onModerateGalleryItem}
+              onSavePrivateAlbumSettings={onSavePrivateAlbumSettings}
+              onSavePrivateAlbumItem={onSavePrivateAlbumItem}
+              onDeletePrivateAlbumItem={onDeletePrivateAlbumItem}
+              onToggleMediaVisibility={onToggleMediaVisibility}
+            />
+          </div>
+        )}
+
+        {section === 'models' &&
+          isSuperAdmin &&
+          onCreateModelAccount &&
+          onUpdateModelAccount &&
+          onDeleteModelAccount &&
+          onSelectModelWorkspace && (
+            <SuperAdminModelsPanel
+              models={superAdminModels}
+              currentOperatedModelId={activeModelId}
+              pendingGalleryItems={pendingGalleryItems}
+              onUploadImage={onUploadImage}
+              onModerateGalleryItem={onModerateGalleryItem}
+              onCreateModel={onCreateModelAccount}
+              onUpdateModel={onUpdateModelAccount}
+              onDeleteModel={onDeleteModelAccount}
+              onSelectModelWorkspace={(modelId, targetSection) => {
+                onSelectModelWorkspace(modelId);
+                setSection(targetSection || 'private_calls');
+              }}
+            />
+          )}
+      </div>
+      </div>
     </div>
   );
 };

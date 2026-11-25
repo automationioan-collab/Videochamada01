@@ -1,4 +1,9 @@
-import type { GalleryCategoryType } from '../types/studio';
+import type {
+  GalleryCategoryType,
+  MediaAssetType,
+  ModelBasicInfo,
+  PublicApprovalStatus,
+} from '../types/studio';
 
 export interface DefaultStudioConfigValues {
   studioBrand: string;
@@ -7,12 +12,14 @@ export interface DefaultStudioConfigValues {
   heroImageUrl: string;
   loungeImageUrl: string;
   modelBio: string;
+  basicInfo?: ModelBasicInfo;
   heroTitle: string;
   heroSubtitle: string;
   headline: string;
   groupButtonLabel: string;
   privateButtonLabel: string;
   ratePerMinuteCents: number;
+  privateAlbumPriceCents?: number;
 }
 
 export const DEFAULT_STUDIO_CONFIG: DefaultStudioConfigValues = {
@@ -31,6 +38,7 @@ export const DEFAULT_STUDIO_CONFIG: DefaultStudioConfigValues = {
   groupButtonLabel: 'Entrar na Videochamada ao Vivo',
   privateButtonLabel: 'Chamada Privativa (Só com a Modelo)',
   ratePerMinuteCents: 1500,
+  privateAlbumPriceCents: 3900,
 };
 
 export interface DefaultGalleryItemInput {
@@ -38,6 +46,8 @@ export interface DefaultGalleryItemInput {
   title: string;
   caption: string;
   category: GalleryCategoryType;
+  mediaType?: MediaAssetType;
+  approvalStatus?: PublicApprovalStatus;
   specs: string;
   src: string;
   alt: string;

@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MotionConfig } from 'motion/react';
-import { PhoneCall, PhoneOff, ShieldAlert, Users, Video } from 'lucide-react';
+import {
+  BellRing,
+  Eye,
+  EyeOff,
+  KeyRound,
+  PhoneCall,
+  PhoneOff,
+  ShieldAlert,
+  Video,
+} from 'lucide-react';
 import { CallQueuePanel } from './components/CallQueuePanel';
 import { Header, type WorkspaceTab } from './components/Header';
 import { LoginView } from './components/LoginView';
 import { ModelAdminPage } from './components/ModelAdminPage';
 import { ModelOfflineView } from './components/ModelOfflineView';
+import { ModelProfileBioSection } from './components/ModelProfileBioSection';
+import { PrivateAlbumViewer } from './components/PrivateAlbumViewer';
 import {
   RatingSystem,
   type EndedSessionContext,
@@ -17,7 +28,6 @@ import {
   type StudioToast,
   type ToastVariant,
 } from './components/ToastOverlay';
-import { UserControlPanel } from './components/UserControlPanel';
 import { VideoCallStage } from './components/VideoCallStage';
 import { useStudioAuth } from './hooks/useStudioAuth';
 import { useWebRTC } from './hooks/useWebRTC';
@@ -36,8 +46,11 @@ import {
 } from './lib/audio';
 import { installMediaProtection } from './lib/mediaProtection';
 import {
+  formatMinutesSecondsClock,
   getHolidayForDate,
+  getUpcomingBlockWarning,
   isDndActiveNow,
+  isWeekdayBlockedNow,
   isWithinOperatingHours,
   serializeSchedulePeriodsDigest,
 } from './lib/schedule';
@@ -73,28 +86,70 @@ interface IncomingRing {
 export default function App() {
   const {
     user,
+    modelSession,
+    modelToken,
+    modelAuthId,
     authLoading,
     authError,
-    listenerError,
+    modelAuthError,
+    modelAuthSubmitting,
     isAdmin,
+    isSuperAdmin,
+    activeModelId,
+    activeAdminThemeId,
+    effectiveActorUid,
+    publicModels,
+    selectedPublicModelId,
+    setSelectedPublicModelId,
+    publicRatings,
+    publicShowcaseLoading,
+    superAdminSelectedModelId,
+    setSuperAdminSelectedModelId,
+    superAdminModels,
     myProfile,
     modelProfile,
     allProfiles,
     studioState,
     studioConfig,
     galleryItems,
+    privateAlbumSummary,
+    privateAlbumItems,
+    visitorUnlockedPrivateItems,
+    pendingGalleryItems,
     callQueue,
     callMessages,
     callHistory,
     interestMessages,
     callPlans,
+    pixCharges,
+    refreshWorkspace,
+    refreshPublicModels,
     loginWithGoogle,
+    loginAsModel,
     logout,
+    createModelAccount,
+    updateModelAccount,
+    deleteModelAccount,
     updateStudioState,
     saveStudioConfig,
+    uploadStudioImage,
+    uploadStudioMedia,
     saveGalleryItem,
     deleteGalleryItem,
     restoreDefaultGallery,
+    moderatePublicGalleryItem,
+    toggleMediaVisibility,
+    savePrivateAlbumSettings,
+    savePrivateAlbumItem,
+    deletePrivateAlbumItem,
+    purchasePrivateAlbum,
+    unlockPrivateAlbum,
+    createPixCharge,
+    checkPixChargeStatus,
+    confirmPixCharge,
+    cancelPixCharge,
+    confirmModelPixCharge,
+    cancelModelPixCharge,
     updateUserControl,
     deleteUserProfile,
     requestVideoCall,
@@ -111,9 +166,25 @@ export default function App() {
     sendInterestMessage,
     updateInterestMessageStatus,
     deleteInterestMessage,
+    sendTipContribution,
   } = useStudioAuth();
 
+  const [modelLoginInput, setModelLoginInput] = useState('');
+  const [modelPasswordInput, setModelPasswordInput] = useState('');
+  const [showModelPassword, setShowModelPassword] = useState(false);
+
+  const isAuthenticated = Boolean(user || modelSession);
+  const activeRoomId = `room_${activeModelId}`;
+  const activeModelDisplayName =
+    studioConfig?.modelName ||
+    studioState?.modelName ||
+    modelProfile?.displayName ||
+    modelSession?.model.displayName ||
+    'Lorena Noir';
+
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('studio');
+  const [allowAdminVisitorPreview, setAllowAdminVisitorPreview] =
+    useState<boolean>(false);
   const [currentPath, setCurrentPath] = useState<string>(() =>
     typeof window !== 'undefined' ? window.location.pathname : '/'
   );
@@ -147,6 +218,7 @@ export default function App() {
   const sessionStartedAtRef = useRef<number | null>(null);
   const autoScheduleSyncRef = useRef<string | null>(null);
   const dndSyncRef = useRef<string | null>(null);
+  const announcedPauseWarningRef = useRef<string | null>(null);
   const dndActiveRef = useRef<boolean>(false);
   const warnedPlanCallIdRef = useRef<string | null>(null);
   const endedPlanCallIdRef = useRef<string | null>(null);
@@ -156,9 +228,10 @@ export default function App() {
   const pendingEntryIntentRef = useRef<CallEntryIntent>('group');
   const roomStartedAtMapRef = useRef<Map<string, number>>(new Map());
   const seenQueueIdsRef = useRef<Set<string>>(new Set());
+  const notifiedVipQueueIdsRef = useRef<Set<string>>(new Set());
   const queueInitializedRef = useRef<boolean>(false);
   const myUidRef = useRef<string | null>(null);
-  myUidRef.current = user?.uid ?? null;
+  myUidRef.current = effectiveActorUid || null;
   const activeSessionRef = useRef<ActiveCallSession | null>(null);
   activeSessionRef.current = activeSession;
 
@@ -206,13 +279,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (
-      studioConfig?.ratePerMinuteCents &&
-      studioConfig.ratePerMinuteCents > 0
-    ) {
-      setRatePerMinuteCents(studioConfig.ratePerMinuteCents);
-    }
-  }, [studioConfig?.ratePerMinuteCents]);
+    setRatePerMinuteCents(studioConfig?.ratePerMinuteCents || 1500);
+  }, [studioConfig?.ratePerMinuteCents, activeModelId]);
 
   const activePlans = useMemo(
     () => callPlans.filter((p) => p.active),
@@ -264,16 +332,24 @@ export default function App() {
 
   const isAdminRoute = currentPath === '/admin';
 
-  const navigateRoute = useCallback((path: '/' | '/admin') => {
-    if (typeof window !== 'undefined' && window.location.pathname !== path) {
-      try {
-        window.history.pushState({}, '', path);
-      } catch {
-        // Ignore History API restrictions in sandboxed frames
+  const navigateRoute = useCallback(
+    (path: '/' | '/admin', options?: { previewVisitor?: boolean }) => {
+      if (path === '/admin') {
+        setAllowAdminVisitorPreview(false);
+      } else if (options?.previewVisitor) {
+        setAllowAdminVisitorPreview(true);
       }
-    }
-    setCurrentPath(path);
-  }, []);
+      if (typeof window !== 'undefined' && window.location.pathname !== path) {
+        try {
+          window.history.pushState({}, '', path);
+        } catch {
+          // Ignore History API restrictions in sandboxed frames
+        }
+      }
+      setCurrentPath(path);
+    },
+    []
+  );
 
   useEffect(() => {
     const onPopState = () => {
@@ -282,6 +358,23 @@ export default function App() {
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
+
+  // Automatically isolate authenticated Model Admin onto /admin unless explicitly previewing /
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setAllowAdminVisitorPreview(false);
+      return;
+    }
+    if (isAdmin && currentPath !== '/admin' && !allowAdminVisitorPreview) {
+      navigateRoute('/admin');
+    }
+  }, [
+    allowAdminVisitorPreview,
+    currentPath,
+    isAdmin,
+    isAuthenticated,
+    navigateRoute,
+  ]);
 
   const dismissToast = useCallback((id: string) => {
     const timer = toastTimersRef.current.get(id);
@@ -328,16 +421,28 @@ export default function App() {
     studioState?.dndUntilMs && studioState.dndUntilMs > Date.now()
   );
 
+  const hasActiveDailyPauses = Boolean(
+    studioState?.dailyPausePeriods?.some((p) => p.enabled)
+  );
+
   useEffect(() => {
     const tickMs =
-      hasActiveTimedDnd || Boolean(studioState?.dndScheduleEnabled)
+      hasActiveTimedDnd ||
+      Boolean(studioState?.dndScheduleEnabled) ||
+      Boolean(studioState?.pauseWarningEnabled) ||
+      hasActiveDailyPauses
         ? 1000
         : 15000;
     const intervalId = window.setInterval(() => {
       setScheduleNow(new Date());
     }, tickMs);
     return () => window.clearInterval(intervalId);
-  }, [hasActiveTimedDnd, studioState?.dndScheduleEnabled]);
+  }, [
+    hasActiveDailyPauses,
+    hasActiveTimedDnd,
+    studioState?.dndScheduleEnabled,
+    studioState?.pauseWarningEnabled,
+  ]);
 
   const webrtcSignalRef = useRef<(signal: SignalPayload) => Promise<void>>(
     async () => {}
@@ -348,6 +453,13 @@ export default function App() {
   const webrtcCloseRef = useRef<(targetUid?: string) => void>(() => {});
   const webrtcToggleMicRef = useRef<(force?: boolean) => void>(() => {});
   const finalizeRemoteCallEndRef = useRef<() => void>(() => {});
+  const vipUidsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    vipUidsRef.current = new Set(
+      allProfiles.filter((p) => p.accessStatus === 'vip').map((p) => p.uid)
+    );
+  }, [allProfiles]);
 
   const handleIncomingSignal = useCallback(
     (signal: SignalPayload) => {
@@ -363,11 +475,22 @@ export default function App() {
         if (signal.planId) {
           setIncomingRingPlanId(signal.planId);
         }
-        playNotificationDing('incoming_call');
+        const isVipCallerRing =
+          isAdmin && vipUidsRef.current.has(signal.fromUid);
+        playNotificationDing(
+          isVipCallerRing ? 'vip_priority' : 'incoming_call'
+        );
+        if (isVipCallerRing) {
+          pushToast(
+            'vip_priority',
+            'Chamada Prioritária VIP',
+            `${signal.fromName || 'Cliente VIP'} está chamando para atendimento privativo.`
+          );
+        }
         setIncomingRing({
           callId: signal.callId || `direct_${Date.now()}`,
           fromUid: signal.fromUid,
-          fromName: signal.fromName || 'Lorena Noir',
+          fromName: signal.fromName || activeModelDisplayName,
           planId: signal.planId,
           planName: signal.planName,
           planDurationMinutes: signal.planDurationMinutes,
@@ -573,11 +696,21 @@ export default function App() {
     syncAuthoritativeQueue,
   } = useWebSocketStudio({
     user,
+    modelToken,
+    modelAuthId,
+    selectedModelId: activeModelId,
+    isSuperAdminOperating: isSuperAdmin,
     profile: myProfile,
     onSignal: handleIncomingSignal,
     onModerationEffect: handleModerationEffect,
     onPresenceEvent: handlePresenceEvent,
     onRoomEvent: handleRoomEvent,
+    onStudioRefresh: () => {
+      void refreshWorkspace();
+    },
+    onModelsRefresh: () => {
+      void refreshPublicModels();
+    },
   });
 
   const {
@@ -724,7 +857,7 @@ export default function App() {
   );
 
   const handleVisitorJoinGroupRoom = useCallback(
-    async (topic: string, plan: CallPlan) => {
+    async (topic: string, plan: CallPlan, existingCallRequestId?: string) => {
       if (isDndActiveNow(studioState, new Date())) {
         const msg =
           'A modelo está em Modo Não Perturbe. Novas entradas estão temporariamente bloqueadas.';
@@ -736,20 +869,20 @@ export default function App() {
         setNoticeBanner('A sala de videochamada está temporariamente pausada.');
         return;
       }
-      const queueCallId = await requestVideoCall(topic, plan);
+      const queueCallId =
+        existingCallRequestId || (await requestVideoCall(topic, plan));
       if (!queueCallId) return;
 
       await updateCallStatus(queueCallId, 'in_call');
-      const modelName =
-        studioState?.modelName || modelProfile?.displayName || 'Lorena Noir';
+      const modelName = activeModelDisplayName;
 
       setEndedCallForRating(null);
       sessionStartedAtRef.current = Date.now();
       setActiveSession({
-        callId: 'main_studio_room',
+        callId: activeRoomId,
         queueCallId,
         isGroupRoom: true,
-        partnerUid: 'main_studio_room',
+        partnerUid: activeRoomId,
         partnerName: `Sala Ao Vivo · ${modelName}`,
         planId: plan.id,
         planName: plan.name,
@@ -759,7 +892,7 @@ export default function App() {
       setActiveTab('call');
       await acquireLocalMedia();
       joinRoom({
-        roomId: 'main_studio_room',
+        roomId: activeRoomId,
         callId: queueCallId,
         planId: plan.id,
         planName: plan.name,
@@ -774,8 +907,9 @@ export default function App() {
     },
     [
       acquireLocalMedia,
+      activeModelDisplayName,
+      activeRoomId,
       joinRoom,
-      modelProfile?.displayName,
       pushToast,
       requestVideoCall,
       studioState,
@@ -787,23 +921,29 @@ export default function App() {
     setEndedCallForRating(null);
     sessionStartedAtRef.current = Date.now();
     setActiveSession({
-      callId: 'main_studio_room',
+      callId: activeRoomId,
       isGroupRoom: true,
-      partnerUid: 'main_studio_room',
-      partnerName: 'Sala Ao Vivo Multi-Participantes',
+      partnerUid: activeRoomId,
+      partnerName: `Sala Ao Vivo · ${activeModelDisplayName}`,
     });
     setActiveTab('call');
     await acquireLocalMedia();
-    joinRoom({ roomId: 'main_studio_room' });
+    joinRoom({ roomId: activeRoomId });
     pushToast(
       'call_accepted',
       'Sala ao vivo aberta',
       'Você entrou na sala de videochamada para atender múltiplos internautas.'
     );
-  }, [acquireLocalMedia, joinRoom, pushToast]);
+  }, [
+    acquireLocalMedia,
+    activeModelDisplayName,
+    activeRoomId,
+    joinRoom,
+    pushToast,
+  ]);
 
   const handleVisitorDirectCallModel = useCallback(
-    async (topic: string, plan: CallPlan) => {
+    async (topic: string, plan: CallPlan, existingCallRequestId?: string) => {
       if (isDndActiveNow(studioState, new Date())) {
         const msg =
           'A modelo está em Modo Não Perturbe. Novas solicitações estão temporariamente bloqueadas.';
@@ -811,7 +951,8 @@ export default function App() {
         pushToast('warning', 'Modo Não Perturbe ativo', msg);
         return;
       }
-      const callId = await requestVideoCall(topic, plan);
+      const callId =
+        existingCallRequestId || (await requestVideoCall(topic, plan));
       if (!callId || !modelProfile) return;
       const modelName =
         studioState?.modelName || modelProfile.displayName || 'Lorena Noir';
@@ -1013,7 +1154,7 @@ export default function App() {
       const durationSeconds =
         elapsedSeconds > 0 ? elapsedSeconds : fallbackDuration;
 
-      leaveRoom('main_studio_room');
+      leaveRoom(activeRoomId);
 
       if (!isAdmin) {
         if (activeSession.queueCallId) {
@@ -1123,47 +1264,101 @@ export default function App() {
 
   // Mesh peer synchronization when connected inside the shared group room
   useEffect(() => {
-    if (!user || !activeSession?.isGroupRoom) return;
+    if (!effectiveActorUid || !activeSession?.isGroupRoom) return;
     const participantUids = roomParticipants.map((p) => p.uid);
-    void syncMeshPeers(user.uid, participantUids, 'main_studio_room');
-  }, [activeSession?.isGroupRoom, roomParticipants, syncMeshPeers, user]);
+    void syncMeshPeers(effectiveActorUid, participantUids, activeRoomId);
+  }, [
+    activeRoomId,
+    activeSession?.isGroupRoom,
+    effectiveActorUid,
+    roomParticipants,
+    syncMeshPeers,
+  ]);
 
-  // Play incoming call ding & toast when a new call request enters waiting queue for admin
+  // Play incoming call ding & toast when a call request enters waiting queue for admin (with VIP priority alert)
   useEffect(() => {
     if (!isAdmin) {
       seenQueueIdsRef.current.clear();
+      notifiedVipQueueIdsRef.current.clear();
       queueInitializedRef.current = false;
       return;
     }
+
+    const vipUidSet = new Set(
+      allProfiles.filter((p) => p.accessStatus === 'vip').map((p) => p.uid)
+    );
+
     if (!queueInitializedRef.current) {
+      const initialWaitingVips: CallRequest[] = [];
       for (const req of callQueue) {
         seenQueueIdsRef.current.add(req.id);
-      }
-      queueInitializedRef.current = true;
-      return;
-    }
-    let hasNewWaiting = false;
-    for (const req of callQueue) {
-      if (!seenQueueIdsRef.current.has(req.id)) {
-        seenQueueIdsRef.current.add(req.id);
-        if (req.status === 'waiting') {
-          hasNewWaiting = true;
-          pushToast(
-            'info',
-            'Nova solicitação na fila',
-            `${req.userName} solicitou chamada (${req.planName || 'plano selecionado'}).`
-          );
+        if (
+          req.status === 'waiting' &&
+          vipUidSet.has(req.userId) &&
+          !notifiedVipQueueIdsRef.current.has(req.id)
+        ) {
+          notifiedVipQueueIdsRef.current.add(req.id);
+          initialWaitingVips.push(req);
         }
       }
+      queueInitializedRef.current = true;
+
+      if (initialWaitingVips.length > 0) {
+        const firstVip = initialWaitingVips[0];
+        pushToast(
+          'vip_priority',
+          'Cliente VIP na Sala de Espera',
+          initialWaitingVips.length === 1
+            ? `${firstVip.userName} (VIP) está aguardando na fila com prioridade.`
+            : `${initialWaitingVips.length} clientes VIP aguardando na fila com prioridade (${firstVip.userName}).`
+        );
+        if (!dndActiveRef.current) {
+          playNotificationDing('vip_priority');
+        }
+      }
+      return;
     }
-    if (hasNewWaiting && !dndActiveRef.current) {
+
+    let hasNewWaiting = false;
+    let hasNewVipWaiting = false;
+    for (const req of callQueue) {
+      const isVipCaller = vipUidSet.has(req.userId);
+      const isNewReq = !seenQueueIdsRef.current.has(req.id);
+      if (isNewReq) {
+        seenQueueIdsRef.current.add(req.id);
+      }
+
+      if (
+        req.status === 'waiting' &&
+        isVipCaller &&
+        !notifiedVipQueueIdsRef.current.has(req.id)
+      ) {
+        notifiedVipQueueIdsRef.current.add(req.id);
+        hasNewVipWaiting = true;
+        pushToast(
+          'vip_priority',
+          'Cliente VIP na Sala de Espera',
+          `${req.userName} (VIP) entrou na fila com prioridade (${req.planName || 'plano selecionado'}).`
+        );
+      } else if (isNewReq && req.status === 'waiting') {
+        hasNewWaiting = true;
+        pushToast(
+          'info',
+          'Nova solicitação na fila',
+          `${req.userName} solicitou chamada (${req.planName || 'plano selecionado'}).`
+        );
+      }
+    }
+    if (hasNewVipWaiting && !dndActiveRef.current) {
+      playNotificationDing('vip_priority');
+    } else if (hasNewWaiting && !dndActiveRef.current) {
       playNotificationDing('incoming_call');
     }
-  }, [callQueue, isAdmin, pushToast]);
+  }, [allProfiles, callQueue, isAdmin, pushToast]);
 
   // Synchronize visitor waiting entry to WebSocket queue calculator
   useEffect(() => {
-    if (!user || isAdmin || !wsConnected) return;
+    if (!isAuthenticated || isAdmin || !wsConnected) return;
     const waitingReq = callQueue.find((q) => q.status === 'waiting');
     if (waitingReq) {
       syncQueueEntry({
@@ -1171,15 +1366,26 @@ export default function App() {
         callId: waitingReq.id,
         planDurationMinutes: waitingReq.planDurationMinutes || 10,
         createdAtMs: waitingReq.createdAt?.toMillis?.() ?? Date.now(),
+        isVip: myProfile?.accessStatus === 'vip',
       });
     } else {
       syncQueueEntry({ status: 'idle' });
     }
-  }, [callQueue, isAdmin, syncQueueEntry, user, wsConnected]);
+  }, [
+    callQueue,
+    isAdmin,
+    isAuthenticated,
+    myProfile?.accessStatus,
+    syncQueueEntry,
+    wsConnected,
+  ]);
 
-  // Synchronize authoritative Firestore queue & active call estimate from Admin
+  // Synchronize authoritative model queue & active call estimate from Admin
   useEffect(() => {
-    if (!user || !isAdmin || !wsConnected) return;
+    if (!isAuthenticated || !isAdmin || !wsConnected) return;
+    const vipUidSet = new Set(
+      allProfiles.filter((p) => p.accessStatus === 'vip').map((p) => p.uid)
+    );
     const waitingEntries = callQueue
       .filter((q) => q.status === 'waiting')
       .map((q) => ({
@@ -1187,6 +1393,7 @@ export default function App() {
         uid: q.userId,
         planDurationMinutes: q.planDurationMinutes || 10,
         createdAtMs: q.createdAt?.toMillis?.() ?? Date.now(),
+        isVip: vipUidSet.has(q.userId),
       }));
 
     const activeQueueReq = studioState?.activeCallId
@@ -1214,28 +1421,31 @@ export default function App() {
     });
   }, [
     activeSession,
+    allProfiles,
     callQueue,
     isAdmin,
+    isAuthenticated,
     studioState?.activeCallId,
     syncAuthoritativeQueue,
-    user,
     wsConnected,
   ]);
 
-  // Redirect visitor back to studio tab after clicking public landing CTA
+  // Redirect visitor back to studio tab after clicking public landing CTA, or isolate admin to /admin
   useEffect(() => {
-    if (!user || !pendingPublicJoinRef.current) return;
+    if (!isAuthenticated || !pendingPublicJoinRef.current) return;
     pendingPublicJoinRef.current = false;
     const nextIntent = pendingEntryIntentRef.current;
     pendingEntryIntentRef.current = 'group';
-    if (!isAdmin && isAdminRoute) {
+    if (isAdmin) {
+      navigateRoute('/admin');
+      return;
+    }
+    if (isAdminRoute) {
       navigateRoute('/');
     }
-    if (!isAdmin) {
-      setEntryIntent(nextIntent);
-      setActiveTab('studio');
-    }
-  }, [isAdmin, isAdminRoute, navigateRoute, user]);
+    setEntryIntent(nextIntent);
+    setActiveTab('studio');
+  }, [isAdmin, isAdminRoute, isAuthenticated, navigateRoute]);
 
   useEffect(() => {
     if (
@@ -1302,20 +1512,22 @@ export default function App() {
         pushToast(
           'info',
           'Mensagem de interesse enviada',
-          'Lorena Noir receberá seu recado assim que retornar ao estúdio.'
+          `${activeModelDisplayName} receberá seu recado assim que retornar ao estúdio.`
         );
       }
       return id;
     },
-    [pushToast, sendInterestMessage]
+    [activeModelDisplayName, pushToast, sendInterestMessage]
   );
 
   const modelOnline = modelProfile
     ? peers.some((p) => p.uid === modelProfile.uid)
     : false;
   const holidayToday = getHolidayForDate(studioState, scheduleNow);
+  const weekdayBlockedToday = isWeekdayBlockedNow(studioState, scheduleNow);
   const scheduleOfflineNow =
     Boolean(holidayToday) ||
+    weekdayBlockedToday ||
     (Boolean(studioState?.autoScheduleEnabled) &&
       !isWithinOperatingHours(studioState, scheduleNow));
   const dndActiveNow = isDndActiveNow(studioState, scheduleNow);
@@ -1336,13 +1548,15 @@ export default function App() {
       return;
     }
     const isHolidayNow = getHolidayForDate(studioState, scheduleNow) !== null;
-    if (!studioState.autoScheduleEnabled && !isHolidayNow) {
+    const isBlockedDayNow = isWeekdayBlockedNow(studioState, scheduleNow);
+    const forcedClosedToday = isHolidayNow || isBlockedDayNow;
+    if (!studioState.autoScheduleEnabled && !forcedClosedToday) {
       autoScheduleSyncRef.current = null;
       return;
     }
 
     const shouldBeLive =
-      !isHolidayNow && isWithinOperatingHours(studioState, scheduleNow);
+      !forcedClosedToday && isWithinOperatingHours(studioState, scheduleNow);
     const targetMode = shouldBeLive ? 'open' : 'paused';
     if (
       studioState.isLive === shouldBeLive &&
@@ -1352,7 +1566,7 @@ export default function App() {
       return;
     }
 
-    const syncKey = `${shouldBeLive}_${isHolidayNow}_${serializeSchedulePeriodsDigest(studioState)}`;
+    const syncKey = `${shouldBeLive}_${isHolidayNow}_${isBlockedDayNow}_${serializeSchedulePeriodsDigest(studioState)}`;
     if (autoScheduleSyncRef.current === syncKey) return;
     autoScheduleSyncRef.current = syncKey;
 
@@ -1366,12 +1580,16 @@ export default function App() {
         ? 'Estúdio aberto automaticamente'
         : isHolidayNow
           ? 'Modo Descanso ativado por data programada'
-          : 'Modo Descanso ativado automaticamente',
+          : isBlockedDayNow
+            ? 'Dia bloqueado na agenda semanal'
+            : 'Modo Descanso ativado automaticamente',
       shouldBeLive
         ? 'Seu horário de atendimento começou e a sala está liberada.'
         : isHolidayNow
           ? 'A data de hoje está definida como feriado/folga e o estúdio entrou em descanso.'
-          : 'Seu horário configurado encerrou e a tela de Descanso está ativa.'
+          : isBlockedDayNow
+            ? 'Este dia da semana está marcado como folga recorrente em Gerenciamento de Agenda.'
+            : 'Seu horário configurado encerrou e a tela de Descanso está ativa.'
     );
   }, [isAdmin, pushToast, scheduleNow, studioState, updateStudioState]);
 
@@ -1392,7 +1610,7 @@ export default function App() {
       return;
     }
 
-    const syncKey = `${shouldDnd}_${hasExpiredUntil ? 0 : studioState.dndUntilMs ?? 0}_${studioState.dndScheduleEnabled}`;
+    const syncKey = `${shouldDnd}_${hasExpiredUntil ? 0 : studioState.dndUntilMs ?? 0}_${studioState.dndScheduleEnabled}_${serializeSchedulePeriodsDigest(studioState)}`;
     if (dndSyncRef.current === syncKey) return;
     dndSyncRef.current = syncKey;
 
@@ -1412,9 +1630,38 @@ export default function App() {
     );
   }, [isAdmin, pushToast, scheduleNow, studioState, updateStudioState]);
 
-  if (listenerError && user) {
-    throw listenerError;
-  }
+  const upcomingBlockWarning = useMemo(
+    () => getUpcomingBlockWarning(studioState, scheduleNow),
+    [studioState, scheduleNow]
+  );
+
+  useEffect(() => {
+    if (isAdmin || !upcomingBlockWarning) return;
+    const warningKey = `${activeModelId}_${upcomingBlockWarning.kind}_${upcomingBlockWarning.startsAtMs}`;
+    if (announcedPauseWarningRef.current === warningKey) return;
+    announcedPauseWarningRef.current = warningKey;
+
+    const minsLeft = Math.max(
+      1,
+      Math.ceil(upcomingBlockWarning.remainingMs / 60_000)
+    );
+    pushToast(
+      'warning',
+      `Aviso de Pausa · ${activeModelDisplayName}`,
+      upcomingBlockWarning.customMessage ||
+        `${upcomingBlockWarning.label} inicia em ${minsLeft} minuto${minsLeft === 1 ? '' : 's'} (${upcomingBlockWarning.startTime}).`
+    );
+  }, [activeModelDisplayName, activeModelId, isAdmin, pushToast, upcomingBlockWarning]);
+
+  const handleModelLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!modelLoginInput.trim() || !modelPasswordInput) return;
+    const ok = await loginAsModel(modelLoginInput.trim(), modelPasswordInput);
+    if (ok) {
+      setModelPasswordInput('');
+      navigateRoute('/admin');
+    }
+  };
 
   if (authLoading) {
     return (
@@ -1427,233 +1674,457 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
       <div
+        data-admin-theme={
+          isAdminRoute && isAdmin && !highContrastAdmin
+            ? activeAdminThemeId
+            : undefined
+        }
         className={`relative min-h-screen text-[#FAF4F7] flex flex-col ${
-          isAdmin && highContrastAdmin ? 'admin-high-contrast' : 'luxury-canvas'
+          isAdmin && highContrastAdmin
+            ? 'admin-high-contrast'
+            : isAdminRoute && isAdmin
+              ? 'admin-model-themed luxury-canvas'
+              : 'luxury-canvas'
         }`}
       >
         <TechAmbientField />
         <Header
           studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
-          isAuthenticated={Boolean(user)}
+          isAuthenticated={isAuthenticated}
           isAdmin={isAdmin}
           isAdminRoute={isAdminRoute}
           highContrastAdmin={highContrastAdmin}
           onToggleHighContrastAdmin={toggleHighContrastAdmin}
           activeTab={activeTab}
           onSelectTab={(tab) => {
-            if (isAdminRoute) navigateRoute('/');
+            if (isAdminRoute) {
+              navigateRoute('/', { previewVisitor: isAdmin });
+            }
             setActiveTab(tab);
           }}
-          onNavigateRoute={navigateRoute}
-          onLogin={() => void loginWithGoogle()}
-          onLogout={() => void logout()}
+          onNavigateRoute={(path) =>
+            navigateRoute(path, { previewVisitor: isAdmin && path === '/' })
+          }
+          onLogin={() => {
+            if (isAdminRoute) {
+              document.getElementById('model-login-input')?.focus();
+            } else {
+              void loginWithGoogle();
+            }
+          }}
+          onLogout={() => {
+            setModelPasswordInput('');
+            void logout();
+          }}
         />
 
-        {!user ? (
+        {!isAuthenticated ? (
           isAdminRoute ? (
-            <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-16 flex items-center justify-center">
+            <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-12 flex items-center justify-center">
               <section className="max-w-lg w-full luxury-card tech-reticle border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-6">
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-[#F4C2D7]">
-                  Administração · Lorena Noir
-                </p>
-                <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-                  Central de Recepção da Modelo
-                </h1>
-                <p className="text-sm text-[#C9BAC4] leading-relaxed">
-                  Entre com sua conta administrativa para atender videochamadas dos internautas, moderar áudio em tempo real e acompanhar a receita.
-                </p>
-              </div>
-
-              {authError && (
-                <div
-                  role="alert"
-                  className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
-                >
-                  {authError}
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-[#F4C2D7]">
+                    Acesso Restrito · Área das Modelos
+                  </p>
+                  <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
+                    Central Exclusiva da Modelo
+                  </h1>
+                  <p className="text-sm text-[#C9BAC4] leading-relaxed">
+                    Entre com seu login e senha individuais para abrir seu painel isolado, seus planos, sua agenda e atender videochamadas privativas.
+                  </p>
                 </div>
-              )}
 
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => void loginWithGoogle()}
-                  className="px-6 py-3 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
+                {/* Individual Model Credentials Form */}
+                <form
+                  onSubmit={(e) => void handleModelLoginSubmit(e)}
+                  className="space-y-4 pt-2"
                 >
-                  Entrar como Modelo Administradora
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateRoute('/')}
-                  className="px-5 py-3 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
-                >
-                  Ir para área dos internautas
-                </button>
-              </div>
-            </section>
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="model-login-input"
+                      className="block text-xs font-medium text-[#C9BAC4]"
+                    >
+                      Login ou E-mail da Modelo
+                    </label>
+                    <input
+                      id="model-login-input"
+                      type="text"
+                      required
+                      autoComplete="username"
+                      value={modelLoginInput}
+                      onChange={(e) => setModelLoginInput(e.target.value)}
+                      placeholder="Ex.: camila ou camila@studio.com"
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="model-password-input"
+                      className="block text-xs font-medium text-[#C9BAC4]"
+                    >
+                      Senha Exclusiva
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="model-password-input"
+                        type={showModelPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="current-password"
+                        value={modelPasswordInput}
+                        onChange={(e) => setModelPasswordInput(e.target.value)}
+                        placeholder="Digite sua senha individual"
+                        className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl pl-4 pr-11 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowModelPassword((p) => !p)}
+                        aria-label={
+                          showModelPassword ? 'Ocultar senha' : 'Mostrar senha'
+                        }
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                      >
+                        {showModelPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {modelAuthError && (
+                    <div
+                      role="alert"
+                      className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
+                    >
+                      {modelAuthError}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={
+                      modelAuthSubmitting ||
+                      !modelLoginInput.trim() ||
+                      !modelPasswordInput
+                    }
+                    className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all cursor-pointer"
+                  >
+                    <KeyRound className="w-4 h-4 shrink-0" />
+                    <span>
+                      {modelAuthSubmitting
+                        ? 'Entrando...'
+                        : 'Entrar no Painel da Modelo'}
+                    </span>
+                  </button>
+                </form>
+
+                <div className="pt-4 border-t border-[#F4C2D7]/15 space-y-3">
+                  <p className="text-[11px] text-[#938291]">
+                    Administração Geral (cadastro de modelos, senhas e gestão):
+                  </p>
+
+                  {authError && (
+                    <div
+                      role="alert"
+                      className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
+                    >
+                      {authError}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void loginWithGoogle()}
+                      className="px-5 py-2.5 text-xs font-semibold rounded-full bg-[#21142D] border border-[#F4C2D7]/35 text-[#FAF4F7] hover:border-[#F4C2D7] transition-colors cursor-pointer"
+                    >
+                      Entrar como Administradora Geral (Google)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigateRoute('/')}
+                      className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors cursor-pointer"
+                    >
+                      Ir para área dos internautas
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </main>
+          ) : (
+            <LoginView
+              studioConfig={studioConfig}
+              studioState={studioState}
+              galleryItems={galleryItems}
+              callPlans={callPlans}
+              publicModels={publicModels}
+              publicRatings={publicRatings}
+              publicShowcaseLoading={publicShowcaseLoading}
+              selectedModelId={selectedPublicModelId}
+              onSelectModel={setSelectedPublicModelId}
+              privateAlbumSummary={privateAlbumSummary}
+              onUnlockPrivateAlbum={unlockPrivateAlbum}
+              onRequirePrivateAlbumAuth={() => {
+                void loginWithGoogle();
+              }}
+              onEnterVideoCall={() => {
+                pendingPublicJoinRef.current = true;
+                pendingEntryIntentRef.current = 'group';
+                void loginWithGoogle();
+              }}
+              onEnterPrivateCall={() => {
+                pendingPublicJoinRef.current = true;
+                pendingEntryIntentRef.current = 'private';
+                void loginWithGoogle();
+              }}
+              onNavigateToAdmin={() => navigateRoute('/admin')}
+              authError={authError}
+            />
+          )
+        ) : isAdminRoute ? (
+          <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
+            {!isAdmin ? (
+              <section className="max-w-lg mx-auto my-12 luxury-card border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-5">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-[#FCA5A5]">
+                    Acesso Restrito
+                  </p>
+                  <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
+                    Área Exclusiva da Modelo
+                  </h1>
+                  <p className="text-sm text-[#C9BAC4] leading-relaxed">
+                    A conta conectada atualmente não possui permissão administrativa para acessar o painel da modelo.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => navigateRoute('/')}
+                    className="px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
+                  >
+                    Ir para Recepção de Videochamada
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
+                  >
+                    Trocar de Conta
+                  </button>
+                </div>
+              </section>
+            ) : (
+              <ModelAdminPage
+                myUid={effectiveActorUid}
+                myProfile={myProfile}
+                modelProfile={modelProfile}
+                allProfiles={allProfiles}
+                peers={peers}
+                roomParticipants={roomParticipants}
+                studioState={studioState}
+                studioConfig={studioConfig}
+                galleryItems={galleryItems}
+                privateAlbumSummary={privateAlbumSummary}
+                privateAlbumItems={privateAlbumItems}
+                pendingGalleryItems={pendingGalleryItems}
+                callQueue={callQueue}
+                callMessages={callMessages}
+                callHistory={callHistory}
+                interestMessages={interestMessages}
+                callPlans={callPlans}
+                ratePerMinuteCents={ratePerMinuteCents}
+                onChangeRatePerMinuteCents={setRatePerMinuteCents}
+                soundEnabled={soundEnabled}
+                onToggleSoundEnabled={toggleSoundEnabled}
+                onTestSoundDing={() => {
+                  unlockAudioContext();
+                  playNotificationDing('test', true);
+                }}
+                wsConnected={wsConnected}
+                isGroupRoom={Boolean(activeSession?.isGroupRoom)}
+                activeCallId={activeSession?.callId || null}
+                activePartnerUid={activeSession?.partnerUid || null}
+                activePartnerName={activeSession?.partnerName || ''}
+                activePlan={activeStagePlan}
+                incomingRing={incomingRing}
+                localStream={localStream}
+                remoteStream={remoteStream}
+                remoteStreams={remoteStreams}
+                peerConnectionStates={peerConnectionStates}
+                micEnabled={micEnabled}
+                camEnabled={camEnabled}
+                mediaError={mediaError}
+                connectionState={connectionState}
+                elapsedSeconds={elapsedSeconds}
+                onAcquireMedia={acquireLocalMedia}
+                onToggleMic={() => toggleMic()}
+                onToggleCam={toggleCam}
+                onEndCall={handleEndCall}
+                onJoinGroupRoomAdmin={handleAdminJoinGroupRoom}
+                onSendMessage={handleSendMessage}
+                onAcceptIncomingRing={handleAcceptIncomingRing}
+                onRejectIncomingRing={handleRejectIncomingRing}
+                onAcceptQueueAndCall={handleAcceptQueueAndCall}
+                onUpdateCallStatus={updateCallStatus}
+                onDeleteCallRequest={deleteCallRequest}
+                onDirectCallUser={handleDirectCallUser}
+                onSavePlan={saveCallPlan}
+                onDeletePlan={deleteCallPlan}
+                onUpdateStudioState={updateStudioState}
+                onUploadImage={uploadStudioImage}
+                onUploadMedia={uploadStudioMedia}
+                onSaveStudioConfig={saveStudioConfig}
+                onSaveGalleryItem={saveGalleryItem}
+                onDeleteGalleryItem={deleteGalleryItem}
+                onRestoreDefaultGallery={restoreDefaultGallery}
+                onModerateGalleryItem={moderatePublicGalleryItem}
+                onToggleMediaVisibility={toggleMediaVisibility}
+                onSavePrivateAlbumSettings={savePrivateAlbumSettings}
+                onSavePrivateAlbumItem={savePrivateAlbumItem}
+                onDeletePrivateAlbumItem={deletePrivateAlbumItem}
+                onUpdateUserControl={updateUserControl}
+                onDeleteUserProfile={deleteUserProfile}
+                onSendModeration={sendModerationCommand}
+                onRecordCallHistory={recordCallHistory}
+                onUpdateCallHistoryStatus={updateCallHistoryStatus}
+                onUpdateCallHistoryRecord={updateCallHistoryRecord}
+                onDeleteCallHistoryRecord={deleteCallHistoryRecord}
+                onUpdateInterestMessageStatus={updateInterestMessageStatus}
+                onDeleteInterestMessage={deleteInterestMessage}
+                isSuperAdmin={isSuperAdmin}
+                activeModelId={
+                  isSuperAdmin ? superAdminSelectedModelId : activeModelId
+                }
+                activeAdminThemeId={activeAdminThemeId}
+                superAdminModels={superAdminModels}
+                onCreateModelAccount={createModelAccount}
+                onUpdateModelAccount={updateModelAccount}
+                onDeleteModelAccount={deleteModelAccount}
+                onSelectModelWorkspace={(modelId) => {
+                  setSuperAdminSelectedModelId(modelId);
+                }}
+                pixCharges={pixCharges}
+                onConfirmModelPixCharge={confirmModelPixCharge}
+                onCancelModelPixCharge={cancelModelPixCharge}
+              />
+            )}
           </main>
         ) : (
-          <LoginView
-            studioConfig={studioConfig}
-            galleryItems={galleryItems}
-            onEnterVideoCall={() => {
-              pendingPublicJoinRef.current = true;
-              pendingEntryIntentRef.current = 'group';
-              void loginWithGoogle();
-            }}
-            onEnterPrivateCall={() => {
-              pendingPublicJoinRef.current = true;
-              pendingEntryIntentRef.current = 'private';
-              void loginWithGoogle();
-            }}
-            authError={authError}
-          />
-        )
-      ) : isAdminRoute ? (
-        <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
-          {!isAdmin ? (
-            <section className="max-w-lg mx-auto my-12 luxury-card border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-5">
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-[#FCA5A5]">
-                  Acesso Restrito
-                </p>
+          <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
+            {/* Pure Internauta Reception Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#F4C2D7]/15">
+              <div className="space-y-1">
                 <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-                  Área Exclusiva da Modelo
+                  Recepção do Estúdio · {activeModelDisplayName}
                 </h1>
-                <p className="text-sm text-[#C9BAC4] leading-relaxed">
-                  A conta conectada atualmente não possui permissão administrativa para receber chamadas no painel da modelo Lorena Noir.
+                <p className="text-xs text-[#C9BAC4]">
+                  {myProfile?.displayName ||
+                    user?.displayName ||
+                    modelSession?.model.displayName ||
+                    'Participante'}{' '}
+                  · Visitante Autenticado ·{' '}
+                  {wsConnected
+                    ? `${peers.length} conectado${peers.length === 1 ? '' : 's'} em tempo real`
+                    : 'Reconectando tempo real...'}
                 </p>
               </div>
+
               <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => navigateRoute('/')}
-                  className="px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
-                >
-                  Ir para Recepção de Videochamada
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void logout()}
-                  className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
-                >
-                  Trocar de Conta
-                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => navigateRoute('/admin')}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-full bg-[#21142D] border border-[#F4C2D7]/35 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <span>Voltar à Administração da Modelo</span>
+                  </button>
+                )}
+                {!isModelUnavailable && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('call')}
+                    className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Video className="w-3.5 h-3.5" />
+                    <span>
+                      {activeSession
+                        ? 'Voltar para Chamada'
+                        : 'Abrir Sala de Vídeo'}
+                    </span>
+                  </button>
+                )}
               </div>
-            </section>
-          ) : (
-            <ModelAdminPage
-              myUid={user.uid}
-              myProfile={myProfile}
-              modelProfile={modelProfile}
-              allProfiles={allProfiles}
-              peers={peers}
-              roomParticipants={roomParticipants}
-              studioState={studioState}
-              studioConfig={studioConfig}
-              galleryItems={galleryItems}
-              callQueue={callQueue}
-              callMessages={callMessages}
-              callHistory={callHistory}
-              interestMessages={interestMessages}
-              callPlans={callPlans}
-              ratePerMinuteCents={ratePerMinuteCents}
-              onChangeRatePerMinuteCents={setRatePerMinuteCents}
-              soundEnabled={soundEnabled}
-              onToggleSoundEnabled={toggleSoundEnabled}
-              onTestSoundDing={() => {
-                unlockAudioContext();
-                playNotificationDing('test', true);
-              }}
-              wsConnected={wsConnected}
-              isGroupRoom={Boolean(activeSession?.isGroupRoom)}
-              activeCallId={activeSession?.callId || null}
-              activePartnerUid={activeSession?.partnerUid || null}
-              activePartnerName={activeSession?.partnerName || ''}
-              activePlan={activeStagePlan}
-              incomingRing={incomingRing}
-              localStream={localStream}
-              remoteStream={remoteStream}
-              remoteStreams={remoteStreams}
-              peerConnectionStates={peerConnectionStates}
-              micEnabled={micEnabled}
-              camEnabled={camEnabled}
-              mediaError={mediaError}
-              connectionState={connectionState}
-              elapsedSeconds={elapsedSeconds}
-              onAcquireMedia={acquireLocalMedia}
-              onToggleMic={() => toggleMic()}
-              onToggleCam={toggleCam}
-              onEndCall={handleEndCall}
-              onJoinGroupRoomAdmin={handleAdminJoinGroupRoom}
-              onSendMessage={handleSendMessage}
-              onAcceptIncomingRing={handleAcceptIncomingRing}
-              onRejectIncomingRing={handleRejectIncomingRing}
-              onAcceptQueueAndCall={handleAcceptQueueAndCall}
-              onUpdateCallStatus={updateCallStatus}
-              onDeleteCallRequest={deleteCallRequest}
-              onDirectCallUser={handleDirectCallUser}
-              onSavePlan={saveCallPlan}
-              onDeletePlan={deleteCallPlan}
-              onUpdateStudioState={updateStudioState}
-              onSaveStudioConfig={saveStudioConfig}
-              onSaveGalleryItem={saveGalleryItem}
-              onDeleteGalleryItem={deleteGalleryItem}
-              onRestoreDefaultGallery={restoreDefaultGallery}
-              onUpdateUserControl={updateUserControl}
-              onDeleteUserProfile={deleteUserProfile}
-              onSendModeration={sendModerationCommand}
-              onRecordCallHistory={recordCallHistory}
-              onUpdateCallHistoryStatus={updateCallHistoryStatus}
-              onUpdateCallHistoryRecord={updateCallHistoryRecord}
-              onDeleteCallHistoryRecord={deleteCallHistoryRecord}
-              onUpdateInterestMessageStatus={updateInterestMessageStatus}
-              onDeleteInterestMessage={deleteInterestMessage}
-            />
-          )}
-        </main>
-      ) : (
-        <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
-          {/* Account & Live Context Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#F4C2D7]/15">
-            <div className="space-y-1">
-              <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-                {isAdmin ? 'Painel da Modelo' : 'Recepção do Estúdio'}
-              </h1>
-              <p className="text-xs text-[#C9BAC4]">
-                {myProfile?.displayName || user.displayName} ·{' '}
-                {isAdmin ? 'Modelo Administradora' : 'Visitante Autenticado'} ·{' '}
-                {wsConnected
-                  ? `${peers.length} conectado${peers.length === 1 ? '' : 's'} em tempo real`
-                  : 'Reconectando tempo real...'}
-              </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={() => navigateRoute('/admin')}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Users className="w-3.5 h-3.5 text-[#F4C2D7]" />
-                  <span>Página de Administração</span>
-                </button>
-              )}
-              {!isModelUnavailable && (
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('call')}
-                  className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Video className="w-3.5 h-3.5" />
-                  <span>
-                    {activeSession ? 'Voltar para Chamada' : 'Abrir Sala de Vídeo'}
+            {/* Active Model Switcher on Authenticated Visitor Reception */}
+            {!isAdmin && publicModels.length > 1 && !activeSession && (
+              <section
+                aria-label="Escolher modelo do estúdio"
+                className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-4 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-[#F4C2D7]">
+                    Selecionar Modelo para Atendimento
                   </span>
-                </button>
-              )}
-            </div>
-          </div>
+                  <span className="font-mono tabular-nums text-[#C9BAC4]">
+                    {publicModels.length} disponíveis
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2.5">
+                  {publicModels.map((model) => {
+                    const selected = model.id === selectedPublicModelId;
+                    const rateCents = model.ratePerMinuteCents || 1500;
+                    const minPriceCents =
+                      model.minPlanPriceCents || rateCents * 10 || 8900;
+                    return (
+                      <button
+                        key={model.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedPublicModelId(model.id);
+                          setEndedCallForRating(null);
+                          setNoticeBanner(null);
+                        }}
+                        aria-pressed={selected}
+                        className={`inline-flex items-center gap-2.5 px-3.5 py-2 rounded-xl border text-left transition-all cursor-pointer ${
+                          selected
+                            ? 'bg-[#21142D] border-[#F4C2D7] text-[#FAF4F7]'
+                            : 'bg-[#0B060F]/80 border-[#F4C2D7]/15 text-[#C9BAC4] hover:border-[#F4C2D7]/45 hover:text-[#FAF4F7]'
+                        }`}
+                      >
+                        {model.avatarUrl ? (
+                          <img
+                            src={model.avatarUrl}
+                            alt={model.displayName}
+                            referrerPolicy="no-referrer"
+                            draggable={false}
+                            className="w-6 h-6 rounded-full object-cover border border-[#F4C2D7]/30 shrink-0"
+                          />
+                        ) : null}
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            model.modelOnline
+                              ? 'bg-[#86EFAC]'
+                              : model.isLive
+                                ? 'bg-[#F4C2D7]'
+                                : 'bg-[#938291]'
+                          }`}
+                        />
+                        <span className="text-xs font-semibold">
+                          {model.displayName}
+                        </span>
+                        <span className="text-[11px] font-mono tabular-nums text-[#F4C2D7]/90">
+                          · a partir de{' '}
+                          {BRL_FORMATTER.format(minPriceCents / 100)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
           {/* Incoming Real-Time Call Alert */}
           {incomingRing && (
@@ -1675,8 +2146,7 @@ export default function App() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                {!isAdmin &&
-                  !callQueue.some((q) => q.id === incomingRing.callId) &&
+                {!callQueue.some((q) => q.id === incomingRing.callId) &&
                   activePlans.length > 0 && (
                     <select
                       aria-label="Plano da videochamada"
@@ -1697,8 +2167,7 @@ export default function App() {
                   onClick={() => void handleAcceptIncomingRing()}
                   className="px-5 py-2 text-xs font-semibold rounded-full bg-[#16A34A] text-white hover:bg-[#15803D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  {!isAdmin &&
-                  !callQueue.some((q) => q.id === incomingRing.callId) &&
+                  {!callQueue.some((q) => q.id === incomingRing.callId) &&
                   selectedRingPlan
                     ? `Autorizar ${BRL_FORMATTER.format(selectedRingPlan.priceCents / 100)} e Aceitar`
                     : 'Aceitar Vídeo'}
@@ -1711,6 +2180,38 @@ export default function App() {
                   <PhoneOff className="w-3.5 h-3.5" />
                   <span>Recusar</span>
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Automatic Pre-Pause Warning Banner for Visitors (e.g., 5 min before scheduled block) */}
+          {!isAdmin && !isModelUnavailable && upcomingBlockWarning && (
+            <div
+              role="alert"
+              aria-live="polite"
+              className="px-5 py-4 rounded-2xl luxury-card border border-[#FCD34D]/50 bg-gradient-to-r from-[#2D1B2E]/95 via-[#21142D]/95 to-[#150D1D] shadow-[0_0_28px_-12px_rgba(252,211,77,0.35)] flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+            >
+              <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+                <BellRing className="w-5 h-5 text-[#FCD34D] shrink-0 mt-0.5 sm:mt-0" />
+                <div className="space-y-0.5 min-w-0">
+                  <p className="text-xs font-semibold text-[#FDE68A]">
+                    Aviso de Pausa · {upcomingBlockWarning.label}
+                  </p>
+                  <p className="text-xs sm:text-sm text-[#FAF4F7] break-words">
+                    {upcomingBlockWarning.customMessage ||
+                      `${activeModelDisplayName} entrará em bloqueio/pausa agendada às ${upcomingBlockWarning.startTime}${
+                        upcomingBlockWarning.endTime
+                          ? ` (retorno previsto às ${upcomingBlockWarning.endTime})`
+                          : ''
+                      }.`}
+                  </p>
+                </div>
+              </div>
+              <div className="text-left sm:text-right shrink-0 sm:pl-4 sm:border-l border-[#FCD34D]/20">
+                <p className="text-[10px] text-[#C9BAC4]">Pausa inicia em</p>
+                <p className="font-mono text-xl font-semibold tabular-nums text-[#FDE68A]">
+                  {formatMinutesSecondsClock(upcomingBlockWarning.remainingMs)}
+                </p>
               </div>
             </div>
           )}
@@ -1733,26 +2234,24 @@ export default function App() {
           )}
 
           {/* Post-Session Quality Rating Prompt */}
-          {!isAdmin && !activeSession && endedCallForRating && (
+          {!activeSession && endedCallForRating && (
             <RatingSystem
               callHistory={callHistory}
               endedSession={endedCallForRating}
-              modelName={
-                studioState?.modelName ||
-                modelProfile?.displayName ||
-                'Lorena Noir'
-              }
+              modelName={activeModelDisplayName}
               onSubmitRating={handleSubmitCallRating}
               onDismissEndedSession={() => setEndedCallForRating(null)}
             />
           )}
 
-          {/* Active Workspace Content */}
+          {/* Active Visitor Workspace Content */}
           {isModelUnavailable ? (
             <ModelOfflineView
               isAdmin={false}
               myProfile={myProfile}
               modelProfile={modelProfile}
+              modelAvatarUrl={studioConfig?.modelAvatarUrl || modelProfile?.photoUrl}
+              loungeImageUrl={studioConfig?.loungeImageUrl}
               studioState={studioState}
               modelOnline={modelOnline}
               myInterestMessages={interestMessages}
@@ -1761,8 +2260,7 @@ export default function App() {
           ) : (
             <>
               {activeTab === 'call' &&
-                (!isAdmin &&
-                !activeSession &&
+                (!activeSession &&
                 myProfile?.accessStatus !== 'blocked' &&
                 callQueue.some(
                   (q) => q.status === 'waiting' || q.status === 'accepted'
@@ -1773,17 +2271,13 @@ export default function App() {
                         (q) => q.status === 'waiting' || q.status === 'accepted'
                       )!
                     }
-                    modelName={
-                      studioConfig?.modelName ||
-                      studioState?.modelName ||
-                      modelProfile?.displayName ||
-                      'Lorena Noir'
-                    }
+                    modelName={activeModelDisplayName}
                     modelAvatarUrl={
                       studioConfig?.modelAvatarUrl || modelProfile?.photoUrl
                     }
                     loungeImageUrl={studioConfig?.loungeImageUrl}
                     modelOnline={modelOnline}
+                    isVip={myProfile?.accessStatus === 'vip'}
                     studioState={studioState}
                     queueSummary={queueSummary}
                     wsConnected={wsConnected}
@@ -1803,7 +2297,8 @@ export default function App() {
                   />
                 ) : (
                   <VideoCallStage
-                    isAdmin={isAdmin}
+                    isAdmin={false}
+                    modelId={activeModelId}
                     isGroupRoom={Boolean(activeSession?.isGroupRoom)}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
@@ -1829,40 +2324,19 @@ export default function App() {
                     onToggleCam={toggleCam}
                     onEndCall={() => void handleEndCall()}
                     onSendMessage={handleSendMessage}
+                    onSendTip={sendTipContribution}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
                   />
                 ))}
-
-              {activeTab === 'users' && isAdmin && (
-                <UserControlPanel
-                  myUid={user.uid}
-                  profiles={allProfiles}
-                  peers={peers}
-                  studioState={studioState}
-                  callHistory={callHistory}
-                  interestMessages={interestMessages}
-                  callPlans={callPlans}
-                  ratePerMinuteCents={ratePerMinuteCents}
-                  onChangeRatePerMinuteCents={setRatePerMinuteCents}
-                  onUpdateStudioState={updateStudioState}
-                  onUpdateUserControl={updateUserControl}
-                  onDeleteUserProfile={deleteUserProfile}
-                  onSendModeration={sendModerationCommand}
-                  onDirectCallUser={handleDirectCallUser}
-                  onSavePlan={saveCallPlan}
-                  onDeletePlan={deleteCallPlan}
-                  onRecordCallHistory={recordCallHistory}
-                  onUpdateCallHistoryStatus={updateCallHistoryStatus}
-                  onUpdateCallHistoryRecord={updateCallHistoryRecord}
-                  onDeleteCallHistoryRecord={deleteCallHistoryRecord}
-                  onUpdateInterestMessageStatus={updateInterestMessageStatus}
-                  onDeleteInterestMessage={deleteInterestMessage}
-                />
-              )}
 
               {activeTab === 'queue' && (
                 <div className="space-y-8">
                   <CallQueuePanel
-                    isAdmin={isAdmin}
+                    isAdmin={false}
+                    modelId={activeModelId}
                     entryIntent={entryIntent}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
@@ -1885,141 +2359,154 @@ export default function App() {
                     onRequestCall={requestVideoCall}
                     onDirectCallModel={handleVisitorDirectCallModel}
                     onJoinGroupRoom={handleVisitorJoinGroupRoom}
+                    onRefreshWorkspace={refreshWorkspace}
                     onAcceptAndCall={handleAcceptQueueAndCall}
                     onUpdateCallStatus={updateCallStatus}
                     onDeleteCallRequest={deleteCallRequest}
                     onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
+                    onSendTip={sendTipContribution}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
                   />
-                  {!isAdmin && (
-                    <RatingSystem
-                      callHistory={callHistory}
-                      endedSession={null}
-                      modelName={
-                        studioState?.modelName ||
-                        modelProfile?.displayName ||
-                        'Lorena Noir'
-                      }
-                      showHistoryList={true}
-                      onSubmitRating={handleSubmitCallRating}
-                    />
-                  )}
+                  <ModelProfileBioSection
+                    modelName={activeModelDisplayName}
+                    studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                    modelBio={studioConfig?.modelBio}
+                    basicInfo={studioConfig?.basicInfo}
+                    avatarUrl={
+                      studioConfig?.modelAvatarUrl || modelProfile?.photoUrl
+                    }
+                  />
+                  <PrivateAlbumViewer
+                    modelId={activeModelId}
+                    modelName={activeModelDisplayName}
+                    summary={privateAlbumSummary}
+                    isAuthenticated={Boolean(user)}
+                    initialUnlockedItems={visitorUnlockedPrivateItems}
+                    onPurchaseAlbum={purchasePrivateAlbum}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
+                    onRequireAuth={() => {
+                      void loginWithGoogle();
+                    }}
+                    onUnlock={unlockPrivateAlbum}
+                  />
+                  <RatingSystem
+                    callHistory={callHistory}
+                    endedSession={null}
+                    modelName={activeModelDisplayName}
+                    showHistoryList={true}
+                    onSubmitRating={handleSubmitCallRating}
+                  />
                 </div>
               )}
 
-              {activeTab === 'studio' &&
-                (isAdmin ? (
-                  <div className="space-y-8">
-                    {studioState && !studioState.isLive && (
-                      <ModelOfflineView
-                        isAdmin={true}
-                        myProfile={myProfile}
-                        modelProfile={modelProfile}
-                        studioState={studioState}
-                        modelOnline={modelOnline}
-                        myInterestMessages={interestMessages}
-                        onSendInterestMessage={handleSendInterestMessage}
-                        onUpdateStudioState={updateStudioState}
-                      />
-                    )}
-                    <UserControlPanel
-                      myUid={user.uid}
-                      profiles={allProfiles}
-                      peers={peers}
-                      studioState={studioState}
-                      callHistory={callHistory}
-                      interestMessages={interestMessages}
-                      callPlans={callPlans}
-                      ratePerMinuteCents={ratePerMinuteCents}
-                      onChangeRatePerMinuteCents={setRatePerMinuteCents}
-                      onUpdateStudioState={updateStudioState}
-                      onUpdateUserControl={updateUserControl}
-                      onDeleteUserProfile={deleteUserProfile}
-                      onSendModeration={sendModerationCommand}
-                      onDirectCallUser={handleDirectCallUser}
-                      onSavePlan={saveCallPlan}
-                      onDeletePlan={deleteCallPlan}
-                      onRecordCallHistory={recordCallHistory}
-                      onUpdateCallHistoryStatus={updateCallHistoryStatus}
-                      onUpdateCallHistoryRecord={updateCallHistoryRecord}
-                      onDeleteCallHistoryRecord={deleteCallHistoryRecord}
-                      onUpdateInterestMessageStatus={updateInterestMessageStatus}
-                      onDeleteInterestMessage={deleteInterestMessage}
-                    />
-                    <CallQueuePanel
-                      isAdmin={isAdmin}
-                      entryIntent={entryIntent}
-                      myProfile={myProfile}
-                      modelProfile={modelProfile}
-                      studioState={studioState}
-                      studioConfig={studioConfig}
-                      galleryItems={galleryItems}
-                      callQueue={callQueue}
-                      callPlans={callPlans}
-                      peers={peers}
-                      roomParticipants={roomParticipants}
-                      queueSummary={queueSummary}
-                      wsConnected={wsConnected}
-                      localStream={localStream}
-                      micEnabled={micEnabled}
-                      camEnabled={camEnabled}
-                      mediaError={mediaError}
-                      onAcquireMedia={acquireLocalMedia}
-                      onToggleMic={() => toggleMic()}
-                      onToggleCam={toggleCam}
-                      onRequestCall={requestVideoCall}
-                      onDirectCallModel={handleVisitorDirectCallModel}
-                      onJoinGroupRoom={handleVisitorJoinGroupRoom}
-                      onAcceptAndCall={handleAcceptQueueAndCall}
-                      onUpdateCallStatus={updateCallStatus}
-                      onDeleteCallRequest={deleteCallRequest}
-                      onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
-                    />
-                  </div>
-                ) : (
-                  <div className="space-y-8">
-                    <CallQueuePanel
-                      isAdmin={isAdmin}
-                      entryIntent={entryIntent}
-                      myProfile={myProfile}
-                      modelProfile={modelProfile}
-                      studioState={studioState}
-                      studioConfig={studioConfig}
-                      galleryItems={galleryItems}
-                      callQueue={callQueue}
-                      callPlans={callPlans}
-                      peers={peers}
-                      roomParticipants={roomParticipants}
-                      queueSummary={queueSummary}
-                      wsConnected={wsConnected}
-                      localStream={localStream}
-                      micEnabled={micEnabled}
-                      camEnabled={camEnabled}
-                      mediaError={mediaError}
-                      onAcquireMedia={acquireLocalMedia}
-                      onToggleMic={() => toggleMic()}
-                      onToggleCam={toggleCam}
-                      onRequestCall={requestVideoCall}
-                      onDirectCallModel={handleVisitorDirectCallModel}
-                      onJoinGroupRoom={handleVisitorJoinGroupRoom}
-                      onAcceptAndCall={handleAcceptQueueAndCall}
-                      onUpdateCallStatus={updateCallStatus}
-                      onDeleteCallRequest={deleteCallRequest}
-                      onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
-                    />
-                    <RatingSystem
-                      callHistory={callHistory}
-                      endedSession={null}
-                      modelName={
-                        studioState?.modelName ||
-                        modelProfile?.displayName ||
-                        'Lorena Noir'
-                      }
-                      showHistoryList={true}
-                      onSubmitRating={handleSubmitCallRating}
-                    />
-                  </div>
-                ))}
+              {activeTab === 'studio' && (
+                <div className="space-y-8">
+                  <CallQueuePanel
+                    isAdmin={false}
+                    modelId={activeModelId}
+                    entryIntent={entryIntent}
+                    myProfile={myProfile}
+                    modelProfile={modelProfile}
+                    studioState={studioState}
+                    studioConfig={studioConfig}
+                    galleryItems={galleryItems}
+                    callQueue={callQueue}
+                    callPlans={callPlans}
+                    peers={peers}
+                    roomParticipants={roomParticipants}
+                    queueSummary={queueSummary}
+                    wsConnected={wsConnected}
+                    localStream={localStream}
+                    micEnabled={micEnabled}
+                    camEnabled={camEnabled}
+                    mediaError={mediaError}
+                    onAcquireMedia={acquireLocalMedia}
+                    onToggleMic={() => toggleMic()}
+                    onToggleCam={toggleCam}
+                    onRequestCall={requestVideoCall}
+                    onDirectCallModel={handleVisitorDirectCallModel}
+                    onJoinGroupRoom={handleVisitorJoinGroupRoom}
+                    onRefreshWorkspace={refreshWorkspace}
+                    onAcceptAndCall={handleAcceptQueueAndCall}
+                    onUpdateCallStatus={updateCallStatus}
+                    onDeleteCallRequest={deleteCallRequest}
+                    onEnterAcceptedCall={(req) => void handleEnterAcceptedCall(req)}
+                    onSendTip={sendTipContribution}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
+                  />
+                  <ModelProfileBioSection
+                    modelName={activeModelDisplayName}
+                    studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                    modelBio={studioConfig?.modelBio}
+                    basicInfo={studioConfig?.basicInfo}
+                    avatarUrl={
+                      studioConfig?.modelAvatarUrl || modelProfile?.photoUrl
+                    }
+                  />
+                  <PrivateAlbumViewer
+                    modelId={activeModelId}
+                    modelName={activeModelDisplayName}
+                    summary={privateAlbumSummary}
+                    isAuthenticated={Boolean(user)}
+                    initialUnlockedItems={visitorUnlockedPrivateItems}
+                    onPurchaseAlbum={purchasePrivateAlbum}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
+                    onRequireAuth={() => {
+                      void loginWithGoogle();
+                    }}
+                    onUnlock={unlockPrivateAlbum}
+                  />
+                  <RatingSystem
+                    callHistory={callHistory}
+                    endedSession={null}
+                    modelName={activeModelDisplayName}
+                    showHistoryList={true}
+                    onSubmitRating={handleSubmitCallRating}
+                  />
+                </div>
+              )}
             </>
+          )}
+          {isModelUnavailable && (
+            <div className="space-y-8 pt-2">
+              <ModelProfileBioSection
+                modelName={activeModelDisplayName}
+                studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                modelBio={studioConfig?.modelBio}
+                basicInfo={studioConfig?.basicInfo}
+                avatarUrl={
+                  studioConfig?.modelAvatarUrl || modelProfile?.photoUrl
+                }
+              />
+              <PrivateAlbumViewer
+                modelId={activeModelId}
+                modelName={activeModelDisplayName}
+                summary={privateAlbumSummary}
+                isAuthenticated={Boolean(user)}
+                initialUnlockedItems={visitorUnlockedPrivateItems}
+                onPurchaseAlbum={purchasePrivateAlbum}
+                onCreatePixCharge={createPixCharge}
+                onCheckPixCharge={checkPixChargeStatus}
+                onConfirmPixCharge={confirmPixCharge}
+                onCancelPixCharge={cancelPixCharge}
+                onRequireAuth={() => {
+                  void loginWithGoogle();
+                }}
+                onUnlock={unlockPrivateAlbum}
+              />
+            </div>
           )}
         </main>
       )}

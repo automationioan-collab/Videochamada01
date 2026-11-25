@@ -5,6 +5,7 @@ import {
   Lock,
   PhoneCall,
   PhoneOff,
+  QrCode,
   Trash2,
   Users,
   Video,
@@ -13,8 +14,10 @@ import {
 import { isDndActiveNow } from '../lib/schedule';
 import { DEFAULT_STUDIO_CONFIG } from '../lib/studioDefaults';
 import { GaleriaModelo } from './GaleriaModelo';
+import { PixPaymentModal, type PixConfirmationResponse } from './PixPaymentModal';
 import { SalaDeEspera } from './SalaDeEspera';
 import { TechSpotlightCard } from './TechEffects';
+import { TipGoalProgressCard } from './TipGoalProgressCard';
 import type {
   CallEntryIntent,
   CallPaymentStatus,
@@ -22,6 +25,8 @@ import type {
   CallRequest,
   CallStatus,
   GalleryItemRecord,
+  PixChargeKind,
+  PixChargeRecord,
   PresencePeer,
   QueueWaitSummary,
   RoomParticipant,
@@ -32,6 +37,7 @@ import type {
 
 interface CallQueuePanelProps {
   isAdmin: boolean;
+  modelId?: string;
   entryIntent?: CallEntryIntent;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
@@ -52,8 +58,17 @@ interface CallQueuePanelProps {
   onToggleMic?: () => void;
   onToggleCam?: () => void;
   onRequestCall: (topic: string, plan: CallPlan) => Promise<string | null>;
-  onDirectCallModel: (topic: string, plan: CallPlan) => Promise<void>;
-  onJoinGroupRoom: (topic: string, plan: CallPlan) => Promise<void>;
+  onDirectCallModel: (
+    topic: string,
+    plan: CallPlan,
+    existingCallRequestId?: string
+  ) => Promise<void>;
+  onJoinGroupRoom: (
+    topic: string,
+    plan: CallPlan,
+    existingCallRequestId?: string
+  ) => Promise<void>;
+  onRefreshWorkspace?: () => Promise<void>;
   onAcceptAndCall: (req: CallRequest) => Promise<void>;
   onUpdateCallStatus: (
     requestId: string,
@@ -62,6 +77,32 @@ interface CallQueuePanelProps {
   ) => Promise<void>;
   onDeleteCallRequest?: (requestId: string) => Promise<void>;
   onEnterAcceptedCall: (req: CallRequest) => void;
+  onSendTip?: (
+    modelId: string,
+    input: {
+      amountCents: number;
+      paymentMethod: 'pix' | 'card';
+      message?: string;
+    }
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onCreatePixCharge?: (input: {
+    modelId: string;
+    kind: PixChargeKind;
+    amountCents?: number;
+    planId?: string;
+    topic?: string;
+    callMode?: 'group' | 'private';
+    note?: string;
+  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+  onCheckPixCharge?: (
+    modelId: string,
+    chargeId: string
+  ) => Promise<PixConfirmationResponse>;
+  onConfirmPixCharge?: (
+    modelId: string,
+    chargeId: string
+  ) => Promise<PixConfirmationResponse>;
+  onCancelPixCharge?: (modelId: string, chargeId: string) => Promise<void>;
 }
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
@@ -80,6 +121,7 @@ const CALL_STATUS_LABEL: Record<CallStatus, string> = {
 
 export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   isAdmin,
+  modelId,
   entryIntent = 'group',
   myProfile,
   modelProfile,
@@ -102,16 +144,31 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   onRequestCall,
   onDirectCallModel,
   onJoinGroupRoom,
+  onRefreshWorkspace,
   onAcceptAndCall,
   onUpdateCallStatus,
   onDeleteCallRequest,
   onEnterAcceptedCall,
+  onSendTip,
+  onCreatePixCharge,
+  onCheckPixCharge,
+  onConfirmPixCharge,
+  onCancelPixCharge,
 }) => {
   const [topic, setTopic] = useState('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<'pix' | 'card'>('pix');
   const [paymentAuthorized, setPaymentAuthorized] = useState(true);
   const [submitting, setSubmitting] = useState<'group' | 'private' | null>(null);
+  const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
+    null
+  );
+  const [pendingPixCall, setPendingPixCall] = useState<{
+    mode: 'group' | 'private';
+    plan: CallPlan;
+    topic: string;
+  } | null>(null);
+  const [pixError, setPixError] = useState<string | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [loungeFailed, setLoungeFailed] = useState(false);
 
@@ -180,6 +237,28 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     return mode === 'private' ? `[Privativa 1-para-1] ${base}` : base;
   };
 
+  const startCallPlanPixCharge = async (
+    mode: 'group' | 'private',
+    plan: CallPlan,
+    cleanTopic: string
+  ) => {
+    if (!onCreatePixCharge) return;
+    setPixError(null);
+    const res = await onCreatePixCharge({
+      modelId: modelId || 'lorena_noir',
+      kind: 'call_plan',
+      planId: plan.id,
+      callMode: mode,
+      topic: cleanTopic,
+    });
+    if (res.ok && res.charge) {
+      setPendingPixCall({ mode, plan, topic: cleanTopic });
+      setActivePixCharge(res.charge);
+    } else {
+      setPixError(res.error || 'Não foi possível gerar o QR Code PIX.');
+    }
+  };
+
   const handleJoinSharedRoom = async () => {
     if (
       submitting ||
@@ -192,9 +271,15 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
+    const cleanTopic = buildCleanTopic(selectedPlan, 'group');
     setSubmitting('group');
+    setPixError(null);
     try {
-      await onJoinGroupRoom(buildCleanTopic(selectedPlan, 'group'), selectedPlan);
+      if (paymentMethod === 'pix' && onCreatePixCharge) {
+        await startCallPlanPixCharge('group', selectedPlan, cleanTopic);
+        return;
+      }
+      await onJoinGroupRoom(cleanTopic, selectedPlan);
       setTopic('');
     } finally {
       setSubmitting(null);
@@ -212,9 +297,14 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
+    const cleanTopic = buildCleanTopic(selectedPlan, 'private');
     setSubmitting('private');
+    setPixError(null);
     try {
-      const cleanTopic = buildCleanTopic(selectedPlan, 'private');
+      if (paymentMethod === 'pix' && onCreatePixCharge) {
+        await startCallPlanPixCharge('private', selectedPlan, cleanTopic);
+        return;
+      }
       if (canDirectCallNow) {
         await onDirectCallModel(cleanTopic, selectedPlan);
       } else {
@@ -408,6 +498,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
           modelAvatarUrl={avatarSrc}
           loungeImageUrl={loungeSrc}
           modelOnline={modelOnline}
+          isVip={myProfile?.accessStatus === 'vip'}
           studioState={studioState}
           queueSummary={resolvedQueueSummary}
           wsConnected={wsConnected}
@@ -424,9 +515,22 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
           }
         />
 
+        <TipGoalProgressCard
+          modelId={modelId || 'lorena_noir'}
+          modelName={displayModelName}
+          studioState={studioState}
+          isAuthenticated={true}
+          onSendTip={onSendTip}
+          onCreatePixCharge={onCreatePixCharge}
+          onCheckPixCharge={onCheckPixCharge}
+          onConfirmPixCharge={onConfirmPixCharge}
+          onCancelPixCharge={onCancelPixCharge}
+        />
+
         <GaleriaModelo
           modelName={displayModelName}
           items={galleryItems}
+          hasCustomSource={Boolean(studioConfig)}
           ctaDisabled={true}
           ctaLabel={
             studioConfig?.groupButtonLabel ||
@@ -691,7 +795,26 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   com {displayModelName}.
                 </span>
               </label>
+
+              {paymentMethod === 'pix' && (
+                <p className="text-[11px] text-[#38BDF8] flex items-center gap-1.5">
+                  <QrCode className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    Ao clicar abaixo, geraremos o QR Code PIX + Copia e Cola para
+                    liberação imediata da sua sessão.
+                  </span>
+                </p>
+              )}
             </div>
+
+            {pixError && (
+              <div
+                role="alert"
+                className="p-3 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200"
+              >
+                {pixError}
+              </div>
+            )}
 
             {/* Step 3: Optional Topic */}
             <div className="space-y-1.5">
@@ -807,9 +930,22 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
       </aside>
     </div>
 
+      <TipGoalProgressCard
+        modelId={modelId || 'lorena_noir'}
+        modelName={displayModelName}
+        studioState={studioState}
+        isAuthenticated={true}
+        onSendTip={onSendTip}
+        onCreatePixCharge={onCreatePixCharge}
+        onCheckPixCharge={onCheckPixCharge}
+        onConfirmPixCharge={onConfirmPixCharge}
+        onCancelPixCharge={onCancelPixCharge}
+      />
+
       <GaleriaModelo
         modelName={displayModelName}
         items={galleryItems}
+        hasCustomSource={Boolean(studioConfig)}
         ctaDisabled={isBlocked || dndBlocked || studioState?.callMode === 'paused'}
         ctaLabel={
           studioConfig?.groupButtonLabel ||
@@ -830,6 +966,57 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         }}
         onPrivateAction={() => void handlePrivateOneOnOneCall()}
       />
+
+      {activePixCharge &&
+        pendingPixCall &&
+        onCheckPixCharge &&
+        onConfirmPixCharge && (
+          <PixPaymentModal
+            charge={activePixCharge}
+            title={`Pagamento PIX · ${pendingPixCall.plan.name}`}
+            subtitle={`${
+              pendingPixCall.mode === 'private'
+                ? 'Chamada Privativa 1-para-1'
+                : 'Sala ao Vivo'
+            } com ${displayModelName}`}
+            confirmLabel="Já Paguei via PIX · Liberar Chamada"
+            onClose={() => {
+              setActivePixCharge(null);
+              setPendingPixCall(null);
+            }}
+            onCancelCharge={onCancelPixCharge}
+            onCheckStatus={onCheckPixCharge}
+            onConfirmPayment={onConfirmPixCharge}
+            onRegenerate={async () => {
+              await startCallPlanPixCharge(
+                pendingPixCall.mode,
+                pendingPixCall.plan,
+                pendingPixCall.topic
+              );
+            }}
+            onPaid={async (res) => {
+              const pending = pendingPixCall;
+              setActivePixCharge(null);
+              setPendingPixCall(null);
+              setTopic('');
+              if (pending.mode === 'group') {
+                await onJoinGroupRoom(
+                  pending.topic,
+                  pending.plan,
+                  res.callRequestId
+                );
+              } else if (canDirectCallNow) {
+                await onDirectCallModel(
+                  pending.topic,
+                  pending.plan,
+                  res.callRequestId
+                );
+              } else if (onRefreshWorkspace) {
+                await onRefreshWorkspace();
+              }
+            }}
+          />
+        )}
     </div>
   );
 };

@@ -1,12 +1,62 @@
 import 'dotenv/config';
-import express from 'express';
+import crypto from 'crypto';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { initializeApp, getApps } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
+import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
+import {
+  PRIMARY_MODEL_ID,
+  UPLOADS_DIR,
+  buildDefaultGallery,
+  buildDefaultWorkspace,
+  buildPrivateAlbumSummary,
+  ensureUploadsDir,
+  findModelByLogin,
+  getModelActorUid,
+  getModelAndWorkspace,
+  getModelRoomId,
+  getStore,
+  hashPassword,
+  hasVisitorPaidPrivateAlbum,
+  pickNextDistinctThemeColor,
+  rescalePlansForRate,
+  sanitizeAdminThemeColor,
+  sanitizeId,
+  sanitizeLoginUsername,
+  sanitizeMediaUrl,
+  sanitizeModelBasicInfo,
+  sanitizeSlug,
+  saveStore,
+  serializeModelSummary,
+  signModelSessionToken,
+  signPrivateAlbumToken,
+  verifyModelSessionToken,
+  verifyPassword,
+  verifyPrivateAlbumToken,
+  type DefaultPlanPricesInput,
+  type ModelSessionPayload,
+  type ModelWorkspaceData,
+  type PixKeyType,
+  type StoredModelAccount,
+  type StoredPixCharge,
+  type StoredPrivateAlbumItem,
+  type StoredStudioConfig,
+} from './server/modelStore.js';
+import {
+  checkMercadoPagoPaymentStatus,
+  formatEmvMerchantCity,
+  formatEmvMerchantName,
+  generatePixChargeAssets,
+  isValidPixKey,
+  maskPixKeyForDisplay,
+  normalizePixKey,
+  sanitizePixTxid,
+} from './server/pix.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,16 +73,16 @@ const ADMIN_EMAIL = 'automation.ioan@gmail.com';
 interface ConnectedPeer {
   ws: WebSocket;
   uid: string;
+  modelId: string;
   displayName: string;
   photoUrl: string;
-  role: string;
-  accessStatus: string;
+  role: 'model' | 'viewer';
+  accessStatus: 'active' | 'vip' | 'muted' | 'blocked';
   isAdmin: boolean;
+  isSuperAdmin: boolean;
   inCallWith: string | null;
   connectedAt: string;
 }
-
-const MAIN_ROOM_ID = 'main_studio_room';
 
 interface RoomParticipantRecord {
   uid: string;
@@ -54,6 +104,7 @@ interface QueueEntryRecord {
   uid: string;
   planDurationMinutes: number;
   createdAtMs: number;
+  isVip?: boolean;
 }
 
 interface ActiveCallEstimate {
@@ -63,20 +114,61 @@ interface ActiveCallEstimate {
 }
 
 const connectedPeers = new Map<string, ConnectedPeer>();
-const roomParticipants = new Map<string, RoomParticipantRecord>();
-const visitorQueueEntries = new Map<string, QueueEntryRecord>();
-let authoritativeWaitingQueue: QueueEntryRecord[] = [];
-let hasAuthoritativeQueue = false;
-let activeCallEstimate: ActiveCallEstimate | null = null;
+const roomParticipantsByModel = new Map<
+  string,
+  Map<string, RoomParticipantRecord>
+>();
+const visitorQueueByModel = new Map<string, Map<string, QueueEntryRecord>>();
+const authoritativeQueueByModel = new Map<string, QueueEntryRecord[]>();
+const hasAuthoritativeQueueByModel = new Map<string, boolean>();
+const activeCallEstimateByModel = new Map<string, ActiveCallEstimate | null>();
 
-function getOrderedWaitingEntries(): QueueEntryRecord[] {
-  const source = hasAuthoritativeQueue
-    ? authoritativeWaitingQueue
-    : Array.from(visitorQueueEntries.values());
-  return [...source].sort((a, b) => a.createdAtMs - b.createdAtMs);
+function getRoomMap(modelId: string): Map<string, RoomParticipantRecord> {
+  let map = roomParticipantsByModel.get(modelId);
+  if (!map) {
+    map = new Map();
+    roomParticipantsByModel.set(modelId, map);
+  }
+  return map;
 }
 
-function getActiveCallRemainingSeconds(nowMs: number): number {
+function getVisitorQueueMap(modelId: string): Map<string, QueueEntryRecord> {
+  let map = visitorQueueByModel.get(modelId);
+  if (!map) {
+    map = new Map();
+    visitorQueueByModel.set(modelId, map);
+  }
+  return map;
+}
+
+function isQueueEntryVip(modelId: string, entry: QueueEntryRecord): boolean {
+  if (entry.isVip) return true;
+  const ctx = getModelAndWorkspace(modelId);
+  if (ctx?.workspace.visitorProfiles[entry.uid]?.accessStatus === 'vip') {
+    return true;
+  }
+  const peer = connectedPeers.get(entry.uid);
+  return Boolean(peer && peer.modelId === modelId && peer.accessStatus === 'vip');
+}
+
+function getOrderedWaitingEntries(modelId: string): QueueEntryRecord[] {
+  const hasAuth = hasAuthoritativeQueueByModel.get(modelId) || false;
+  const source = hasAuth
+    ? authoritativeQueueByModel.get(modelId) || []
+    : Array.from(getVisitorQueueMap(modelId).values());
+  return [...source].sort((a, b) => {
+    const aVip = isQueueEntryVip(modelId, a);
+    const bVip = isQueueEntryVip(modelId, b);
+    if (aVip !== bVip) return aVip ? -1 : 1;
+    return a.createdAtMs - b.createdAtMs;
+  });
+}
+
+function getActiveCallRemainingSeconds(
+  modelId: string,
+  nowMs: number
+): number {
+  const activeCallEstimate = activeCallEstimateByModel.get(modelId) || null;
   if (!activeCallEstimate) return 0;
   const durationSec = Math.max(60, activeCallEstimate.durationMinutes * 60);
   const elapsedSec = Math.max(
@@ -86,11 +178,14 @@ function getActiveCallRemainingSeconds(nowMs: number): number {
   return Math.max(45, durationSec - elapsedSec);
 }
 
-function buildQueueSummaryForUser(uid: string | null) {
+function buildQueueSummaryForUser(modelId: string, uid: string | null) {
   const nowMs = Date.now();
-  const ordered = getOrderedWaitingEntries();
+  const ordered = getOrderedWaitingEntries(modelId);
   const totalWaiting = ordered.length;
-  const activeCallRemainingSeconds = getActiveCallRemainingSeconds(nowMs);
+  const activeCallRemainingSeconds = getActiveCallRemainingSeconds(
+    modelId,
+    nowMs
+  );
 
   const myIndex = uid ? ordered.findIndex((entry) => entry.uid === uid) : -1;
   const myPosition = myIndex >= 0 ? myIndex + 1 : 0;
@@ -102,7 +197,8 @@ function buildQueueSummaryForUser(uid: string | null) {
     return sum + mins * 60 + 30;
   }, 0);
 
-  let totalEstimatedWaitSeconds = activeCallRemainingSeconds + aheadQueueSeconds;
+  let totalEstimatedWaitSeconds =
+    activeCallRemainingSeconds + aheadQueueSeconds;
   if (myIndex >= 0 && totalEstimatedWaitSeconds === 0) {
     const entry = ordered[myIndex];
     const waitedSec = Math.max(
@@ -128,67 +224,77 @@ function sendQueueSyncToPeer(peer: ConnectedPeer) {
   peer.ws.send(
     JSON.stringify({
       type: 'queue:sync',
-      summary: buildQueueSummaryForUser(peer.uid),
+      modelId: peer.modelId,
+      summary: buildQueueSummaryForUser(peer.modelId, peer.uid),
     })
   );
 }
 
-function broadcastQueueSync() {
+function broadcastQueueSyncForModel(modelId: string) {
   for (const peer of connectedPeers.values()) {
-    sendQueueSyncToPeer(peer);
+    if (peer.modelId === modelId) {
+      sendQueueSyncToPeer(peer);
+    }
   }
 }
 
-function serializePeers() {
-  return Array.from(connectedPeers.values()).map((peer) => ({
-    uid: peer.uid,
-    displayName: peer.displayName,
-    photoUrl: peer.photoUrl,
-    role: peer.role,
-    accessStatus: peer.accessStatus,
-    inCallWith: peer.inCallWith,
-    connectedAt: peer.connectedAt,
-  }));
+function serializePeersForModel(modelId: string) {
+  return Array.from(connectedPeers.values())
+    .filter((peer) => peer.modelId === modelId)
+    .map((peer) => ({
+      uid: peer.uid,
+      displayName: peer.displayName,
+      photoUrl: peer.photoUrl,
+      role: peer.role,
+      accessStatus: peer.accessStatus,
+      inCallWith: peer.inCallWith,
+      connectedAt: peer.connectedAt,
+    }));
 }
 
-function serializeRoomParticipants() {
-  return Array.from(roomParticipants.values());
+function serializeRoomParticipantsForModel(modelId: string) {
+  return Array.from(getRoomMap(modelId).values());
 }
 
-function broadcastPresence() {
+function broadcastPresenceForModel(modelId: string) {
   const payload = JSON.stringify({
     type: 'presence:sync',
-    peers: serializePeers(),
+    modelId,
+    peers: serializePeersForModel(modelId),
   });
   for (const peer of connectedPeers.values()) {
-    if (peer.ws.readyState === WebSocket.OPEN) {
+    if (peer.modelId === modelId && peer.ws.readyState === WebSocket.OPEN) {
       peer.ws.send(payload);
     }
   }
 }
 
-function broadcastRoomSync() {
+function broadcastRoomSyncForModel(modelId: string) {
+  const roomId = getModelRoomId(modelId);
   const payload = JSON.stringify({
     type: 'room:sync',
-    roomId: MAIN_ROOM_ID,
-    participants: serializeRoomParticipants(),
+    modelId,
+    roomId,
+    participants: serializeRoomParticipantsForModel(modelId),
   });
   for (const peer of connectedPeers.values()) {
-    if (peer.ws.readyState === WebSocket.OPEN) {
+    if (peer.modelId === modelId && peer.ws.readyState === WebSocket.OPEN) {
       peer.ws.send(payload);
     }
   }
 }
 
-function notifyRoomParticipantsAndAdmins(
+function notifyRoomParticipantsAndAdminsForModel(
+  modelId: string,
   excludeUid: string | null,
   message: Record<string, unknown>
 ) {
+  const roomMap = getRoomMap(modelId);
   const serialized = JSON.stringify(message);
   for (const peer of connectedPeers.values()) {
-    if (peer.uid === excludeUid) continue;
+    if (peer.modelId !== modelId || peer.uid === excludeUid) continue;
     if (
-      (roomParticipants.has(peer.uid) || peer.isAdmin) &&
+      (roomMap.has(peer.uid) || peer.isAdmin) &&
       peer.ws.readyState === WebSocket.OPEN
     ) {
       peer.ws.send(serialized);
@@ -196,47 +302,3491 @@ function notifyRoomParticipantsAndAdmins(
   }
 }
 
-function sendToUser(targetUid: string, message: Record<string, unknown>) {
+function emitWorkspaceRefresh(modelId: string, includeDirectory = false) {
+  const refreshPayload = JSON.stringify({
+    type: 'studio:refresh',
+    modelId,
+    ts: Date.now(),
+  });
+  const directoryPayload = includeDirectory
+    ? JSON.stringify({ type: 'models:refresh', ts: Date.now() })
+    : null;
+
+  for (const peer of connectedPeers.values()) {
+    if (peer.ws.readyState !== WebSocket.OPEN) continue;
+    if (peer.modelId === modelId || peer.isSuperAdmin) {
+      peer.ws.send(refreshPayload);
+    }
+    if (directoryPayload) {
+      peer.ws.send(directoryPayload);
+    }
+  }
+}
+
+function sendToUserInModel(
+  modelId: string,
+  targetUid: string,
+  message: Record<string, unknown>
+) {
   const target = connectedPeers.get(targetUid);
-  if (target && target.ws.readyState === WebSocket.OPEN) {
+  if (
+    target &&
+    target.modelId === modelId &&
+    target.ws.readyState === WebSocket.OPEN
+  ) {
     target.ws.send(JSON.stringify(message));
     return true;
   }
   return false;
 }
 
+function extractBearerToken(req: Request): string {
+  const header = req.header('authorization') || '';
+  if (header.toLowerCase().startsWith('bearer ')) {
+    return header.slice(7).trim();
+  }
+  return '';
+}
+
+function isDecodedSuperAdmin(decoded: DecodedIdToken): boolean {
+  return (
+    decoded.email === ADMIN_EMAIL && decoded.email_verified === true
+  );
+}
+
+interface AuthenticatedRequest extends Request {
+  firebaseUser?: DecodedIdToken;
+  modelSession?: ModelSessionPayload;
+  resolvedModelId?: string;
+  isSuperAdmin?: boolean;
+}
+
+async function requireSuperAdmin(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({ ok: false, error: 'Autenticação obrigatória.' });
+    return;
+  }
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    if (!isDecodedSuperAdmin(decoded)) {
+      res.status(403).json({
+        ok: false,
+        error: 'Acesso restrito à administradora geral do estúdio.',
+      });
+      return;
+    }
+    req.firebaseUser = decoded;
+    req.isSuperAdmin = true;
+    next();
+  } catch {
+    res.status(401).json({ ok: false, error: 'Sessão inválida ou expirada.' });
+  }
+}
+
+async function requireModelOperator(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({ ok: false, error: 'Autenticação da modelo obrigatória.' });
+    return;
+  }
+
+  // 1. Check dedicated model password session token (HMAC-SHA256)
+  const modelSession = verifyModelSessionToken(token);
+  if (modelSession) {
+    const store = getStore();
+    const account = store.models[modelSession.modelId];
+    if (
+      !account ||
+      !account.active ||
+      account.tokenVersion !== modelSession.tokenVersion
+    ) {
+      res.status(401).json({
+        ok: false,
+        error: 'Sessão da modelo expirada ou desativada.',
+      });
+      return;
+    }
+    req.modelSession = modelSession;
+    req.resolvedModelId = account.id; // STRICTLY locked to token's modelId
+    req.isSuperAdmin = false;
+    next();
+    return;
+  }
+
+  // 2. Otherwise verify Firebase Super Admin Google token
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    if (!isDecodedSuperAdmin(decoded)) {
+      res.status(403).json({
+        ok: false,
+        error: 'Permissão negada. Entre com a senha da modelo ou conta administrativa.',
+      });
+      return;
+    }
+    const requestedModelId = sanitizeId(
+      req.header('x-model-id') || req.query.modelId,
+      PRIMARY_MODEL_ID
+    );
+    const store = getStore();
+    const targetModelId = store.models[requestedModelId]
+      ? requestedModelId
+      : PRIMARY_MODEL_ID;
+    req.firebaseUser = decoded;
+    req.resolvedModelId = targetModelId;
+    req.isSuperAdmin = true;
+    next();
+  } catch {
+    res.status(401).json({ ok: false, error: 'Sessão da modelo inválida.' });
+  }
+}
+
+async function requireVisitor(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({ ok: false, error: 'Faça login com Google para continuar.' });
+    return;
+  }
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    req.firebaseUser = decoded;
+    next();
+  } catch {
+    res.status(401).json({ ok: false, error: 'Sessão Google expirada ou inválida.' });
+  }
+}
+
+async function resolveOptionalFirebaseUser(
+  req: Request
+): Promise<DecodedIdToken | null> {
+  const token = extractBearerToken(req);
+  if (!token) return null;
+  try {
+    return await adminAuth.verifyIdToken(token);
+  } catch {
+    return null;
+  }
+}
+
+function getDefaultActiveModelId(): string {
+  const store = getStore();
+  const models = Object.values(store.models);
+  const primary = models.find((m) => m.id === PRIMARY_MODEL_ID && m.active);
+  if (primary) return primary.id;
+  const firstActive = models.find((m) => m.active);
+  return firstActive?.id || PRIMARY_MODEL_ID;
+}
+
+function buildPublicModelSummary(model: StoredModelAccount) {
+  const ctx = getModelAndWorkspace(model.id);
+  if (!ctx) return null;
+  const { workspace } = ctx;
+  const actorUid = getModelActorUid(model.id);
+  const modelOnline = Array.from(connectedPeers.values()).some(
+    (p) => p.modelId === model.id && (p.isAdmin || p.uid === actorUid)
+  );
+  const roomCount = getRoomMap(model.id).size;
+  const activePlans = workspace.callPlans
+    .filter((p) => p.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  const minPlanPriceCents =
+    activePlans.length > 0
+      ? Math.min(...activePlans.map((p) => p.priceCents))
+      : workspace.studioConfig.ratePerMinuteCents * 10;
+  const approvedPublicCount = workspace.galleryItems.filter(
+    (g) => g.active && (g.approvalStatus || 'approved') === 'approved'
+  ).length;
+  const ratedCalls = workspace.callHistory.filter(
+    (h) => typeof h.rating === 'number' && Number.isFinite(h.rating) && h.rating >= 1 && h.rating <= 5
+  );
+  const ratingCount = ratedCalls.length;
+  const ratingAverage =
+    ratingCount > 0
+      ? Number(
+          (
+            ratedCalls.reduce((sum, r) => sum + Number(r.rating || 0), 0) /
+            ratingCount
+          ).toFixed(1)
+        )
+      : undefined;
+  return {
+    id: model.id,
+    slug: model.slug,
+    displayName: model.displayName,
+    studioBrand: workspace.studioConfig.studioBrand,
+    avatarUrl: workspace.studioConfig.modelAvatarUrl || '',
+    heroImageUrl: workspace.studioConfig.heroImageUrl || '',
+    bio: workspace.studioConfig.modelBio || '',
+    basicInfo: workspace.studioConfig.basicInfo || {},
+    privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+    publicGalleryCount: approvedPublicCount,
+    ratingAverage,
+    ratingCount,
+    headline:
+      workspace.studioConfig.headline || workspace.studioState.headline,
+    isLive: workspace.studioState.isLive,
+    callMode: workspace.studioState.callMode,
+    dndActive: Boolean(workspace.studioState.dndActive),
+    modelOnline,
+    roomParticipantCount: roomCount,
+    ratePerMinuteCents: workspace.studioConfig.ratePerMinuteCents,
+    activePlansCount: activePlans.length,
+    minPlanPriceCents,
+    plansPreview: activePlans.slice(0, 4).map((p) => ({
+      id: p.id,
+      name: p.name,
+      durationMinutes: p.durationMinutes,
+      priceCents: p.priceCents,
+    })),
+    tipGoal: {
+      enabled: Boolean(workspace.studioState.tipGoalEnabled),
+      title:
+        workspace.studioState.tipGoalTitle || 'Meta Especial do Estúdio',
+      description: workspace.studioState.tipGoalDescription || '',
+      targetCents: workspace.studioState.tipGoalTargetCents || 30000,
+      currentCents: workspace.studioState.tipGoalCurrentCents || 0,
+      rewardText: workspace.studioState.tipGoalRewardText || '',
+      contributorsCount: workspace.studioState.tipGoalContributorsCount || 0,
+    },
+  };
+}
+
+function detectImageTypeFromBuffer(
+  buf: Buffer
+): 'png' | 'jpg' | 'webp' | 'gif' | null {
+  if (buf.length < 12) return null;
+  if (
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47
+  ) {
+    return 'png';
+  }
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return 'jpg';
+  }
+  if (
+    buf.toString('ascii', 0, 4) === 'RIFF' &&
+    buf.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'webp';
+  }
+  const gifHeader = buf.toString('ascii', 0, 6);
+  if (gifHeader === 'GIF87a' || gifHeader === 'GIF89a') {
+    return 'gif';
+  }
+  return null;
+}
+
+function detectVideoTypeFromBuffer(
+  buf: Buffer
+): 'mp4' | 'mov' | 'webm' | null {
+  if (buf.length < 12) return null;
+  if (
+    buf[0] === 0x1a &&
+    buf[1] === 0x45 &&
+    buf[2] === 0xdf &&
+    buf[3] === 0xa3
+  ) {
+    return 'webm';
+  }
+  const ftyp = buf.toString('ascii', 4, 8);
+  if (ftyp === 'ftyp') {
+    const brand = buf.toString('ascii', 8, 12).toLowerCase();
+    if (brand === 'qt  ') return 'mov';
+    return 'mp4';
+  }
+  return null;
+}
+
+const MAX_UPLOAD_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_VIDEO_BYTES = 40 * 1024 * 1024;
+
+function sanitizePublicStudioConfig(cfg: StoredStudioConfig) {
+  const { pixKey: _hiddenPixKey, ...rest } = cfg;
+  return {
+    ...rest,
+    pixConfigured: Boolean(cfg.pixKey && isValidPixKey(cfg.pixKey, cfg.pixKeyType)),
+  };
+}
+
+function serializePixChargeForClient(charge: StoredPixCharge) {
+  return {
+    id: charge.id,
+    txid: charge.txid,
+    modelId: charge.modelId,
+    userId: charge.userId,
+    userName: charge.userName,
+    kind: charge.kind,
+    amountCents: charge.amountCents,
+    description: charge.description,
+    ...(charge.planId ? { planId: charge.planId } : {}),
+    ...(charge.planName ? { planName: charge.planName } : {}),
+    ...(charge.planDurationMinutes !== undefined
+      ? { planDurationMinutes: charge.planDurationMinutes }
+      : {}),
+    ...(charge.topic ? { topic: charge.topic } : {}),
+    ...(charge.callMode ? { callMode: charge.callMode } : {}),
+    ...(charge.note ? { note: charge.note } : {}),
+    status: charge.status,
+    provider: charge.provider,
+    brCode: charge.brCode,
+    qrCodeDataUrl: charge.qrCodeDataUrl,
+    pixKeyMasked: maskPixKeyForDisplay(charge.pixKeyUsed, charge.pixKeyTypeUsed),
+    pixKeyTypeUsed: charge.pixKeyTypeUsed,
+    merchantName: charge.merchantName,
+    merchantCity: charge.merchantCity,
+    usingDemoKey: Boolean(charge.usingDemoKey),
+    ...(charge.callRequestId ? { callRequestId: charge.callRequestId } : {}),
+    createdAt: charge.createdAt,
+    expiresAt: charge.expiresAt,
+    ...(charge.paidAt ? { paidAt: charge.paidAt } : {}),
+  };
+}
+
+function fulfillPixCharge(
+  modelId: string,
+  workspace: ModelWorkspaceData,
+  charge: StoredPixCharge
+): {
+  albumToken?: string;
+  items?: StoredPrivateAlbumItem[];
+  summary?: ReturnType<typeof buildPrivateAlbumSummary>;
+  studioState?: ModelWorkspaceData['studioState'];
+  callRequestId?: string;
+} {
+  const nowMs = Date.now();
+  charge.status = 'paid';
+  if (!charge.paidAt) {
+    charge.paidAt = nowMs;
+  }
+
+  if (charge.kind === 'private_album') {
+    if (!Array.isArray(workspace.privateAlbumPurchases)) {
+      workspace.privateAlbumPurchases = [];
+    }
+    const alreadyFulfilled = Boolean(charge.fulfilledAt);
+    const alreadyPurchased = hasVisitorPaidPrivateAlbum(workspace, charge.userId);
+    if (!alreadyFulfilled && !alreadyPurchased) {
+      workspace.privateAlbumPurchases.push({
+        id: `albpay_pix_${nowMs}_${charge.userId.slice(0, 6)}`,
+        userId: charge.userId,
+        userName: charge.userName,
+        amountCents: charge.amountCents,
+        paymentMethod: 'pix',
+        purchasedAt: nowMs,
+      });
+      workspace.callHistory.push({
+        id: `hist_album_${nowMs}_${charge.userId.slice(0, 6)}`,
+        callId: `album_pix_${charge.txid}`,
+        userId: charge.userId,
+        userName: charge.userName,
+        modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
+        durationSeconds: 0,
+        amountCents: charge.amountCents,
+        currency: 'BRL',
+        status: 'completed',
+        planId: 'private_album_unlock',
+        planName: 'Álbum Privado · PIX',
+        planDurationMinutes: 0,
+        endedAt: nowMs,
+        createdAt: nowMs,
+      });
+    }
+    charge.fulfilledAt = charge.fulfilledAt || nowMs;
+    const version = workspace.privateAlbumTokenVersion || 1;
+    const albumToken = signPrivateAlbumToken(modelId, version);
+    const items = (workspace.privateAlbumItems || [])
+      .filter((item) => item.active)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    return {
+      albumToken,
+      items,
+      summary: buildPrivateAlbumSummary(workspace, charge.userId),
+    };
+  }
+
+  if (charge.kind === 'tip') {
+    if (!charge.fulfilledAt) {
+      const nextCurrent =
+        (typeof workspace.studioState.tipGoalCurrentCents === 'number'
+          ? workspace.studioState.tipGoalCurrentCents
+          : 0) + charge.amountCents;
+      const nextCount =
+        (typeof workspace.studioState.tipGoalContributorsCount === 'number'
+          ? workspace.studioState.tipGoalContributorsCount
+          : 0) + 1;
+      workspace.studioState.tipGoalCurrentCents = Math.min(100000000, nextCurrent);
+      workspace.studioState.tipGoalContributorsCount = nextCount;
+      workspace.studioState.tipGoalLastTipName = charge.userName.slice(0, 60);
+      workspace.studioState.tipGoalLastTipAmountCents = charge.amountCents;
+      workspace.studioState.updatedAt = nowMs;
+
+      workspace.callHistory.push({
+        id: `hist_tip_${nowMs}_${charge.userId.slice(0, 6)}`,
+        callId: `tip_pix_${charge.txid}`,
+        userId: charge.userId,
+        userName: charge.userName,
+        modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
+        durationSeconds: 0,
+        amountCents: charge.amountCents,
+        currency: 'BRL',
+        status: 'completed',
+        planId: 'tip_goal_contribution',
+        planName: `Gorjeta (PIX)${charge.note ? ` · ${charge.note}` : ''}`,
+        planDurationMinutes: 0,
+        endedAt: nowMs,
+        createdAt: nowMs,
+      });
+      charge.fulfilledAt = nowMs;
+    }
+    return {
+      studioState: workspace.studioState,
+    };
+  }
+
+  // call_plan
+  if (!charge.fulfilledAt || !charge.callRequestId) {
+    const reqId = `call_${nowMs}_${charge.userId.slice(0, 8)}`;
+    const visitor = workspace.visitorProfiles[charge.userId];
+    const cleanTopic =
+      charge.topic?.trim() ||
+      `Videochamada · ${charge.planName || 'Plano Selecionado'} · PIX Pago`;
+    workspace.callQueue.push({
+      id: reqId,
+      userId: charge.userId,
+      userName: visitor?.displayName || charge.userName || 'Participante',
+      ...(visitor?.photoUrl ? { userPhotoUrl: visitor.photoUrl } : {}),
+      topic: cleanTopic.slice(0, 160),
+      status: 'waiting',
+      planId: charge.planId,
+      planName: charge.planName,
+      planDurationMinutes: charge.planDurationMinutes,
+      planPriceCents: charge.amountCents,
+      paymentStatus: 'captured',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    });
+    charge.callRequestId = reqId;
+    charge.fulfilledAt = nowMs;
+  }
+
+  return {
+    callRequestId: charge.callRequestId,
+  };
+}
+
 async function startServer() {
+  // Ensure initial store and uploads directory exist at startup
+  getStore();
+  ensureUploadsDir();
+
   const app = express();
-  app.use(express.json());
+
+  app.use(
+    '/uploads',
+    (_req, res, next) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      next();
+    },
+    express.static(UPLOADS_DIR, {
+      maxAge: '7d',
+      index: false,
+      dotfiles: 'deny',
+    })
+  );
+
+  // Authenticated studio image/video upload (registered before global 1mb JSON parser)
+  app.post(
+    '/api/media/upload',
+    express.json({ limit: '60mb' }),
+    requireModelOperator,
+    (req: AuthenticatedRequest, res) => {
+      const body = (req.body || {}) as { dataUrl?: unknown };
+      if (typeof body.dataUrl !== 'string') {
+        res.status(400).json({ ok: false, error: 'Mídia inválida.' });
+        return;
+      }
+
+      const trimmed = body.dataUrl.trim();
+      const imageMatch =
+        /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/i.exec(
+          trimmed
+        );
+      const videoMatch =
+        /^data:video\/(mp4|webm|quicktime);base64,([A-Za-z0-9+/=\s]+)$/i.exec(
+          trimmed
+        );
+
+      if (!imageMatch && !videoMatch) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Formato não suportado. Envie imagem (PNG, JPG, WEBP, GIF) ou vídeo (MP4, MOV, WEBM).',
+        });
+        return;
+      }
+
+      const isVideo = Boolean(videoMatch);
+      const b64Payload = (videoMatch ? videoMatch[2] : imageMatch![2]).replace(
+        /\s+/g,
+        ''
+      );
+      const buf = Buffer.from(b64Payload, 'base64');
+
+      if (isVideo) {
+        if (buf.length === 0 || buf.length > MAX_UPLOAD_VIDEO_BYTES) {
+          res.status(400).json({
+            ok: false,
+            error: 'O vídeo deve ter até 40 MB.',
+          });
+          return;
+        }
+        const detectedExt = detectVideoTypeFromBuffer(buf);
+        if (!detectedExt) {
+          res.status(400).json({
+            ok: false,
+            error: 'Arquivo de vídeo inválido ou corrompido.',
+          });
+          return;
+        }
+
+        ensureUploadsDir();
+        const baseDir = path.resolve(UPLOADS_DIR);
+        const modelPrefix = sanitizeId(
+          req.resolvedModelId || 'studio',
+          'studio'
+        ).slice(0, 32);
+        const safeName = `${modelPrefix}_vid_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${detectedExt}`;
+        const targetPath = path.resolve(baseDir, safeName);
+        if (!targetPath.startsWith(baseDir + path.sep)) {
+          res.status(400).json({ ok: false, error: 'Caminho de destino inválido.' });
+          return;
+        }
+
+        fs.writeFileSync(targetPath, buf, { mode: 0o644 });
+        res.status(201).json({
+          ok: true,
+          url: `/uploads/${safeName}`,
+          mediaType: 'video',
+        });
+        return;
+      }
+
+      if (buf.length === 0 || buf.length > MAX_UPLOAD_IMAGE_BYTES) {
+        res.status(400).json({
+          ok: false,
+          error: 'A imagem deve ter até 5 MB.',
+        });
+        return;
+      }
+
+      const detectedExt = detectImageTypeFromBuffer(buf);
+      if (!detectedExt) {
+        res.status(400).json({
+          ok: false,
+          error: 'Arquivo de imagem inválido ou corrompido.',
+        });
+        return;
+      }
+
+      ensureUploadsDir();
+      const baseDir = path.resolve(UPLOADS_DIR);
+      const modelPrefix = sanitizeId(req.resolvedModelId || 'studio', 'studio').slice(0, 32);
+      const safeName = `${modelPrefix}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${detectedExt}`;
+      const targetPath = path.resolve(baseDir, safeName);
+      if (!targetPath.startsWith(baseDir + path.sep)) {
+        res.status(400).json({ ok: false, error: 'Caminho de destino inválido.' });
+        return;
+      }
+
+      fs.writeFileSync(targetPath, buf, { mode: 0o644 });
+      res.status(201).json({
+        ok: true,
+        url: `/uploads/${safeName}`,
+        mediaType: 'photo',
+      });
+    }
+  );
+
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
+    const totalRoomCount = Array.from(roomParticipantsByModel.values()).reduce(
+      (sum, m) => sum + m.size,
+      0
+    );
     res.json({
       ok: true,
       activePeers: connectedPeers.size,
-      roomParticipantCount: roomParticipants.size,
+      roomParticipantCount: totalRoomCount,
     });
   });
 
-  app.get('/api/studio/public-status', (_req, res) => {
-    const modelOnline = Array.from(connectedPeers.values()).some(
-      (p) => p.isAdmin
-    );
-    const modelInRoom = Array.from(roomParticipants.values()).some(
-      (p) => p.isAdmin
-    );
-    const publicQueue = buildQueueSummaryForUser(null);
+  // Public list of active models for Visitor selector
+  app.get('/api/models/public', (_req, res) => {
+    const store = getStore();
+    const activeModels = Object.values(store.models)
+      .filter((m) => m.active)
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary))
+      .map(buildPublicModelSummary)
+      .filter(Boolean);
+
+    res.json({ ok: true, models: activeModels });
+  });
+
+  // Public showcase details for a chosen active model
+  app.get('/api/models/public/:modelId', async (req, res) => {
+    const requestedId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
+    const store = getStore();
+    const targetId =
+      store.models[requestedId]?.active
+        ? requestedId
+        : getDefaultActiveModelId();
+    const ctx = getModelAndWorkspace(targetId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      return;
+    }
+    const viewer = await resolveOptionalFirebaseUser(req);
+    const { model, workspace } = ctx;
+    const activeGallery = workspace.galleryItems
+      .filter((g) => g.active && (g.approvalStatus || 'approved') === 'approved')
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    const activePlans = workspace.callPlans
+      .filter((p) => p.active)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    const publicRatings = workspace.callHistory
+      .filter(
+        (h) =>
+          typeof h.rating === 'number' &&
+          Number.isFinite(h.rating) &&
+          h.rating >= 1 &&
+          h.rating <= 5
+      )
+      .sort((a, b) => (b.ratedAt || b.endedAt || 0) - (a.ratedAt || a.endedAt || 0))
+      .slice(0, 20)
+      .map((h) => ({
+        id: h.id,
+        rating: Number(h.rating),
+        ...(h.ratingComment ? { comment: h.ratingComment } : {}),
+        ...(h.planName ? { planName: h.planName } : {}),
+        createdAtMs: Number(h.ratedAt || h.endedAt || h.createdAt || Date.now()),
+      }));
+
     res.json({
       ok: true,
-      roomId: MAIN_ROOM_ID,
-      modelOnline,
-      modelInRoom,
-      roomParticipantCount: roomParticipants.size,
-      activePeersCount: connectedPeers.size,
-      totalWaiting: publicQueue.totalWaiting,
-      estimatedWaitSeconds: publicQueue.totalEstimatedWaitSeconds,
+      model: buildPublicModelSummary(model),
+      studioConfig: sanitizePublicStudioConfig(workspace.studioConfig),
+      studioState: workspace.studioState,
+      galleryItems: activeGallery,
+      callPlans: activePlans,
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace, viewer?.uid),
+      publicRatings,
     });
   });
 
+  app.get('/api/studio/public-status', (req, res) => {
+    const requestedId = sanitizeId(req.query.modelId, getDefaultActiveModelId());
+    const store = getStore();
+    const modelId = store.models[requestedId]
+      ? requestedId
+      : getDefaultActiveModelId();
+    const actorUid = getModelActorUid(modelId);
+    const modelPeers = Array.from(connectedPeers.values()).filter(
+      (p) => p.modelId === modelId
+    );
+    const modelRoom = getRoomMap(modelId);
+    const modelOnline = modelPeers.some(
+      (p) => p.isAdmin || p.uid === actorUid
+    );
+    const modelInRoom = Array.from(modelRoom.values()).some(
+      (p) => p.isAdmin || p.uid === actorUid
+    );
+    const publicQueue = buildQueueSummaryForUser(modelId, null);
+    const ws = getModelAndWorkspace(modelId)?.workspace;
+    const tipGoal = ws
+      ? {
+          enabled: Boolean(ws.studioState.tipGoalEnabled),
+          title: ws.studioState.tipGoalTitle || 'Meta Especial do Estúdio',
+          description: ws.studioState.tipGoalDescription || '',
+          targetCents: ws.studioState.tipGoalTargetCents || 30000,
+          currentCents: ws.studioState.tipGoalCurrentCents || 0,
+          rewardText: ws.studioState.tipGoalRewardText || '',
+          contributorsCount: ws.studioState.tipGoalContributorsCount || 0,
+          lastTipName: ws.studioState.tipGoalLastTipName || '',
+          lastTipAmountCents: ws.studioState.tipGoalLastTipAmountCents || 0,
+          updatedAt: ws.studioState.updatedAt || 0,
+        }
+      : null;
+    res.json({
+      ok: true,
+      modelId,
+      roomId: getModelRoomId(modelId),
+      modelOnline,
+      modelInRoom,
+      roomParticipantCount: modelRoom.size,
+      activePeersCount: modelPeers.length,
+      totalWaiting: publicQueue.totalWaiting,
+      estimatedWaitSeconds: publicQueue.totalEstimatedWaitSeconds,
+      tipGoal,
+    });
+  });
+
+  // Model Authentication with Separate Password
+  app.post('/api/model-auth/login', (req, res) => {
+    const body = req.body as { login?: unknown; password?: unknown };
+    const loginInput =
+      typeof body.login === 'string' ? body.login.trim() : '';
+    const password =
+      typeof body.password === 'string' ? body.password : '';
+
+    if (!loginInput || !password) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe seu login/e-mail e sua senha de acesso.',
+      });
+      return;
+    }
+
+    const account = findModelByLogin(loginInput);
+    if (!account) {
+      res.status(401).json({
+        ok: false,
+        error: 'Login ou senha inválidos.',
+      });
+      return;
+    }
+
+    if (!account.active) {
+      res.status(403).json({
+        ok: false,
+        error:
+          'Esta conta de modelo está desativada pela administração geral.',
+      });
+      return;
+    }
+
+    if (
+      !account.passwordHash ||
+      !account.passwordSalt ||
+      !verifyPassword(password, account.passwordSalt, account.passwordHash)
+    ) {
+      res.status(401).json({
+        ok: false,
+        error: 'Login ou senha inválidos.',
+      });
+      return;
+    }
+
+    const token = signModelSessionToken(account);
+    res.json({
+      ok: true,
+      token,
+      model: serializeModelSummary(account),
+    });
+  });
+
+  app.get('/api/model-auth/session', (req, res) => {
+    const token = extractBearerToken(req);
+    const payload = verifyModelSessionToken(token);
+    if (!payload) {
+      res.status(401).json({ ok: false, error: 'Sessão inválida.' });
+      return;
+    }
+    const store = getStore();
+    const account = store.models[payload.modelId];
+    if (
+      !account ||
+      !account.active ||
+      account.tokenVersion !== payload.tokenVersion
+    ) {
+      res.status(401).json({ ok: false, error: 'Sessão expirada.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      model: serializeModelSummary(account),
+    });
+  });
+
+  // ============================================================================
+  // SUPER ADMIN ROUTES (Exclusive to automation.ioan@gmail.com)
+  // ============================================================================
+  app.get('/api/super-admin/models', requireSuperAdmin, (_req, res) => {
+    const store = getStore();
+    const pendingGallery: Array<{
+      modelId: string;
+      modelName: string;
+      adminThemeColor?: string;
+      item: (typeof store.workspaces)[string]['galleryItems'][number];
+    }> = [];
+
+    const models = Object.values(store.models)
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary))
+      .map((model) => {
+        const summary = serializeModelSummary(model);
+        const ctx = getModelAndWorkspace(model.id)!;
+        const { workspace } = ctx;
+        const actorUid = getModelActorUid(model.id);
+        const totalRevenueCents = workspace.callHistory
+          .filter((r) => r.status === 'completed')
+          .reduce((acc, r) => acc + r.amountCents, 0);
+        const onlineNow = Array.from(connectedPeers.values()).some(
+          (p) => p.modelId === model.id && (p.isAdmin || p.uid === actorUid)
+        );
+        const modelPendingItems = workspace.galleryItems.filter(
+          (g) => (g.approvalStatus || 'approved') === 'pending'
+        );
+        for (const item of modelPendingItems) {
+          pendingGallery.push({
+            modelId: model.id,
+            modelName: workspace.studioConfig.modelName || model.displayName,
+            adminThemeColor: model.adminThemeColor,
+            item,
+          });
+        }
+        return {
+          ...summary,
+          metrics: {
+            totalCalls: workspace.callHistory.length,
+            totalRevenueCents,
+            waitingCount: workspace.callQueue.filter(
+              (q) => q.status === 'waiting'
+            ).length,
+            unreadMessagesCount: workspace.interestMessages.filter(
+              (m) => m.status === 'unread'
+            ).length,
+            pendingGalleryCount: modelPendingItems.length,
+            privateAlbumCount: (workspace.privateAlbumItems || []).filter(
+              (item) => item.active
+            ).length,
+            onlineNow,
+            roomParticipantsCount: getRoomMap(model.id).size,
+          },
+        };
+      });
+
+    res.json({ ok: true, models, pendingGallery });
+  });
+
+  app.get('/api/super-admin/pending-gallery', requireSuperAdmin, (_req, res) => {
+    const store = getStore();
+    const pendingGallery: Array<{
+      modelId: string;
+      modelName: string;
+      adminThemeColor?: string;
+      item: (typeof store.workspaces)[string]['galleryItems'][number];
+    }> = [];
+
+    for (const model of Object.values(store.models)) {
+      const ctx = getModelAndWorkspace(model.id);
+      if (!ctx) continue;
+      for (const item of ctx.workspace.galleryItems) {
+        if ((item.approvalStatus || 'approved') === 'pending') {
+          pendingGallery.push({
+            modelId: model.id,
+            modelName: ctx.workspace.studioConfig.modelName || model.displayName,
+            adminThemeColor: model.adminThemeColor,
+            item,
+          });
+        }
+      }
+    }
+
+    pendingGallery.sort((a, b) => b.item.updatedAt - a.item.updatedAt);
+    res.json({ ok: true, pendingGallery });
+  });
+
+  app.post(
+    '/api/super-admin/models/:modelId/gallery/:itemId/moderate',
+    requireSuperAdmin,
+    (req, res) => {
+      const modelId = sanitizeId(req.params.modelId);
+      const itemId = sanitizeId(req.params.itemId);
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+        return;
+      }
+      const item = ctx.workspace.galleryItems.find((g) => g.id === itemId);
+      if (!item) {
+        res.status(404).json({ ok: false, error: 'Foto pública não encontrada.' });
+        return;
+      }
+      const body = (req.body || {}) as { status?: unknown; note?: unknown };
+      const status =
+        body.status === 'approved' || body.status === 'rejected'
+          ? body.status
+          : null;
+      if (!status) {
+        res.status(400).json({
+          ok: false,
+          error: 'Informe o status de moderação: approved ou rejected.',
+        });
+        return;
+      }
+      const nowMs = Date.now();
+      item.approvalStatus = status;
+      item.reviewedAt = nowMs;
+      if (typeof body.note === 'string' && body.note.trim()) {
+        item.moderationNote = body.note.trim().slice(0, 200);
+      } else if (status === 'approved') {
+        delete item.moderationNote;
+      }
+      item.updatedAt = nowMs;
+      saveStore();
+      emitWorkspaceRefresh(modelId, true);
+      res.json({ ok: true, item });
+    }
+  );
+
+  app.post('/api/super-admin/models', requireSuperAdmin, (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const displayName =
+      typeof body.displayName === 'string'
+        ? body.displayName.trim().slice(0, 80)
+        : '';
+    const loginUsername = sanitizeLoginUsername(body.loginUsername);
+    const password = typeof body.password === 'string' ? body.password : '';
+    const rawSlug =
+      typeof body.slug === 'string' && body.slug.trim()
+        ? body.slug
+        : displayName;
+    const baseSlug = sanitizeSlug(rawSlug, 'modelo');
+
+    if (!displayName || displayName.length < 2) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe o nome artístico da modelo (mínimo 2 caracteres).',
+      });
+      return;
+    }
+    if (!loginUsername || loginUsername.length < 3) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe um login ou e-mail válido (mínimo 3 caracteres).',
+      });
+      return;
+    }
+    if (!password || password.length < 6) {
+      res.status(400).json({
+        ok: false,
+        error: 'A senha exclusiva da modelo deve ter pelo menos 6 caracteres.',
+      });
+      return;
+    }
+
+    const store = getStore();
+    const existingLogin = Object.values(store.models).find(
+      (m) => m.loginUsername.toLowerCase() === loginUsername
+    );
+    if (existingLogin) {
+      res.status(409).json({
+        ok: false,
+        error: `O login "${loginUsername}" já está cadastrado para outra modelo.`,
+      });
+      return;
+    }
+
+    let finalSlug = baseSlug;
+    let suffix = 2;
+    while (
+      Object.values(store.models).some((m) => m.slug === finalSlug)
+    ) {
+      finalSlug = `${baseSlug}-${suffix++}`;
+    }
+
+    const id = sanitizeId(
+      `model_${finalSlug.replace(/-/g, '_')}_${Date.now().toString(36)}`
+    );
+    const { salt, hash } = hashPassword(password);
+    const nowIso = new Date().toISOString();
+
+    const explicitThemeColor = sanitizeAdminThemeColor(body.adminThemeColor);
+    const adminThemeColor =
+      explicitThemeColor || pickNextDistinctThemeColor(Object.values(store.models));
+
+    const account: StoredModelAccount = {
+      id,
+      slug: finalSlug,
+      displayName,
+      loginUsername,
+      passwordSalt: salt,
+      passwordHash: hash,
+      tokenVersion: 1,
+      isPrimary: false,
+      active: body.active !== false,
+      adminThemeColor,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    const rawPlanPrices =
+      body.planPrices && typeof body.planPrices === 'object'
+        ? (body.planPrices as Record<string, unknown>)
+        : null;
+    const planPrices: DefaultPlanPricesInput | undefined = rawPlanPrices
+      ? {
+          express10Cents:
+            typeof rawPlanPrices.express10Cents === 'number'
+              ? rawPlanPrices.express10Cents
+              : undefined,
+          private20Cents:
+            typeof rawPlanPrices.private20Cents === 'number'
+              ? rawPlanPrices.private20Cents
+              : undefined,
+          vip45Cents:
+            typeof rawPlanPrices.vip45Cents === 'number'
+              ? rawPlanPrices.vip45Cents
+              : undefined,
+        }
+      : undefined;
+
+    store.models[id] = account;
+    store.workspaces[id] = buildDefaultWorkspace(account, {
+      studioBrand:
+        typeof body.studioBrand === 'string'
+          ? body.studioBrand.trim().slice(0, 60)
+          : undefined,
+      modelBio:
+        typeof body.modelBio === 'string'
+          ? body.modelBio.trim().slice(0, 300)
+          : undefined,
+      basicInfo: body.basicInfo
+        ? sanitizeModelBasicInfo(body.basicInfo)
+        : undefined,
+      headline:
+        typeof body.headline === 'string'
+          ? body.headline.trim().slice(0, 140)
+          : undefined,
+      heroTitle:
+        typeof body.heroTitle === 'string'
+          ? body.heroTitle.trim().slice(0, 120)
+          : undefined,
+      heroSubtitle:
+        typeof body.heroSubtitle === 'string'
+          ? body.heroSubtitle.trim().slice(0, 300)
+          : undefined,
+      groupButtonLabel:
+        typeof body.groupButtonLabel === 'string'
+          ? body.groupButtonLabel.trim().slice(0, 60)
+          : undefined,
+      privateButtonLabel:
+        typeof body.privateButtonLabel === 'string'
+          ? body.privateButtonLabel.trim().slice(0, 60)
+          : undefined,
+      avatarUrl:
+        typeof body.avatarUrl === 'string' ? body.avatarUrl : undefined,
+      heroImageUrl:
+        typeof body.heroImageUrl === 'string' ? body.heroImageUrl : undefined,
+      loungeImageUrl:
+        typeof body.loungeImageUrl === 'string'
+          ? body.loungeImageUrl
+          : undefined,
+      ratePerMinuteCents:
+        typeof body.ratePerMinuteCents === 'number'
+          ? body.ratePerMinuteCents
+          : undefined,
+      planPrices,
+    });
+
+    saveStore();
+    emitWorkspaceRefresh(id, true);
+
+    res.status(201).json({
+      ok: true,
+      model: serializeModelSummary(account),
+    });
+  });
+
+  app.patch('/api/super-admin/models/:modelId', requireSuperAdmin, (req, res) => {
+    const modelId = sanitizeId(req.params.modelId);
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      return;
+    }
+
+    const store = getStore();
+    const { model, workspace } = ctx;
+    const body = req.body as Record<string, unknown>;
+
+    if (typeof body.displayName === 'string' && body.displayName.trim()) {
+      const nextName = body.displayName.trim().slice(0, 80);
+      model.displayName = nextName;
+      workspace.studioConfig.modelName = nextName;
+      workspace.studioState.modelName = nextName;
+    }
+
+    if (typeof body.loginUsername === 'string' && body.loginUsername.trim()) {
+      const nextLogin = sanitizeLoginUsername(body.loginUsername);
+      if (nextLogin.length < 3) {
+        res.status(400).json({
+          ok: false,
+          error: 'Login inválido (mínimo 3 caracteres).',
+        });
+        return;
+      }
+      const conflict = Object.values(store.models).find(
+        (m) => m.id !== model.id && m.loginUsername.toLowerCase() === nextLogin
+      );
+      if (conflict) {
+        res.status(409).json({
+          ok: false,
+          error: `O login "${nextLogin}" já pertence a outra modelo.`,
+        });
+        return;
+      }
+      model.loginUsername = nextLogin;
+    }
+
+    if (typeof body.newPassword === 'string' && body.newPassword.length > 0) {
+      if (body.newPassword.length < 6) {
+        res.status(400).json({
+          ok: false,
+          error: 'A nova senha deve ter pelo menos 6 caracteres.',
+        });
+        return;
+      }
+      const { salt, hash } = hashPassword(body.newPassword);
+      model.passwordSalt = salt;
+      model.passwordHash = hash;
+      model.tokenVersion += 1;
+    }
+
+    if (typeof body.active === 'boolean') {
+      if (!body.active && model.isPrimary) {
+        res.status(400).json({
+          ok: false,
+          error: 'Não é possível desativar a modelo principal do estúdio.',
+        });
+        return;
+      }
+      model.active = body.active;
+      if (!body.active) {
+        model.tokenVersion += 1;
+      }
+    }
+
+    if (typeof body.studioBrand === 'string' && body.studioBrand.trim()) {
+      workspace.studioConfig.studioBrand = body.studioBrand.trim().slice(0, 60);
+    }
+
+    const updatedTheme = sanitizeAdminThemeColor(body.adminThemeColor);
+    if (updatedTheme) {
+      model.adminThemeColor = updatedTheme;
+    }
+
+    if (typeof body.avatarUrl === 'string') {
+      workspace.studioConfig.modelAvatarUrl = sanitizeMediaUrl(body.avatarUrl);
+    }
+
+    if (typeof body.heroImageUrl === 'string') {
+      workspace.studioConfig.heroImageUrl = sanitizeMediaUrl(body.heroImageUrl);
+    }
+
+    if (typeof body.loungeImageUrl === 'string') {
+      workspace.studioConfig.loungeImageUrl = sanitizeMediaUrl(body.loungeImageUrl);
+    }
+
+    if (typeof body.modelBio === 'string') {
+      workspace.studioConfig.modelBio = body.modelBio.trim().slice(0, 300);
+    }
+
+    if (body.basicInfo && typeof body.basicInfo === 'object') {
+      workspace.studioConfig.basicInfo = sanitizeModelBasicInfo(body.basicInfo);
+    }
+
+    if (typeof body.heroTitle === 'string' && body.heroTitle.trim()) {
+      workspace.studioConfig.heroTitle = body.heroTitle.trim().slice(0, 120);
+    }
+
+    if (typeof body.heroSubtitle === 'string' && body.heroSubtitle.trim()) {
+      workspace.studioConfig.heroSubtitle = body.heroSubtitle.trim().slice(0, 300);
+    }
+
+    if (typeof body.headline === 'string' && body.headline.trim()) {
+      const cleanHeadline = body.headline.trim().slice(0, 160);
+      workspace.studioConfig.headline = cleanHeadline;
+      workspace.studioState.headline = cleanHeadline.slice(0, 140);
+    }
+
+    if (
+      typeof body.groupButtonLabel === 'string' &&
+      body.groupButtonLabel.trim()
+    ) {
+      workspace.studioConfig.groupButtonLabel = body.groupButtonLabel
+        .trim()
+        .slice(0, 60);
+    }
+
+    if (
+      typeof body.privateButtonLabel === 'string' &&
+      body.privateButtonLabel.trim()
+    ) {
+      workspace.studioConfig.privateButtonLabel = body.privateButtonLabel
+        .trim()
+        .slice(0, 60);
+    }
+
+    if (
+      typeof body.ratePerMinuteCents === 'number' &&
+      Number.isFinite(body.ratePerMinuteCents)
+    ) {
+      const prevRate = workspace.studioConfig.ratePerMinuteCents || 1500;
+      const nextRate = Math.max(
+        100,
+        Math.min(1000000, Math.round(body.ratePerMinuteCents))
+      );
+      workspace.studioConfig.ratePerMinuteCents = nextRate;
+      if (body.recalculatePlans === true && prevRate !== nextRate) {
+        workspace.callPlans = rescalePlansForRate(
+          workspace.callPlans,
+          prevRate,
+          nextRate
+        );
+      }
+    }
+
+    if (
+      typeof body.privateAlbumPriceCents === 'number' &&
+      Number.isFinite(body.privateAlbumPriceCents)
+    ) {
+      const nextAlbumPrice = Math.max(
+        500,
+        Math.min(500000, Math.round(body.privateAlbumPriceCents))
+      );
+      workspace.privateAlbumPriceCents = nextAlbumPrice;
+      workspace.studioConfig.privateAlbumPriceCents = nextAlbumPrice;
+    }
+
+    model.updatedAt = new Date().toISOString();
+    workspace.studioConfig.updatedAt = Date.now();
+    workspace.studioState.updatedAt = Date.now();
+    saveStore();
+    emitWorkspaceRefresh(model.id, true);
+
+    res.json({ ok: true, model: serializeModelSummary(model) });
+  });
+
+  app.delete('/api/super-admin/models/:modelId', requireSuperAdmin, (req, res) => {
+    const modelId = sanitizeId(req.params.modelId);
+    const store = getStore();
+    const model = store.models[modelId];
+    if (!model) {
+      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      return;
+    }
+    if (model.isPrimary) {
+      res.status(400).json({
+        ok: false,
+        error: 'A modelo principal não pode ser removida.',
+      });
+      return;
+    }
+
+    delete store.models[modelId];
+    delete store.workspaces[modelId];
+    roomParticipantsByModel.delete(modelId);
+    visitorQueueByModel.delete(modelId);
+    authoritativeQueueByModel.delete(modelId);
+    hasAuthoritativeQueueByModel.delete(modelId);
+    activeCallEstimateByModel.delete(modelId);
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true });
+  });
+
+  // ============================================================================
+  // MODEL-SCOPED WORKSPACE ROUTES (Strictly isolated per modelId)
+  // ============================================================================
+  app.get('/api/model/workspace', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Estúdio da modelo não encontrado.' });
+      return;
+    }
+    const { model, workspace } = ctx;
+    const actorUid = getModelActorUid(modelId);
+
+    const modelSelfProfile = {
+      uid: actorUid,
+      displayName: workspace.studioConfig.modelName || model.displayName,
+      photoUrl: workspace.studioConfig.modelAvatarUrl || '',
+      role: 'model' as const,
+      accessStatus: 'vip' as const,
+      isOnline: true,
+      notes: workspace.studioConfig.modelBio || '',
+      createdAt: Date.parse(model.createdAt) || Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    const visitorProfiles = Object.values(workspace.visitorProfiles);
+
+    res.json({
+      ok: true,
+      modelId,
+      model: serializeModelSummary(model),
+      myProfile: modelSelfProfile,
+      modelProfile: modelSelfProfile,
+      allProfiles: [modelSelfProfile, ...visitorProfiles],
+      studioState: workspace.studioState,
+      studioConfig: workspace.studioConfig,
+      galleryItems: [...workspace.galleryItems].sort(
+        (a, b) => a.sortOrder - b.sortOrder
+      ),
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+      privateAlbumItems: [...(workspace.privateAlbumItems || [])].sort(
+        (a, b) => a.sortOrder - b.sortOrder
+      ),
+      callPlans: [...workspace.callPlans].sort(
+        (a, b) => a.sortOrder - b.sortOrder
+      ),
+      callQueue: [...workspace.callQueue].sort(
+        (a, b) => b.createdAt - a.createdAt
+      ),
+      callMessages: [...workspace.callMessages].sort(
+        (a, b) => a.createdAt - b.createdAt
+      ),
+      callHistory: [...workspace.callHistory].sort(
+        (a, b) => b.endedAt - a.endedAt
+      ),
+      interestMessages: [...workspace.interestMessages].sort(
+        (a, b) => b.createdAt - a.createdAt
+      ),
+      pixCharges: [...(workspace.pixCharges || [])]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 50)
+        .map(serializePixChargeForClient),
+    });
+  });
+
+  app.patch('/api/model/studio-state', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+      return;
+    }
+    const { workspace } = ctx;
+    const patch = (req.body || {}) as Record<string, unknown>;
+    const next = workspace.studioState;
+
+    if (typeof patch.modelName === 'string' && patch.modelName.trim()) {
+      next.modelName = patch.modelName.trim().slice(0, 80);
+    }
+    if (typeof patch.isLive === 'boolean') next.isLive = patch.isLive;
+    if (
+      typeof patch.callMode === 'string' &&
+      ['open', 'queue_only', 'paused'].includes(patch.callMode)
+    ) {
+      next.callMode = patch.callMode as 'open' | 'queue_only' | 'paused';
+    }
+    if (typeof patch.headline === 'string' && patch.headline.trim()) {
+      next.headline = patch.headline.trim().slice(0, 140);
+    }
+    if (typeof patch.activeCallId === 'string') {
+      next.activeCallId = patch.activeCallId.slice(0, 128);
+    }
+    if (typeof patch.activeCallUserId === 'string') {
+      next.activeCallUserId = patch.activeCallUserId.slice(0, 128);
+    }
+    if (typeof patch.activeCallUserName === 'string') {
+      next.activeCallUserName = patch.activeCallUserName.slice(0, 80);
+    }
+    if (typeof patch.autoScheduleEnabled === 'boolean') {
+      next.autoScheduleEnabled = patch.autoScheduleEnabled;
+    }
+    if (typeof patch.scheduleStartTime === 'string') {
+      next.scheduleStartTime = patch.scheduleStartTime.slice(0, 5);
+    }
+    if (typeof patch.scheduleEndTime === 'string') {
+      next.scheduleEndTime = patch.scheduleEndTime.slice(0, 5);
+    }
+    if (typeof patch.scheduleDays === 'string') {
+      next.scheduleDays = patch.scheduleDays.slice(0, 20);
+    }
+    if (typeof patch.scheduleTimezone === 'string') {
+      next.scheduleTimezone = patch.scheduleTimezone.slice(0, 60);
+    }
+    if (Array.isArray(patch.schedulePeriods)) {
+      next.schedulePeriods = patch.schedulePeriods.slice(0, 14);
+    }
+    if (Array.isArray(patch.holidayDates)) {
+      next.holidayDates = patch.holidayDates.slice(0, 60);
+    }
+    if (Array.isArray(patch.dailyPausePeriods)) {
+      next.dailyPausePeriods = patch.dailyPausePeriods
+        .slice(0, 14)
+        .filter((item): item is Record<string, unknown> =>
+          Boolean(item && typeof item === 'object')
+        )
+        .map((item, idx) => ({
+          id:
+            typeof item.id === 'string' && item.id.trim()
+              ? item.id.trim().slice(0, 64)
+              : `pausa_${idx + 1}`,
+          ...(typeof item.label === 'string' && item.label.trim()
+            ? { label: item.label.trim().slice(0, 40) }
+            : {}),
+          startTime:
+            typeof item.startTime === 'string'
+              ? item.startTime.slice(0, 5)
+              : '12:00',
+          endTime:
+            typeof item.endTime === 'string'
+              ? item.endTime.slice(0, 5)
+              : '13:00',
+          days:
+            typeof item.days === 'string'
+              ? item.days.slice(0, 20)
+              : '0,1,2,3,4,5,6',
+          enabled: item.enabled !== false,
+        }));
+    }
+    if (Array.isArray(patch.weeklyBlockedDays)) {
+      next.weeklyBlockedDays = Array.from(
+        new Set(
+          patch.weeklyBlockedDays
+            .map((n) => Number(n))
+            .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+        )
+      ).sort((a, b) => a - b);
+    }
+    if (typeof patch.pauseWarningEnabled === 'boolean') {
+      next.pauseWarningEnabled = patch.pauseWarningEnabled;
+    }
+    if (
+      typeof patch.pauseWarningMinutes === 'number' &&
+      Number.isFinite(patch.pauseWarningMinutes)
+    ) {
+      next.pauseWarningMinutes = Math.max(
+        1,
+        Math.min(30, Math.round(patch.pauseWarningMinutes))
+      );
+    }
+    if (typeof patch.pauseWarningMessage === 'string') {
+      next.pauseWarningMessage = patch.pauseWarningMessage.trim().slice(0, 160);
+    }
+    if (typeof patch.dndActive === 'boolean') next.dndActive = patch.dndActive;
+    if (typeof patch.dndUntilMs === 'number') {
+      next.dndUntilMs = Math.max(0, Math.round(patch.dndUntilMs));
+    }
+    if (typeof patch.dndScheduleEnabled === 'boolean') {
+      next.dndScheduleEnabled = patch.dndScheduleEnabled;
+    }
+    if (typeof patch.dndStartTime === 'string') {
+      next.dndStartTime = patch.dndStartTime.slice(0, 5);
+    }
+    if (typeof patch.dndEndTime === 'string') {
+      next.dndEndTime = patch.dndEndTime.slice(0, 5);
+    }
+    if (typeof patch.tipGoalEnabled === 'boolean') {
+      next.tipGoalEnabled = patch.tipGoalEnabled;
+    }
+    if (typeof patch.tipGoalTitle === 'string') {
+      next.tipGoalTitle =
+        patch.tipGoalTitle.trim().slice(0, 80) || 'Meta Especial do Estúdio';
+    }
+    if (typeof patch.tipGoalDescription === 'string') {
+      next.tipGoalDescription = patch.tipGoalDescription.trim().slice(0, 300);
+    }
+    if (
+      typeof patch.tipGoalTargetCents === 'number' &&
+      Number.isFinite(patch.tipGoalTargetCents)
+    ) {
+      next.tipGoalTargetCents = Math.max(
+        500,
+        Math.min(100000000, Math.round(patch.tipGoalTargetCents))
+      );
+    }
+    if (
+      typeof patch.tipGoalCurrentCents === 'number' &&
+      Number.isFinite(patch.tipGoalCurrentCents)
+    ) {
+      next.tipGoalCurrentCents = Math.max(
+        0,
+        Math.min(100000000, Math.round(patch.tipGoalCurrentCents))
+      );
+    }
+    if (typeof patch.tipGoalRewardText === 'string') {
+      next.tipGoalRewardText = patch.tipGoalRewardText.trim().slice(0, 140);
+    }
+    if (
+      typeof patch.tipGoalContributorsCount === 'number' &&
+      Number.isFinite(patch.tipGoalContributorsCount)
+    ) {
+      next.tipGoalContributorsCount = Math.max(
+        0,
+        Math.min(1000000, Math.round(patch.tipGoalContributorsCount))
+      );
+    }
+    if (typeof patch.tipGoalLastTipName === 'string') {
+      next.tipGoalLastTipName = patch.tipGoalLastTipName.trim().slice(0, 60);
+    }
+    if (
+      typeof patch.tipGoalLastTipAmountCents === 'number' &&
+      Number.isFinite(patch.tipGoalLastTipAmountCents)
+    ) {
+      next.tipGoalLastTipAmountCents = Math.max(
+        0,
+        Math.min(100000000, Math.round(patch.tipGoalLastTipAmountCents))
+      );
+    }
+
+    next.updatedAt = Date.now();
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true, studioState: next });
+  });
+
+  app.put('/api/model/studio-config', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+      return;
+    }
+    const { model, workspace } = ctx;
+    const patch = (req.body || {}) as Record<string, unknown>;
+    const cfg = workspace.studioConfig;
+
+    if (typeof patch.studioBrand === 'string' && patch.studioBrand.trim()) {
+      cfg.studioBrand = patch.studioBrand.trim().slice(0, 60);
+    }
+    if (typeof patch.modelName === 'string' && patch.modelName.trim()) {
+      cfg.modelName = patch.modelName.trim().slice(0, 80);
+      model.displayName = cfg.modelName;
+      workspace.studioState.modelName = cfg.modelName;
+    }
+    if (typeof patch.modelAvatarUrl === 'string') {
+      cfg.modelAvatarUrl = sanitizeMediaUrl(patch.modelAvatarUrl);
+    }
+    if (typeof patch.heroImageUrl === 'string') {
+      cfg.heroImageUrl = sanitizeMediaUrl(patch.heroImageUrl);
+    }
+    if (typeof patch.loungeImageUrl === 'string') {
+      cfg.loungeImageUrl = sanitizeMediaUrl(patch.loungeImageUrl);
+    }
+    if (typeof patch.modelBio === 'string') {
+      cfg.modelBio = patch.modelBio.trim().slice(0, 300);
+    }
+    if (patch.basicInfo && typeof patch.basicInfo === 'object') {
+      cfg.basicInfo = sanitizeModelBasicInfo(patch.basicInfo);
+    }
+    if (typeof patch.heroTitle === 'string' && patch.heroTitle.trim()) {
+      cfg.heroTitle = patch.heroTitle.trim().slice(0, 120);
+    }
+    if (typeof patch.heroSubtitle === 'string' && patch.heroSubtitle.trim()) {
+      cfg.heroSubtitle = patch.heroSubtitle.trim().slice(0, 300);
+    }
+    if (typeof patch.headline === 'string' && patch.headline.trim()) {
+      cfg.headline = patch.headline.trim().slice(0, 160);
+      workspace.studioState.headline = cfg.headline.slice(0, 140);
+    }
+    if (
+      typeof patch.groupButtonLabel === 'string' &&
+      patch.groupButtonLabel.trim()
+    ) {
+      cfg.groupButtonLabel = patch.groupButtonLabel.trim().slice(0, 60);
+    }
+    if (
+      typeof patch.privateButtonLabel === 'string' &&
+      patch.privateButtonLabel.trim()
+    ) {
+      cfg.privateButtonLabel = patch.privateButtonLabel.trim().slice(0, 60);
+    }
+    if (
+      typeof patch.ratePerMinuteCents === 'number' &&
+      Number.isFinite(patch.ratePerMinuteCents)
+    ) {
+      const prevRate = cfg.ratePerMinuteCents || 1500;
+      const nextRate = Math.max(
+        100,
+        Math.min(1000000, Math.round(patch.ratePerMinuteCents))
+      );
+      cfg.ratePerMinuteCents = nextRate;
+      if (patch.recalculatePlans === true && prevRate !== nextRate) {
+        workspace.callPlans = rescalePlansForRate(
+          workspace.callPlans,
+          prevRate,
+          nextRate
+        );
+      }
+    }
+
+    if (
+      typeof patch.privateAlbumPriceCents === 'number' &&
+      Number.isFinite(patch.privateAlbumPriceCents)
+    ) {
+      const nextAlbumPrice = Math.max(
+        500,
+        Math.min(500000, Math.round(patch.privateAlbumPriceCents))
+      );
+      workspace.privateAlbumPriceCents = nextAlbumPrice;
+      cfg.privateAlbumPriceCents = nextAlbumPrice;
+    }
+
+    const requestedKeyType =
+      typeof patch.pixKeyType === 'string' &&
+      ['cpf', 'cnpj', 'email', 'phone', 'evp'].includes(patch.pixKeyType)
+        ? (patch.pixKeyType as PixKeyType)
+        : cfg.pixKeyType;
+    if (requestedKeyType) {
+      cfg.pixKeyType = requestedKeyType;
+    }
+    if (typeof patch.pixKey === 'string') {
+      const rawPixKey = patch.pixKey.trim();
+      if (!rawPixKey) {
+        cfg.pixKey = '';
+      } else {
+        if (!isValidPixKey(rawPixKey, cfg.pixKeyType)) {
+          res.status(400).json({
+            ok: false,
+            error:
+              'Chave PIX inválida para o tipo selecionado. Verifique CPF (11 dígitos), CNPJ (14 dígitos), E-mail, Telefone com DDD ou Chave Aleatória (EVP).',
+          });
+          return;
+        }
+        const normalized = normalizePixKey(rawPixKey, cfg.pixKeyType);
+        cfg.pixKey = normalized.key;
+        cfg.pixKeyType = normalized.keyType;
+      }
+    }
+    if (typeof patch.pixMerchantName === 'string') {
+      cfg.pixMerchantName = formatEmvMerchantName(
+        patch.pixMerchantName || cfg.modelName
+      );
+    }
+    if (typeof patch.pixMerchantCity === 'string') {
+      cfg.pixMerchantCity = formatEmvMerchantCity(
+        patch.pixMerchantCity || 'SAO PAULO'
+      );
+    }
+
+    cfg.updatedAt = Date.now();
+    workspace.studioState.updatedAt = Date.now();
+    model.updatedAt = new Date().toISOString();
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true, studioConfig: cfg });
+  });
+
+  app.post('/api/model/gallery', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const { workspace } = ctx;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const title =
+      typeof body.title === 'string' ? body.title.trim().slice(0, 80) : '';
+    const caption =
+      typeof body.caption === 'string' ? body.caption.trim().slice(0, 240) : '';
+    const src = sanitizeMediaUrl(body.src);
+    if (!title || !caption || !src) {
+      res.status(400).json({ ok: false, error: 'Campos obrigatórios inválidos.' });
+      return;
+    }
+    const category =
+      typeof body.category === 'string' &&
+      ['editorial', 'portraits', 'studio'].includes(body.category)
+        ? (body.category as 'editorial' | 'portraits' | 'studio')
+        : 'editorial';
+    const mediaType = body.mediaType === 'video' ? 'video' : 'photo';
+    const specs =
+      typeof body.specs === 'string' && body.specs.trim()
+        ? body.specs.trim().slice(0, 80)
+        : 'Estúdio Oficial';
+    const alt =
+      typeof body.alt === 'string' && body.alt.trim()
+        ? body.alt.trim().slice(0, 160)
+        : `${title} · Galeria do Estúdio`;
+    const sortOrder = Math.max(
+      0,
+      Math.min(100, Math.round(Number(body.sortOrder) || 1))
+    );
+    const active = body.active !== false;
+    const nowMs = Date.now();
+    const isSuperAdminOperator = Boolean(req.isSuperAdmin);
+
+    const itemId =
+      typeof body.id === 'string' && body.id.trim()
+        ? sanitizeId(body.id)
+        : `gal_${nowMs}`;
+    const existingIdx = workspace.galleryItems.findIndex((g) => g.id === itemId);
+
+    if (existingIdx >= 0) {
+      const prev = workspace.galleryItems[existingIdx];
+      const contentModified =
+        prev.src !== src ||
+        prev.title !== title ||
+        prev.caption !== caption ||
+        (prev.mediaType || 'photo') !== mediaType;
+
+      let nextApproval = prev.approvalStatus || 'approved';
+      let nextModerationNote = prev.moderationNote;
+      let nextReviewedAt = prev.reviewedAt;
+
+      if (isSuperAdminOperator) {
+        if (
+          body.approvalStatus === 'approved' ||
+          body.approvalStatus === 'pending' ||
+          body.approvalStatus === 'rejected'
+        ) {
+          nextApproval = body.approvalStatus;
+          nextReviewedAt = nowMs;
+        }
+      } else if (contentModified) {
+        // Mandatory admin approval whenever a model submits/changes public media
+        nextApproval = 'pending';
+        nextModerationNote = undefined;
+        nextReviewedAt = undefined;
+      }
+
+      workspace.galleryItems[existingIdx] = {
+        ...prev,
+        title,
+        caption,
+        category,
+        mediaType,
+        specs,
+        src,
+        alt,
+        sortOrder,
+        active,
+        approvalStatus: nextApproval,
+        ...(nextModerationNote ? { moderationNote: nextModerationNote } : {}),
+        ...(nextReviewedAt ? { reviewedAt: nextReviewedAt } : {}),
+        updatedAt: nowMs,
+      };
+      if (!nextModerationNote) {
+        delete workspace.galleryItems[existingIdx].moderationNote;
+      }
+      if (!nextReviewedAt) {
+        delete workspace.galleryItems[existingIdx].reviewedAt;
+      }
+    } else {
+      const approvalStatus = isSuperAdminOperator ? 'approved' : 'pending';
+      workspace.galleryItems.push({
+        id: itemId,
+        title,
+        caption,
+        category,
+        mediaType,
+        specs,
+        src,
+        alt,
+        sortOrder,
+        active,
+        approvalStatus,
+        ...(isSuperAdminOperator ? { reviewedAt: nowMs } : {}),
+        createdAt: nowMs,
+        updatedAt: nowMs,
+      });
+    }
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, isSuperAdminOperator || existingIdx < 0);
+    res.json({
+      ok: true,
+      id: itemId,
+      approvalStatus:
+        existingIdx >= 0
+          ? workspace.galleryItems[existingIdx].approvalStatus
+          : isSuperAdminOperator
+            ? 'approved'
+            : 'pending',
+    });
+  });
+
+  app.delete('/api/model/gallery/:itemId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const itemId = sanitizeId(req.params.itemId);
+    ctx.workspace.galleryItems = ctx.workspace.galleryItems.filter(
+      (g) => g.id !== itemId
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/model/gallery/restore', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    ctx.workspace.galleryItems = buildDefaultGallery(
+      ctx.workspace.studioConfig.modelName,
+      Date.now()
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true });
+  });
+
+  // ============================================================================
+  // PRIVATE ALBUM (PASSWORD-PROTECTED PHOTOS & VIDEOS PER MODEL)
+  // ============================================================================
+  app.put('/api/model/private-album/settings', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const { workspace } = ctx;
+    const body = (req.body || {}) as {
+      enabled?: unknown;
+      password?: unknown;
+      hint?: unknown;
+      priceCents?: unknown;
+    };
+
+    if (typeof body.enabled === 'boolean') {
+      workspace.privateAlbumEnabled = body.enabled;
+    }
+    if (typeof body.hint === 'string') {
+      workspace.privateAlbumPasswordHint = body.hint.trim().slice(0, 120);
+    }
+    if (typeof body.priceCents === 'number' && Number.isFinite(body.priceCents)) {
+      const nextAlbumPrice = Math.max(
+        500,
+        Math.min(500000, Math.round(body.priceCents))
+      );
+      workspace.privateAlbumPriceCents = nextAlbumPrice;
+      workspace.studioConfig.privateAlbumPriceCents = nextAlbumPrice;
+    }
+    if (typeof body.password === 'string' && body.password.trim().length > 0) {
+      const cleanPass = body.password.trim();
+      if (cleanPass.length < 4 || cleanPass.length > 64) {
+        res.status(400).json({
+          ok: false,
+          error: 'A senha do álbum privativo deve ter entre 4 e 64 caracteres.',
+        });
+        return;
+      }
+      const { salt, hash } = hashPassword(cleanPass);
+      workspace.privateAlbumPasswordSalt = salt;
+      workspace.privateAlbumPasswordHash = hash;
+      workspace.privateAlbumTokenVersion =
+        (workspace.privateAlbumTokenVersion || 1) + 1;
+    }
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({
+      ok: true,
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+    });
+  });
+
+  app.post('/api/model/private-album/items', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const { workspace } = ctx;
+    const body = (req.body || {}) as Record<string, unknown>;
+
+    const title =
+      typeof body.title === 'string' ? body.title.trim().slice(0, 80) : '';
+    const caption =
+      typeof body.caption === 'string' ? body.caption.trim().slice(0, 240) : '';
+    const src = sanitizeMediaUrl(body.src);
+    const thumbnailUrl = sanitizeMediaUrl(body.thumbnailUrl);
+    const mediaType = body.mediaType === 'video' ? 'video' : 'photo';
+
+    if (!title || !src) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe um título e envie o arquivo ou link válido.',
+      });
+      return;
+    }
+
+    const sortOrder = Math.max(
+      0,
+      Math.min(100, Math.round(Number(body.sortOrder) || 1))
+    );
+    const active = body.active !== false;
+    const nowMs = Date.now();
+    const itemId =
+      typeof body.id === 'string' && body.id.trim()
+        ? sanitizeId(body.id)
+        : `priv_${nowMs}`;
+
+    if (!workspace.privateAlbumItems) {
+      workspace.privateAlbumItems = [];
+    }
+
+    const idx = workspace.privateAlbumItems.findIndex((i) => i.id === itemId);
+    const nextItem: StoredPrivateAlbumItem = {
+      id: itemId,
+      title,
+      caption,
+      mediaType,
+      src,
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
+      sortOrder,
+      active,
+      createdAt: idx >= 0 ? workspace.privateAlbumItems[idx].createdAt : nowMs,
+      updatedAt: nowMs,
+    };
+
+    if (idx >= 0) {
+      workspace.privateAlbumItems[idx] = nextItem;
+    } else {
+      workspace.privateAlbumItems.push(nextItem);
+    }
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({
+      ok: true,
+      id: itemId,
+      item: nextItem,
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+    });
+  });
+
+  app.delete('/api/model/private-album/items/:itemId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const itemId = sanitizeId(req.params.itemId);
+    ctx.workspace.privateAlbumItems = (
+      ctx.workspace.privateAlbumItems || []
+    ).filter((i) => i.id !== itemId);
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({
+      ok: true,
+      privateAlbumSummary: buildPrivateAlbumSummary(ctx.workspace),
+    });
+  });
+
+  // Real-time visibility switcher: move item between Public Gallery and Private Album
+  app.post('/api/model/media/visibility', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+    const { workspace } = ctx;
+    const body = (req.body || {}) as {
+      itemId?: unknown;
+      fromVisibility?: unknown;
+      toVisibility?: unknown;
+      category?: unknown;
+    };
+    const itemId = sanitizeId(body.itemId);
+    const fromVisibility =
+      body.fromVisibility === 'public' || body.fromVisibility === 'private'
+        ? body.fromVisibility
+        : null;
+    const toVisibility =
+      body.toVisibility === 'public' || body.toVisibility === 'private'
+        ? body.toVisibility
+        : null;
+
+    if (!itemId || !fromVisibility || !toVisibility) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe itemId, fromVisibility e toVisibility válidos (public ou private).',
+      });
+      return;
+    }
+
+    if (!workspace.privateAlbumItems) {
+      workspace.privateAlbumItems = [];
+    }
+
+    if (fromVisibility === toVisibility) {
+      res.json({ ok: true, visibility: toVisibility, unchanged: true });
+      return;
+    }
+
+    const nowMs = Date.now();
+
+    if (fromVisibility === 'public' && toVisibility === 'private') {
+      const idx = workspace.galleryItems.findIndex((g) => g.id === itemId);
+      if (idx < 0) {
+        res.status(404).json({ ok: false, error: 'Mídia pública não encontrada.' });
+        return;
+      }
+      const [removed] = workspace.galleryItems.splice(idx, 1);
+      const existingPrivIdx = workspace.privateAlbumItems.findIndex(
+        (p) => p.id === removed.id
+      );
+      const nextPrivate: StoredPrivateAlbumItem = {
+        id: removed.id,
+        title: removed.title,
+        caption: removed.caption || '',
+        mediaType: removed.mediaType === 'video' ? 'video' : 'photo',
+        src: removed.src,
+        sortOrder: removed.sortOrder,
+        active: removed.active,
+        createdAt: removed.createdAt || nowMs,
+        updatedAt: nowMs,
+      };
+      if (existingPrivIdx >= 0) {
+        workspace.privateAlbumItems[existingPrivIdx] = nextPrivate;
+      } else {
+        workspace.privateAlbumItems.push(nextPrivate);
+      }
+
+      saveStore();
+      emitWorkspaceRefresh(modelId, true);
+      res.json({
+        ok: true,
+        visibility: 'private',
+        item: nextPrivate,
+        privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+      });
+      return;
+    }
+
+    // private -> public
+    const privIdx = workspace.privateAlbumItems.findIndex((p) => p.id === itemId);
+    if (privIdx < 0) {
+      res.status(404).json({ ok: false, error: 'Mídia privativa não encontrada.' });
+      return;
+    }
+    const [removedPriv] = workspace.privateAlbumItems.splice(privIdx, 1);
+    const isSuperAdminOperator = Boolean(req.isSuperAdmin);
+    const approvalStatus = isSuperAdminOperator ? 'approved' : 'pending';
+    const category =
+      typeof body.category === 'string' &&
+      ['editorial', 'portraits', 'studio'].includes(body.category)
+        ? (body.category as 'editorial' | 'portraits' | 'studio')
+        : 'editorial';
+
+    const existingPubIdx = workspace.galleryItems.findIndex(
+      (g) => g.id === removedPriv.id
+    );
+    const nextPublic = {
+      id: removedPriv.id,
+      title: removedPriv.title,
+      caption: removedPriv.caption || removedPriv.title,
+      category,
+      mediaType: (removedPriv.mediaType === 'video' ? 'video' : 'photo') as
+        | 'photo'
+        | 'video',
+      specs: isSuperAdminOperator ? 'Publicado pelo Administrador' : 'Acervo da Modelo',
+      src: removedPriv.src,
+      alt: removedPriv.title,
+      sortOrder: removedPriv.sortOrder,
+      active: removedPriv.active,
+      approvalStatus: approvalStatus as 'approved' | 'pending',
+      ...(isSuperAdminOperator ? { reviewedAt: nowMs } : {}),
+      createdAt: removedPriv.createdAt || nowMs,
+      updatedAt: nowMs,
+    };
+
+    if (existingPubIdx >= 0) {
+      workspace.galleryItems[existingPubIdx] = nextPublic;
+    } else {
+      workspace.galleryItems.push(nextPublic);
+    }
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({
+      ok: true,
+      visibility: 'public',
+      approvalStatus,
+      item: nextPublic,
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace),
+    });
+  });
+
+  app.post('/api/public/models/:modelId/private-album/unlock', async (req, res) => {
+    const requestedId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(requestedId);
+    if (!ctx || !ctx.model.active) {
+      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      return;
+    }
+    const { workspace } = ctx;
+    if (workspace.privateAlbumEnabled === false) {
+      res.status(403).json({
+        ok: false,
+        error: 'O álbum privativo desta modelo está temporariamente desativado.',
+      });
+      return;
+    }
+
+    const viewer = await resolveOptionalFirebaseUser(req);
+    const alreadyPaid = hasVisitorPaidPrivateAlbum(workspace, viewer?.uid);
+
+    if (!alreadyPaid) {
+      if (
+        !workspace.privateAlbumPasswordHash ||
+        !workspace.privateAlbumPasswordSalt
+      ) {
+        res.status(402).json({
+          ok: false,
+          error:
+            'Realize o pagamento para liberar fotos e vídeos privados desta modelo.',
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as { password?: unknown };
+      const password =
+        typeof body.password === 'string' ? body.password.trim() : '';
+      if (!password) {
+        res.status(400).json({
+          ok: false,
+          error: 'Realize o pagamento ou digite a senha VIP do álbum privativo.',
+        });
+        return;
+      }
+
+      const valid = verifyPassword(
+        password,
+        workspace.privateAlbumPasswordSalt,
+        workspace.privateAlbumPasswordHash
+      );
+      if (!valid) {
+        res.status(401).json({
+          ok: false,
+          error: 'Senha incorreta para o álbum privativo.',
+        });
+        return;
+      }
+    }
+
+    const version = workspace.privateAlbumTokenVersion || 1;
+    const albumToken = signPrivateAlbumToken(ctx.model.id, version);
+    const items = (workspace.privateAlbumItems || [])
+      .filter((item) => item.active)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    res.json({
+      ok: true,
+      albumToken,
+      summary: buildPrivateAlbumSummary(workspace, viewer?.uid),
+      items,
+    });
+  });
+
+  app.get('/api/public/models/:modelId/private-album', async (req, res) => {
+    const requestedId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(requestedId);
+    if (!ctx || !ctx.model.active) {
+      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      return;
+    }
+    const { workspace } = ctx;
+    if (workspace.privateAlbumEnabled === false) {
+      res.status(403).json({
+        ok: false,
+        error: 'O álbum privativo está desativado.',
+      });
+      return;
+    }
+
+    const viewer = await resolveOptionalFirebaseUser(req);
+    const hasPaid = hasVisitorPaidPrivateAlbum(workspace, viewer?.uid);
+
+    const token =
+      (req.header('x-album-token') || extractBearerToken(req) || '').trim();
+    const payload = verifyPrivateAlbumToken(token);
+    const currentVersion = workspace.privateAlbumTokenVersion || 1;
+    const hasValidAlbumToken = Boolean(
+      payload &&
+        payload.modelId === ctx.model.id &&
+        payload.version === currentVersion
+    );
+
+    if (!hasPaid && !hasValidAlbumToken) {
+      res.status(401).json({
+        ok: false,
+        error:
+          'Álbum bloqueado. Pagamento necessário para visualizar fotos e vídeos privados.',
+      });
+      return;
+    }
+
+    const items = (workspace.privateAlbumItems || [])
+      .filter((item) => item.active)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    res.json({
+      ok: true,
+      summary: buildPrivateAlbumSummary(workspace, viewer?.uid),
+      items,
+    });
+  });
+
+  app.post('/api/model/plans', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const name =
+      typeof body.name === 'string' ? body.name.trim().slice(0, 60) : '';
+    const description =
+      typeof body.description === 'string'
+        ? body.description.trim().slice(0, 200)
+        : '';
+    if (!name || !description) {
+      res.status(400).json({ ok: false, error: 'Nome e descrição obrigatórios.' });
+      return;
+    }
+    const durationMinutes = Math.max(
+      1,
+      Math.min(240, Math.round(Number(body.durationMinutes) || 10))
+    );
+    const priceCents = Math.max(
+      100,
+      Math.min(100000000, Math.round(Number(body.priceCents) || 1000))
+    );
+    const sortOrder = Math.max(
+      0,
+      Math.min(100, Math.round(Number(body.sortOrder) || 1))
+    );
+    const active = body.active !== false;
+    const nowMs = Date.now();
+    const planId =
+      typeof body.id === 'string' && body.id.trim()
+        ? sanitizeId(body.id)
+        : `plan_${nowMs}`;
+
+    const idx = ctx.workspace.callPlans.findIndex((p) => p.id === planId);
+    if (idx >= 0) {
+      ctx.workspace.callPlans[idx] = {
+        ...ctx.workspace.callPlans[idx],
+        name,
+        description,
+        durationMinutes,
+        priceCents,
+        active,
+        sortOrder,
+        updatedAt: nowMs,
+      };
+    } else {
+      ctx.workspace.callPlans.push({
+        id: planId,
+        name,
+        description,
+        durationMinutes,
+        priceCents,
+        currency: 'BRL',
+        active,
+        sortOrder,
+        createdAt: nowMs,
+        updatedAt: nowMs,
+      });
+    }
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true, id: planId });
+  });
+
+  app.delete('/api/model/plans/:planId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const planId = sanitizeId(req.params.planId);
+    ctx.workspace.callPlans = ctx.workspace.callPlans.filter(
+      (p) => p.id !== planId
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, true);
+    res.json({ ok: true });
+  });
+
+  app.patch('/api/model/queue/:requestId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const requestId = sanitizeId(req.params.requestId);
+    const entry = ctx.workspace.callQueue.find((q) => q.id === requestId);
+    if (!entry) return void res.status(404).json({ ok: false });
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (
+      typeof body.status === 'string' &&
+      ['waiting', 'accepted', 'in_call', 'ended', 'rejected', 'cancelled'].includes(
+        body.status
+      )
+    ) {
+      entry.status = body.status as typeof entry.status;
+    }
+    if (
+      typeof body.paymentStatus === 'string' &&
+      ['authorized', 'captured', 'refunded'].includes(body.paymentStatus)
+    ) {
+      entry.paymentStatus = body.paymentStatus as typeof entry.paymentStatus;
+    }
+    entry.updatedAt = Date.now();
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/model/queue/:requestId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const requestId = sanitizeId(req.params.requestId);
+    ctx.workspace.callQueue = ctx.workspace.callQueue.filter(
+      (q) => q.id !== requestId
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/model/history', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const userId = sanitizeId(body.userId);
+    const callId = sanitizeId(body.callId, `call_${Date.now()}`);
+    if (!userId) return void res.status(400).json({ ok: false });
+
+    const nowMs = Date.now();
+    const id = `hist_${nowMs}_${userId.slice(0, 6)}`;
+    ctx.workspace.callHistory.push({
+      id,
+      callId,
+      userId,
+      userName:
+        typeof body.userName === 'string' && body.userName.trim()
+          ? body.userName.trim().slice(0, 80)
+          : 'Participante',
+      modelUid: getModelActorUid(modelId),
+      durationSeconds: Math.max(
+        0,
+        Math.min(86400, Math.round(Number(body.durationSeconds) || 0))
+      ),
+      amountCents: Math.max(
+        0,
+        Math.min(100000000, Math.round(Number(body.amountCents) || 0))
+      ),
+      currency: 'BRL',
+      status: 'completed',
+      ...(typeof body.planId === 'string' && body.planId
+        ? { planId: body.planId.slice(0, 128) }
+        : {}),
+      ...(typeof body.planName === 'string' && body.planName
+        ? { planName: body.planName.slice(0, 60) }
+        : {}),
+      ...(typeof body.planDurationMinutes === 'number'
+        ? {
+            planDurationMinutes: Math.max(
+              1,
+              Math.min(240, Math.round(body.planDurationMinutes))
+            ),
+          }
+        : {}),
+      endedAt: nowMs,
+      createdAt: nowMs,
+    });
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true, id });
+  });
+
+  app.patch('/api/model/history/:recordId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const recordId = sanitizeId(req.params.recordId);
+    const rec = ctx.workspace.callHistory.find((r) => r.id === recordId);
+    if (!rec) return void res.status(404).json({ ok: false });
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (typeof body.durationSeconds === 'number') {
+      rec.durationSeconds = Math.max(
+        0,
+        Math.min(86400, Math.round(body.durationSeconds))
+      );
+    }
+    if (typeof body.amountCents === 'number') {
+      rec.amountCents = Math.max(
+        0,
+        Math.min(100000000, Math.round(body.amountCents))
+      );
+    }
+    if (
+      typeof body.status === 'string' &&
+      ['completed', 'refunded'].includes(body.status)
+    ) {
+      rec.status = body.status as 'completed' | 'refunded';
+    }
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/model/history/:recordId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const recordId = sanitizeId(req.params.recordId);
+    ctx.workspace.callHistory = ctx.workspace.callHistory.filter(
+      (r) => r.id !== recordId
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.patch('/api/model/interest/:messageId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const messageId = sanitizeId(req.params.messageId);
+    const msg = ctx.workspace.interestMessages.find((m) => m.id === messageId);
+    if (!msg) return void res.status(404).json({ ok: false });
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (
+      typeof body.status === 'string' &&
+      ['unread', 'reviewed', 'contacted'].includes(body.status)
+    ) {
+      msg.status = body.status as typeof msg.status;
+      msg.updatedAt = Date.now();
+    }
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/model/interest/:messageId', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const messageId = sanitizeId(req.params.messageId);
+    ctx.workspace.interestMessages = ctx.workspace.interestMessages.filter(
+      (m) => m.id !== messageId
+    );
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.patch('/api/model/visitors/:visitorUid', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const visitorUid = sanitizeId(req.params.visitorUid);
+    if (!visitorUid) return void res.status(400).json({ ok: false });
+    const existing = ctx.workspace.visitorProfiles[visitorUid] || {
+      uid: visitorUid,
+      displayName: 'Participante',
+      photoUrl: '',
+      role: 'viewer' as const,
+      accessStatus: 'active' as const,
+      isOnline: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (typeof body.displayName === 'string' && body.displayName.trim()) {
+      existing.displayName = body.displayName.trim().slice(0, 80);
+    }
+    if (typeof body.photoUrl === 'string') {
+      existing.photoUrl = sanitizeMediaUrl(body.photoUrl);
+    }
+    if (
+      typeof body.accessStatus === 'string' &&
+      ['active', 'vip', 'muted', 'blocked'].includes(body.accessStatus)
+    ) {
+      existing.accessStatus = body.accessStatus as typeof existing.accessStatus;
+    }
+    if (typeof body.notes === 'string') {
+      existing.notes = body.notes.trim().slice(0, 300);
+    }
+    existing.updatedAt = Date.now();
+    ctx.workspace.visitorProfiles[visitorUid] = existing;
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/model/visitors/:visitorUid', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const visitorUid = sanitizeId(req.params.visitorUid);
+    delete ctx.workspace.visitorProfiles[visitorUid];
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/model/messages', requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const text = typeof body.text === 'string' ? body.text.trim().slice(0, 500) : '';
+    const callId = sanitizeId(body.callId, getModelRoomId(modelId));
+    const recipientUid = sanitizeId(body.recipientUid, getModelRoomId(modelId));
+    if (!text) return void res.status(400).json({ ok: false });
+
+    const nowMs = Date.now();
+    const id = `msg_${nowMs}_${modelId.slice(0, 6)}`;
+    ctx.workspace.callMessages.push({
+      id,
+      callId,
+      senderUid: getModelActorUid(modelId),
+      senderName: ctx.workspace.studioConfig.modelName || ctx.model.displayName,
+      senderRole: 'model',
+      recipientUid,
+      text,
+      createdAt: nowMs,
+    });
+    if (ctx.workspace.callMessages.length > 500) {
+      ctx.workspace.callMessages = ctx.workspace.callMessages.slice(-500);
+    }
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true, id });
+  });
+
+  // ============================================================================
+  // VISITOR-SCOPED ROUTES (Authenticated via Google Firebase ID Token)
+  // ============================================================================
+  app.get('/api/visitor/workspace', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const requestedModelId = sanitizeId(
+      req.query.modelId,
+      getDefaultActiveModelId()
+    );
+    const store = getStore();
+    const modelId = store.models[requestedModelId]?.active
+      ? requestedModelId
+      : getDefaultActiveModelId();
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) {
+      res.status(404).json({ ok: false, error: 'Estúdio indisponível.' });
+      return;
+    }
+
+    const { model, workspace } = ctx;
+    const nowMs = Date.now();
+    const existingVisitor = workspace.visitorProfiles[firebaseUser.uid];
+    const cleanName =
+      (firebaseUser.name || 'Participante').trim().slice(0, 80) ||
+      'Participante';
+    const cleanPhoto = sanitizeMediaUrl(firebaseUser.picture || '');
+
+    const visitorProfile = existingVisitor
+      ? {
+          ...existingVisitor,
+          displayName: existingVisitor.displayName || cleanName,
+          photoUrl: existingVisitor.photoUrl || cleanPhoto,
+          isOnline: true,
+          updatedAt: nowMs,
+        }
+      : {
+          uid: firebaseUser.uid,
+          displayName: cleanName,
+          photoUrl: cleanPhoto,
+          role: 'viewer' as const,
+          accessStatus: 'active' as const,
+          isOnline: true,
+          createdAt: nowMs,
+          updatedAt: nowMs,
+        };
+    workspace.visitorProfiles[firebaseUser.uid] = visitorProfile;
+    saveStore();
+
+    const actorUid = getModelActorUid(modelId);
+    const roomId = getModelRoomId(modelId);
+    const modelProfile = {
+      uid: actorUid,
+      displayName: workspace.studioConfig.modelName || model.displayName,
+      photoUrl: workspace.studioConfig.modelAvatarUrl || '',
+      role: 'model' as const,
+      accessStatus: 'vip' as const,
+      isOnline: Array.from(connectedPeers.values()).some(
+        (p) => p.modelId === modelId && (p.isAdmin || p.uid === actorUid)
+      ),
+      notes: workspace.studioConfig.modelBio || '',
+      createdAt: Date.parse(model.createdAt) || nowMs,
+      updatedAt: nowMs,
+    };
+
+    const hasPaidPrivateAlbum = hasVisitorPaidPrivateAlbum(
+      workspace,
+      firebaseUser.uid
+    );
+    const unlockedPrivateItems =
+      hasPaidPrivateAlbum && workspace.privateAlbumEnabled !== false
+        ? [...(workspace.privateAlbumItems || [])]
+            .filter((item) => item.active)
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+        : [];
+
+    res.json({
+      ok: true,
+      modelId,
+      myProfile: visitorProfile,
+      modelProfile,
+      studioState: workspace.studioState,
+      studioConfig: sanitizePublicStudioConfig(workspace.studioConfig),
+      galleryItems: workspace.galleryItems
+        .filter((g) => g.active && (g.approvalStatus || 'approved') === 'approved')
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+      privateAlbumSummary: buildPrivateAlbumSummary(workspace, firebaseUser.uid),
+      unlockedPrivateItems,
+      callPlans: workspace.callPlans
+        .filter((p) => p.active)
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+      callQueue: workspace.callQueue
+        .filter((q) => q.userId === firebaseUser.uid)
+        .sort((a, b) => b.createdAt - a.createdAt),
+      callHistory: workspace.callHistory
+        .filter((h) => h.userId === firebaseUser.uid)
+        .sort((a, b) => b.endedAt - a.endedAt),
+      interestMessages: workspace.interestMessages
+        .filter((m) => m.userId === firebaseUser.uid)
+        .sort((a, b) => b.createdAt - a.createdAt),
+      callMessages: workspace.callMessages
+        .filter(
+          (m) =>
+            m.senderUid === firebaseUser.uid ||
+            m.recipientUid === firebaseUser.uid ||
+            m.recipientUid === roomId ||
+            m.recipientUid === 'main_studio_room'
+        )
+        .sort((a, b) => a.createdAt - b.createdAt),
+    });
+  });
+
+  app.post(
+    '/api/visitor/models/:modelId/private-album/purchase',
+    requireVisitor,
+    (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const modelId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx || !ctx.model.active) {
+        res.status(404).json({ ok: false, error: 'Modelo indisponível.' });
+        return;
+      }
+      const { workspace } = ctx;
+      if (workspace.privateAlbumEnabled === false) {
+        res.status(403).json({
+          ok: false,
+          error: 'O álbum privativo desta modelo está temporariamente desativado.',
+        });
+        return;
+      }
+
+      const visitor = workspace.visitorProfiles[firebaseUser.uid];
+      if (visitor?.accessStatus === 'blocked') {
+        res.status(403).json({
+          ok: false,
+          error: 'Seu acesso a esta modelo está bloqueado.',
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as { paymentMethod?: unknown };
+      const paymentMethod = body.paymentMethod === 'card' ? 'card' : 'pix';
+      const nowMs = Date.now();
+      const amountCents =
+        typeof workspace.privateAlbumPriceCents === 'number' &&
+        workspace.privateAlbumPriceCents >= 500
+          ? workspace.privateAlbumPriceCents
+          : 3900;
+
+      if (!Array.isArray(workspace.privateAlbumPurchases)) {
+        workspace.privateAlbumPurchases = [];
+      }
+
+      const alreadyPaid = hasVisitorPaidPrivateAlbum(workspace, firebaseUser.uid);
+      if (!alreadyPaid) {
+        const buyerName =
+          visitor?.displayName ||
+          firebaseUser.name ||
+          firebaseUser.email?.split('@')[0] ||
+          'Internauta';
+        workspace.privateAlbumPurchases.push({
+          id: `albpay_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
+          userId: firebaseUser.uid,
+          userName: buyerName,
+          amountCents,
+          paymentMethod,
+          purchasedAt: nowMs,
+        });
+        workspace.callHistory.push({
+          id: `hist_album_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
+          callId: `album_${modelId}_${nowMs}`,
+          userId: firebaseUser.uid,
+          userName: buyerName,
+          modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
+          durationSeconds: 0,
+          amountCents,
+          currency: 'BRL',
+          status: 'completed',
+          planId: 'private_album_unlock',
+          planName: 'Álbum Privado (Fotos e Vídeos)',
+          planDurationMinutes: 0,
+          endedAt: nowMs,
+          createdAt: nowMs,
+        });
+        saveStore();
+        emitWorkspaceRefresh(modelId, false);
+      }
+
+      const version = workspace.privateAlbumTokenVersion || 1;
+      const albumToken = signPrivateAlbumToken(ctx.model.id, version);
+      const items = (workspace.privateAlbumItems || [])
+        .filter((item) => item.active)
+        .sort((a, b) => a.sortOrder - b.sortOrder);
+
+      res.json({
+        ok: true,
+        albumToken,
+        summary: buildPrivateAlbumSummary(workspace, firebaseUser.uid),
+        items,
+      });
+    }
+  );
+
+  app.post(
+    '/api/visitor/models/:modelId/tip',
+    requireVisitor,
+    (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const modelId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx || !ctx.model.active) {
+        res.status(404).json({ ok: false, error: 'Profissional indisponível.' });
+        return;
+      }
+      const { workspace } = ctx;
+      const visitor = workspace.visitorProfiles[firebaseUser.uid];
+      if (visitor?.accessStatus === 'blocked') {
+        res.status(403).json({
+          ok: false,
+          error: 'Seu acesso a este perfil está bloqueado.',
+        });
+        return;
+      }
+      if (!workspace.studioState.tipGoalEnabled) {
+        res.status(400).json({
+          ok: false,
+          error: 'A Meta de Gorjeta não está ativa no momento para este perfil.',
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as {
+        amountCents?: unknown;
+        paymentMethod?: unknown;
+        message?: unknown;
+      };
+      const rawAmount = Number(body.amountCents);
+      if (!Number.isFinite(rawAmount) || rawAmount < 500 || rawAmount > 10000000) {
+        res.status(400).json({
+          ok: false,
+          error: 'Informe uma gorjeta entre R$ 5,00 e R$ 100.000,00.',
+        });
+        return;
+      }
+
+      const amountCents = Math.round(rawAmount);
+      const paymentMethod = body.paymentMethod === 'card' ? 'card' : 'pix';
+      const note =
+        typeof body.message === 'string' ? body.message.trim().slice(0, 120) : '';
+      const nowMs = Date.now();
+      const senderName =
+        visitor?.displayName ||
+        firebaseUser.name ||
+        firebaseUser.email?.split('@')[0] ||
+        'Internauta';
+
+      const nextCurrent =
+        (typeof workspace.studioState.tipGoalCurrentCents === 'number'
+          ? workspace.studioState.tipGoalCurrentCents
+          : 0) + amountCents;
+      const nextCount =
+        (typeof workspace.studioState.tipGoalContributorsCount === 'number'
+          ? workspace.studioState.tipGoalContributorsCount
+          : 0) + 1;
+
+      workspace.studioState.tipGoalCurrentCents = Math.min(100000000, nextCurrent);
+      workspace.studioState.tipGoalContributorsCount = nextCount;
+      workspace.studioState.tipGoalLastTipName = senderName.slice(0, 60);
+      workspace.studioState.tipGoalLastTipAmountCents = amountCents;
+      workspace.studioState.updatedAt = nowMs;
+
+      workspace.callHistory.push({
+        id: `hist_tip_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
+        callId: `tip_${modelId}_${nowMs}`,
+        userId: firebaseUser.uid,
+        userName: senderName,
+        modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
+        durationSeconds: 0,
+        amountCents,
+        currency: 'BRL',
+        status: 'completed',
+        planId: 'tip_goal_contribution',
+        planName: `Gorjeta (${paymentMethod === 'card' ? 'Cartão' : 'PIX'})${
+          note ? ` · ${note}` : ''
+        }`,
+        planDurationMinutes: 0,
+        endedAt: nowMs,
+        createdAt: nowMs,
+      });
+
+      saveStore();
+      emitWorkspaceRefresh(modelId, true);
+
+      res.json({
+        ok: true,
+        studioState: workspace.studioState,
+      });
+    }
+  );
+
+  app.post('/api/visitor/queue', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx || !ctx.model.active) {
+      res.status(404).json({ ok: false, error: 'Modelo indisponível.' });
+      return;
+    }
+    const { workspace } = ctx;
+    const visitor = workspace.visitorProfiles[firebaseUser.uid];
+    if (visitor?.accessStatus === 'blocked') {
+      res.status(403).json({
+        ok: false,
+        error: 'Seu acesso a esta modelo está bloqueado pela moderação.',
+      });
+      return;
+    }
+    if (
+      workspace.studioState.dndActive ||
+      (workspace.studioState.dndUntilMs &&
+        workspace.studioState.dndUntilMs > Date.now())
+    ) {
+      res.status(409).json({
+        ok: false,
+        error: 'A modelo está em Modo Não Perturbe.',
+      });
+      return;
+    }
+    const planId = sanitizeId(body.planId);
+    const plan = workspace.callPlans.find((p) => p.id === planId && p.active);
+    if (!plan) {
+      res.status(400).json({ ok: false, error: 'Plano selecionado inválido.' });
+      return;
+    }
+
+    const nowMs = Date.now();
+    const id = `call_${nowMs}_${firebaseUser.uid.slice(0, 8)}`;
+    const topic =
+      typeof body.topic === 'string' && body.topic.trim()
+        ? body.topic.trim().slice(0, 160)
+        : `Videochamada · ${plan.name}`;
+
+    workspace.callQueue.push({
+      id,
+      userId: firebaseUser.uid,
+      userName: visitor?.displayName || firebaseUser.name || 'Participante',
+      userPhotoUrl: visitor?.photoUrl || sanitizeMediaUrl(firebaseUser.picture),
+      topic,
+      status: 'waiting',
+      planId: plan.id,
+      planName: plan.name,
+      planDurationMinutes: plan.durationMinutes,
+      planPriceCents: plan.priceCents,
+      paymentStatus: 'authorized',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    });
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.status(201).json({ ok: true, id });
+  });
+
+  app.patch('/api/visitor/queue/:requestId', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+
+    const requestId = sanitizeId(req.params.requestId);
+    const entry = ctx.workspace.callQueue.find(
+      (q) => q.id === requestId && q.userId === firebaseUser.uid
+    );
+    if (!entry) return void res.status(404).json({ ok: false });
+
+    const nextStatus = typeof body.status === 'string' ? body.status : '';
+    const allowed =
+      (entry.status === 'waiting' &&
+        (nextStatus === 'cancelled' || nextStatus === 'in_call')) ||
+      (entry.status === 'accepted' && nextStatus === 'in_call') ||
+      (entry.status === 'in_call' && nextStatus === 'ended');
+    if (!allowed) {
+      res.status(403).json({ ok: false, error: 'Transição de estado não permitida.' });
+      return;
+    }
+
+    entry.status = nextStatus as typeof entry.status;
+    entry.updatedAt = Date.now();
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/visitor/interest', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx || !ctx.model.active) return void res.status(404).json({ ok: false });
+
+    const visitor = ctx.workspace.visitorProfiles[firebaseUser.uid];
+    if (visitor?.accessStatus === 'blocked') {
+      res.status(403).json({ ok: false, error: 'Acesso bloqueado.' });
+      return;
+    }
+    const message =
+      typeof body.message === 'string' ? body.message.trim().slice(0, 500) : '';
+    if (!message) return void res.status(400).json({ ok: false });
+    const preferredTime =
+      typeof body.preferredTime === 'string' && body.preferredTime.trim()
+        ? body.preferredTime.trim().slice(0, 80)
+        : 'Qualquer horário';
+
+    const nowMs = Date.now();
+    const id = `int_${nowMs}_${firebaseUser.uid.slice(0, 8)}`;
+    ctx.workspace.interestMessages.push({
+      id,
+      userId: firebaseUser.uid,
+      userName: visitor?.displayName || firebaseUser.name || 'Participante',
+      userPhotoUrl: visitor?.photoUrl || sanitizeMediaUrl(firebaseUser.picture),
+      preferredTime,
+      message,
+      status: 'unread',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    });
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.status(201).json({ ok: true, id });
+  });
+
+  app.post('/api/visitor/history/:recordId/rating', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx) return void res.status(404).json({ ok: false });
+
+    const recordId = sanitizeId(req.params.recordId);
+    const rec = ctx.workspace.callHistory.find(
+      (r) => r.id === recordId && r.userId === firebaseUser.uid
+    );
+    if (!rec) return void res.status(404).json({ ok: false });
+    if (rec.rating !== undefined) {
+      res.status(409).json({ ok: false, error: 'Chamada já avaliada.' });
+      return;
+    }
+
+    const rating = Math.max(1, Math.min(5, Math.round(Number(body.rating) || 5)));
+    const ratingComment =
+      typeof body.comment === 'string'
+        ? body.comment.trim().slice(0, 300)
+        : undefined;
+    rec.rating = rating;
+    if (ratingComment) rec.ratingComment = ratingComment;
+    rec.ratedAt = Date.now();
+
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/visitor/messages', requireVisitor, (req: AuthenticatedRequest, res) => {
+    const firebaseUser = req.firebaseUser!;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+    const ctx = getModelAndWorkspace(modelId);
+    if (!ctx || !ctx.model.active) return void res.status(404).json({ ok: false });
+
+    const visitor = ctx.workspace.visitorProfiles[firebaseUser.uid];
+    if (
+      visitor?.accessStatus === 'blocked' ||
+      visitor?.accessStatus === 'muted'
+    ) {
+      res.status(403).json({ ok: false, error: 'Chat silenciado pela moderação.' });
+      return;
+    }
+
+    const text =
+      typeof body.text === 'string' ? body.text.trim().slice(0, 500) : '';
+    if (!text) return void res.status(400).json({ ok: false });
+
+    const roomId = getModelRoomId(modelId);
+    const callId = sanitizeId(body.callId, roomId);
+    const recipientUid = sanitizeId(body.recipientUid, roomId);
+    const nowMs = Date.now();
+    const id = `msg_${nowMs}_${firebaseUser.uid.slice(0, 6)}`;
+
+    ctx.workspace.callMessages.push({
+      id,
+      callId,
+      senderUid: firebaseUser.uid,
+      senderName: visitor?.displayName || firebaseUser.name || 'Participante',
+      senderRole: 'viewer',
+      recipientUid,
+      text,
+      createdAt: nowMs,
+    });
+    if (ctx.workspace.callMessages.length > 500) {
+      ctx.workspace.callMessages = ctx.workspace.callMessages.slice(-500);
+    }
+    saveStore();
+    emitWorkspaceRefresh(modelId, false);
+    res.json({ ok: true, id });
+  });
+
+  // ============================================================================
+  // PIX PAYMENT CHARGES, QR CODE & BR CODE ROUTES
+  // ============================================================================
+  app.post(
+    '/api/visitor/pix/charges',
+    requireVisitor,
+    async (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const modelId = sanitizeId(body.modelId, getDefaultActiveModelId());
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx || !ctx.model.active) {
+        res.status(404).json({ ok: false, error: 'Profissional indisponível.' });
+        return;
+      }
+
+      const { workspace } = ctx;
+      const visitor = workspace.visitorProfiles[firebaseUser.uid];
+      if (visitor?.accessStatus === 'blocked') {
+        res.status(403).json({
+          ok: false,
+          error: 'Seu acesso a esta modelo está bloqueado.',
+        });
+        return;
+      }
+
+      const kind =
+        body.kind === 'private_album' ||
+        body.kind === 'tip' ||
+        body.kind === 'call_plan'
+          ? body.kind
+          : null;
+      if (!kind) {
+        res.status(400).json({ ok: false, error: 'Tipo de cobrança PIX inválido.' });
+        return;
+      }
+
+      let amountCents = 0;
+      let description = '';
+      let planId: string | undefined;
+      let planName: string | undefined;
+      let planDurationMinutes: number | undefined;
+      let topic: string | undefined;
+      let callMode: 'group' | 'private' | undefined;
+      let note: string | undefined;
+
+      if (kind === 'private_album') {
+        if (workspace.privateAlbumEnabled === false) {
+          res.status(403).json({
+            ok: false,
+            error: 'O álbum privativo desta modelo está temporariamente desativado.',
+          });
+          return;
+        }
+        amountCents =
+          typeof workspace.privateAlbumPriceCents === 'number' &&
+          workspace.privateAlbumPriceCents >= 500
+            ? workspace.privateAlbumPriceCents
+            : 3900;
+        description = `Album Privado ${workspace.studioConfig.modelName}`;
+      } else if (kind === 'tip') {
+        if (!workspace.studioState.tipGoalEnabled) {
+          res.status(400).json({
+            ok: false,
+            error: 'A Meta de Gorjeta não está ativa para este perfil.',
+          });
+          return;
+        }
+        const rawTip = Number(body.amountCents);
+        if (!Number.isFinite(rawTip) || rawTip < 500 || rawTip > 10000000) {
+          res.status(400).json({
+            ok: false,
+            error: 'Informe uma gorjeta entre R$ 5,00 e R$ 100.000,00.',
+          });
+          return;
+        }
+        amountCents = Math.round(rawTip);
+        note =
+          typeof body.note === 'string'
+            ? body.note.trim().slice(0, 120)
+            : typeof body.message === 'string'
+              ? body.message.trim().slice(0, 120)
+              : undefined;
+        description = `Gorjeta ${workspace.studioConfig.modelName}`;
+      } else {
+        if (
+          workspace.studioState.dndActive ||
+          (workspace.studioState.dndUntilMs &&
+            workspace.studioState.dndUntilMs > Date.now())
+        ) {
+          res.status(409).json({
+            ok: false,
+            error: 'A modelo está em Modo Não Perturbe.',
+          });
+          return;
+        }
+        if (workspace.studioState.callMode === 'paused') {
+          res.status(409).json({
+            ok: false,
+            error: 'A sala de videochamada está temporariamente pausada.',
+          });
+          return;
+        }
+        planId = sanitizeId(body.planId);
+        const plan = workspace.callPlans.find((p) => p.id === planId && p.active);
+        if (!plan) {
+          res.status(400).json({ ok: false, error: 'Plano selecionado inválido.' });
+          return;
+        }
+        amountCents = plan.priceCents;
+        planName = plan.name;
+        planDurationMinutes = plan.durationMinutes;
+        callMode = body.callMode === 'private' ? 'private' : 'group';
+        topic =
+          typeof body.topic === 'string' && body.topic.trim()
+            ? body.topic.trim().slice(0, 160)
+            : `${plan.name} · PIX`;
+        description = `${plan.name} ${workspace.studioConfig.modelName}`;
+      }
+
+      const nowMs = Date.now();
+      const buyerName =
+        visitor?.displayName ||
+        firebaseUser.name ||
+        firebaseUser.email?.split('@')[0] ||
+        'Internauta';
+
+      const id = `pix_${nowMs}_${crypto.randomBytes(3).toString('hex')}`;
+      const txid = sanitizePixTxid(`MA${nowMs.toString(36).toUpperCase()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`);
+
+      try {
+        const assets = await generatePixChargeAssets({
+          modelId,
+          configuredPixKey: workspace.studioConfig.pixKey,
+          configuredPixKeyType: workspace.studioConfig.pixKeyType,
+          merchantName:
+            workspace.studioConfig.pixMerchantName ||
+            workspace.studioConfig.modelName ||
+            ctx.model.displayName,
+          merchantCity: workspace.studioConfig.pixMerchantCity || 'SAO PAULO',
+          amountCents,
+          txid,
+          description,
+          payerEmail: firebaseUser.email,
+          payerName: buyerName,
+        });
+
+        const charge: StoredPixCharge = {
+          id,
+          txid: assets.txid,
+          modelId,
+          userId: firebaseUser.uid,
+          userName: buyerName,
+          kind,
+          amountCents,
+          description,
+          ...(planId ? { planId } : {}),
+          ...(planName ? { planName } : {}),
+          ...(planDurationMinutes !== undefined ? { planDurationMinutes } : {}),
+          ...(topic ? { topic } : {}),
+          ...(callMode ? { callMode } : {}),
+          ...(note ? { note } : {}),
+          status: 'pending',
+          provider: assets.provider,
+          ...(assets.externalPaymentId
+            ? { externalPaymentId: assets.externalPaymentId }
+            : {}),
+          brCode: assets.brCode,
+          qrCodeDataUrl: assets.qrCodeDataUrl,
+          pixKeyUsed: assets.pixKeyUsed,
+          pixKeyTypeUsed: assets.pixKeyTypeUsed,
+          merchantName: assets.merchantName,
+          merchantCity: assets.merchantCity,
+          usingDemoKey: assets.usingDemoKey,
+          createdAt: nowMs,
+          expiresAt: nowMs + 30 * 60 * 1000,
+        };
+
+        if (!Array.isArray(workspace.pixCharges)) {
+          workspace.pixCharges = [];
+        }
+        workspace.pixCharges.push(charge);
+        if (workspace.pixCharges.length > 250) {
+          workspace.pixCharges = workspace.pixCharges.slice(-250);
+        }
+        saveStore();
+        emitWorkspaceRefresh(modelId, false);
+
+        res.status(201).json({
+          ok: true,
+          charge: serializePixChargeForClient(charge),
+        });
+      } catch (err) {
+        console.error('Erro ao gerar QR Code PIX:', err);
+        res.status(500).json({
+          ok: false,
+          error: 'Não foi possível gerar o QR Code PIX neste momento.',
+        });
+      }
+    }
+  );
+
+  app.get(
+    '/api/visitor/pix/charges/:chargeId',
+    requireVisitor,
+    async (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const modelId = sanitizeId(req.query.modelId, getDefaultActiveModelId());
+      const chargeId = sanitizeId(req.params.chargeId);
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+        return;
+      }
+      const { workspace } = ctx;
+      const charge = (workspace.pixCharges || []).find(
+        (c) => c.id === chargeId && c.userId === firebaseUser.uid
+      );
+      if (!charge) {
+        res.status(404).json({ ok: false, error: 'Cobrança PIX não encontrada.' });
+        return;
+      }
+
+      const nowMs = Date.now();
+      let fulfillment: ReturnType<typeof fulfillPixCharge> | null = null;
+      let mutated = false;
+
+      if (charge.status === 'pending' && charge.expiresAt <= nowMs) {
+        charge.status = 'expired';
+        mutated = true;
+      } else if (
+        charge.status === 'pending' &&
+        charge.provider === 'mercadopago' &&
+        charge.externalPaymentId
+      ) {
+        const mpStatus = await checkMercadoPagoPaymentStatus(
+          charge.externalPaymentId
+        );
+        if (mpStatus === 'approved') {
+          fulfillment = fulfillPixCharge(modelId, workspace, charge);
+          mutated = true;
+        } else if (mpStatus === 'cancelled' || mpStatus === 'rejected') {
+          charge.status = 'cancelled';
+          mutated = true;
+        }
+      } else if (charge.status === 'paid') {
+        fulfillment = fulfillPixCharge(modelId, workspace, charge);
+      }
+
+      if (mutated) {
+        saveStore();
+        emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+      }
+
+      res.json({
+        ok: true,
+        charge: serializePixChargeForClient(charge),
+        ...(fulfillment || {}),
+      });
+    }
+  );
+
+  app.post(
+    '/api/visitor/pix/charges/:chargeId/confirm',
+    requireVisitor,
+    async (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const modelId = sanitizeId(
+        body.modelId || req.query.modelId,
+        getDefaultActiveModelId()
+      );
+      const chargeId = sanitizeId(req.params.chargeId);
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+        return;
+      }
+      const { workspace } = ctx;
+      const charge = (workspace.pixCharges || []).find(
+        (c) => c.id === chargeId && c.userId === firebaseUser.uid
+      );
+      if (!charge) {
+        res.status(404).json({ ok: false, error: 'Cobrança PIX não encontrada.' });
+        return;
+      }
+
+      if (charge.status === 'cancelled') {
+        res.status(409).json({
+          ok: false,
+          error: 'Esta cobrança PIX foi cancelada.',
+        });
+        return;
+      }
+      if (charge.status === 'expired' || charge.expiresAt <= Date.now()) {
+        charge.status = 'expired';
+        saveStore();
+        res.status(410).json({
+          ok: false,
+          error: 'O QR Code PIX expirou. Gere um novo código para pagar.',
+        });
+        return;
+      }
+
+      if (charge.status !== 'paid' && charge.provider === 'mercadopago') {
+        const mpStatus = charge.externalPaymentId
+          ? await checkMercadoPagoPaymentStatus(charge.externalPaymentId)
+          : 'pending';
+        if (mpStatus !== 'approved') {
+          res.status(202).json({
+            ok: false,
+            pending: true,
+            charge: serializePixChargeForClient(charge),
+            error:
+              'Pagamento PIX ainda aguardando compensação bancária. Se já pagou, aguarde alguns segundos e tente confirmar novamente.',
+          });
+          return;
+        }
+      }
+
+      const fulfillment = fulfillPixCharge(modelId, workspace, charge);
+      saveStore();
+      emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+
+      res.json({
+        ok: true,
+        charge: serializePixChargeForClient(charge),
+        ...fulfillment,
+      });
+    }
+  );
+
+  app.post(
+    '/api/visitor/pix/charges/:chargeId/cancel',
+    requireVisitor,
+    (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const modelId = sanitizeId(
+        body.modelId || req.query.modelId,
+        getDefaultActiveModelId()
+      );
+      const chargeId = sanitizeId(req.params.chargeId);
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) return void res.status(404).json({ ok: false });
+      const charge = (ctx.workspace.pixCharges || []).find(
+        (c) => c.id === chargeId && c.userId === firebaseUser.uid
+      );
+      if (!charge) return void res.status(404).json({ ok: false });
+      if (charge.status === 'pending') {
+        charge.status = 'cancelled';
+        saveStore();
+        emitWorkspaceRefresh(modelId, false);
+      }
+      res.json({ ok: true, charge: serializePixChargeForClient(charge) });
+    }
+  );
+
+  app.post(
+    '/api/model/pix/charges/:chargeId/confirm',
+    requireModelOperator,
+    (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) return void res.status(404).json({ ok: false });
+      const chargeId = sanitizeId(req.params.chargeId);
+      const charge = (ctx.workspace.pixCharges || []).find(
+        (c) => c.id === chargeId
+      );
+      if (!charge) {
+        res.status(404).json({ ok: false, error: 'Cobrança PIX não encontrada.' });
+        return;
+      }
+      if (charge.status === 'cancelled') {
+        res.status(409).json({
+          ok: false,
+          error: 'Esta cobrança PIX foi cancelada.',
+        });
+        return;
+      }
+      const fulfillment = fulfillPixCharge(modelId, ctx.workspace, charge);
+      saveStore();
+      emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+      res.json({
+        ok: true,
+        charge: serializePixChargeForClient(charge),
+        ...fulfillment,
+      });
+    }
+  );
+
+  app.post(
+    '/api/model/pix/charges/:chargeId/cancel',
+    requireModelOperator,
+    (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) return void res.status(404).json({ ok: false });
+      const chargeId = sanitizeId(req.params.chargeId);
+      const charge = (ctx.workspace.pixCharges || []).find(
+        (c) => c.id === chargeId
+      );
+      if (!charge) {
+        res.status(404).json({ ok: false, error: 'Cobrança PIX não encontrada.' });
+        return;
+      }
+      if (charge.status === 'pending') {
+        charge.status = 'cancelled';
+        saveStore();
+        emitWorkspaceRefresh(modelId, false);
+      }
+      res.json({ ok: true, charge: serializePixChargeForClient(charge) });
+    }
+  );
+
+  // ============================================================================
+  // REAL-TIME WEBSOCKET SERVER (Isolated per modelId)
+  // ============================================================================
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -268,63 +3818,129 @@ async function startServer() {
 
       if (msgType === 'auth') {
         const token = typeof data.token === 'string' ? data.token : '';
+        const authMode =
+          typeof data.authMode === 'string' ? data.authMode : 'firebase';
         if (!token) {
           ws.close(4002, 'Missing token');
           return;
         }
 
         try {
-          const decoded = await adminAuth.verifyIdToken(token);
+          let uid = '';
+          let modelId = PRIMARY_MODEL_ID;
+          let isAdmin = false;
+          let isSuperAdmin = false;
+          let displayName = 'Participante';
+          let photoUrl = '';
+          let accessStatus: 'active' | 'vip' | 'muted' | 'blocked' = 'active';
+          let role: 'model' | 'viewer' = 'viewer';
+
+          const store = getStore();
+          const requestedModelId = sanitizeId(
+            data.modelId,
+            getDefaultActiveModelId()
+          );
+
+          if (authMode === 'model_session') {
+            const payload = verifyModelSessionToken(token);
+            if (!payload) {
+              ws.close(4003, 'Invalid model token');
+              return;
+            }
+            const account = store.models[payload.modelId];
+            if (
+              !account ||
+              !account.active ||
+              account.tokenVersion !== payload.tokenVersion
+            ) {
+              ws.close(4003, 'Model session expired');
+              return;
+            }
+            modelId = account.id;
+            uid = getModelActorUid(modelId);
+            isAdmin = true;
+            isSuperAdmin = false;
+            role = 'model';
+            accessStatus = 'vip';
+            const ctx = getModelAndWorkspace(modelId);
+            displayName =
+              ctx?.workspace.studioConfig.modelName || account.displayName;
+            photoUrl = ctx?.workspace.studioConfig.modelAvatarUrl || '';
+          } else {
+            const decoded = await adminAuth.verifyIdToken(token);
+            isSuperAdmin = isDecodedSuperAdmin(decoded);
+            const operatingAsAdmin =
+              isSuperAdmin && Boolean(data.operatingAsAdmin);
+
+            if (operatingAsAdmin) {
+              modelId = store.models[requestedModelId]
+                ? requestedModelId
+                : PRIMARY_MODEL_ID;
+              uid = getModelActorUid(modelId);
+              isAdmin = true;
+              role = 'model';
+              accessStatus = 'vip';
+              const ctx = getModelAndWorkspace(modelId);
+              displayName =
+                ctx?.workspace.studioConfig.modelName || 'Lorena Noir';
+              photoUrl = ctx?.workspace.studioConfig.modelAvatarUrl || '';
+            } else {
+              modelId = store.models[requestedModelId]?.active
+                ? requestedModelId
+                : getDefaultActiveModelId();
+              uid = decoded.uid;
+              isAdmin = false;
+              role = 'viewer';
+              const ctx = getModelAndWorkspace(modelId);
+              const visitor = ctx?.workspace.visitorProfiles[uid];
+              const profileInput =
+                data.profile && typeof data.profile === 'object'
+                  ? (data.profile as Record<string, unknown>)
+                  : {};
+              displayName =
+                visitor?.displayName ||
+                (typeof profileInput.displayName === 'string' &&
+                profileInput.displayName.trim()
+                  ? profileInput.displayName.trim().slice(0, 80)
+                  : typeof decoded.name === 'string' && decoded.name.trim()
+                    ? decoded.name.trim().slice(0, 80)
+                    : 'Participante');
+              photoUrl =
+                visitor?.photoUrl ||
+                (typeof profileInput.photoUrl === 'string'
+                  ? profileInput.photoUrl.slice(0, 500)
+                  : typeof decoded.picture === 'string'
+                    ? decoded.picture.slice(0, 500)
+                    : '');
+              accessStatus = visitor?.accessStatus || 'active';
+            }
+          }
+
           clearTimeout(authTimeout);
 
-          const isAdmin =
-            decoded.email === ADMIN_EMAIL && decoded.email_verified === true;
-          const uid = decoded.uid;
-
           const existing = connectedPeers.get(uid);
-          if (existing && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) {
+          if (
+            existing &&
+            existing.ws !== ws &&
+            existing.ws.readyState === WebSocket.OPEN
+          ) {
             existing.ws.close(4009, 'Replaced by newer session');
           }
 
-          const profileInput =
-            data.profile && typeof data.profile === 'object'
-              ? (data.profile as Record<string, unknown>)
-              : {};
-
-          const displayName =
-            typeof profileInput.displayName === 'string' && profileInput.displayName.trim()
-              ? profileInput.displayName.trim().slice(0, 80)
-              : typeof decoded.name === 'string' && decoded.name.trim()
-                ? decoded.name.trim().slice(0, 80)
-                : 'Participante';
-
-          const photoUrl =
-            typeof profileInput.photoUrl === 'string'
-              ? profileInput.photoUrl.slice(0, 500)
-              : typeof decoded.picture === 'string'
-                ? decoded.picture.slice(0, 500)
-                : '';
-
-          const accessStatus =
-            typeof profileInput.accessStatus === 'string' &&
-            ['active', 'vip', 'muted', 'blocked'].includes(profileInput.accessStatus)
-              ? profileInput.accessStatus
-              : isAdmin
-                ? 'vip'
-                : 'active';
-
-          const role = isAdmin ? 'model' : 'viewer';
-
+          const roomMap = getRoomMap(modelId);
+          const roomId = getModelRoomId(modelId);
           authenticatedUid = uid;
           connectedPeers.set(uid, {
             ws,
             uid,
+            modelId,
             displayName,
             photoUrl,
             role,
             accessStatus,
             isAdmin,
-            inCallWith: roomParticipants.has(uid) ? `room:${MAIN_ROOM_ID}` : null,
+            isSuperAdmin,
+            inCallWith: roomMap.has(uid) ? `room:${roomId}` : null,
             connectedAt: new Date().toISOString(),
           });
 
@@ -332,6 +3948,7 @@ async function startServer() {
             JSON.stringify({
               type: 'auth:ok',
               uid,
+              modelId,
               isAdmin,
               role,
             })
@@ -339,17 +3956,19 @@ async function startServer() {
           ws.send(
             JSON.stringify({
               type: 'room:sync',
-              roomId: MAIN_ROOM_ID,
-              participants: serializeRoomParticipants(),
+              modelId,
+              roomId,
+              participants: serializeRoomParticipantsForModel(modelId),
             })
           );
           ws.send(
             JSON.stringify({
               type: 'queue:sync',
-              summary: buildQueueSummaryForUser(uid),
+              modelId,
+              summary: buildQueueSummaryForUser(modelId, uid),
             })
           );
-          broadcastPresence();
+          broadcastPresenceForModel(modelId);
         } catch (err) {
           console.error('WebSocket token verification failed:', err);
           ws.close(4003, 'Invalid token');
@@ -357,14 +3976,56 @@ async function startServer() {
         return;
       }
 
-      if (!authenticatedUid) {
+      if (!authenticatedUid) return;
+      const sender = connectedPeers.get(authenticatedUid);
+      if (!sender) return;
+
+      // Visitor switches active model on `/`
+      if (msgType === 'model:select') {
+        if (sender.isAdmin && !sender.isSuperAdmin) return;
+        const store = getStore();
+        const nextModelId = sanitizeId(data.modelId);
+        if (!nextModelId || !store.models[nextModelId]?.active) return;
+        if (nextModelId === sender.modelId) return;
+
+        const oldModelId = sender.modelId;
+        const oldRoomMap = getRoomMap(oldModelId);
+        const departed = oldRoomMap.get(sender.uid);
+        if (departed) {
+          oldRoomMap.delete(sender.uid);
+          broadcastRoomSyncForModel(oldModelId);
+          notifyRoomParticipantsAndAdminsForModel(oldModelId, sender.uid, {
+            type: 'room:peer_left',
+            roomId: getModelRoomId(oldModelId),
+            participant: departed,
+          });
+        }
+        getVisitorQueueMap(oldModelId).delete(sender.uid);
+        broadcastQueueSyncForModel(oldModelId);
+
+        sender.modelId = nextModelId;
+        sender.inCallWith = null;
+        const ctx = getModelAndWorkspace(nextModelId);
+        sender.accessStatus =
+          ctx?.workspace.visitorProfiles[sender.uid]?.accessStatus || 'active';
+
+        broadcastPresenceForModel(oldModelId);
+        broadcastPresenceForModel(nextModelId);
+        ws.send(
+          JSON.stringify({
+            type: 'room:sync',
+            modelId: nextModelId,
+            roomId: getModelRoomId(nextModelId),
+            participants: serializeRoomParticipantsForModel(nextModelId),
+          })
+        );
+        sendQueueSyncToPeer(sender);
         return;
       }
 
-      const sender = connectedPeers.get(authenticatedUid);
-      if (!sender) {
-        return;
-      }
+      const activeModelId = sender.modelId;
+      const roomMap = getRoomMap(activeModelId);
+      const roomId = getModelRoomId(activeModelId);
 
       if (msgType === 'presence:update') {
         if (typeof data.inCallWith === 'string' || data.inCallWith === null) {
@@ -374,14 +4035,14 @@ async function startServer() {
           typeof data.accessStatus === 'string' &&
           ['active', 'vip', 'muted', 'blocked'].includes(data.accessStatus)
         ) {
-          sender.accessStatus = data.accessStatus;
-          const roomRec = roomParticipants.get(sender.uid);
+          sender.accessStatus = data.accessStatus as ConnectedPeer['accessStatus'];
+          const roomRec = roomMap.get(sender.uid);
           if (roomRec) {
             roomRec.accessStatus = data.accessStatus;
-            broadcastRoomSync();
+            broadcastRoomSyncForModel(activeModelId);
           }
         }
-        broadcastPresence();
+        broadcastPresenceForModel(activeModelId);
         return;
       }
 
@@ -422,43 +4083,42 @@ async function startServer() {
             : {}),
         };
 
-        const alreadyInRoom = roomParticipants.has(sender.uid);
-        roomParticipants.set(sender.uid, participant);
-        sender.inCallWith = `room:${MAIN_ROOM_ID}`;
+        const alreadyInRoom = roomMap.has(sender.uid);
+        roomMap.set(sender.uid, participant);
+        sender.inCallWith = `room:${roomId}`;
 
-        broadcastRoomSync();
+        broadcastRoomSyncForModel(activeModelId);
         if (!alreadyInRoom) {
-          notifyRoomParticipantsAndAdmins(sender.uid, {
+          notifyRoomParticipantsAndAdminsForModel(activeModelId, sender.uid, {
             type: 'room:peer_joined',
-            roomId: MAIN_ROOM_ID,
+            roomId,
             participant,
           });
         }
-        broadcastPresence();
+        broadcastPresenceForModel(activeModelId);
         return;
       }
 
       if (msgType === 'room:leave') {
-        const departed = roomParticipants.get(sender.uid);
+        const departed = roomMap.get(sender.uid);
         if (departed) {
-          roomParticipants.delete(sender.uid);
+          roomMap.delete(sender.uid);
         }
-        if (sender.inCallWith === `room:${MAIN_ROOM_ID}`) {
+        if (sender.inCallWith === `room:${roomId}`) {
           sender.inCallWith = null;
         }
-        broadcastRoomSync();
+        broadcastRoomSyncForModel(activeModelId);
         if (departed) {
-          notifyRoomParticipantsAndAdmins(sender.uid, {
+          notifyRoomParticipantsAndAdminsForModel(activeModelId, sender.uid, {
             type: 'room:peer_left',
-            roomId: MAIN_ROOM_ID,
+            roomId,
             participant: departed,
           });
         }
-        broadcastPresence();
+        broadcastPresenceForModel(activeModelId);
         return;
       }
 
-      // Direct WebRTC & Call Lifecycle Signaling
       if (
         [
           'call:ring',
@@ -484,10 +4144,14 @@ async function startServer() {
           return;
         }
 
+        const queueMap = getVisitorQueueMap(activeModelId);
+
         if (msgType === 'call:accept') {
           sender.inCallWith = targetUid;
           const target = connectedPeers.get(targetUid);
-          if (target) target.inCallWith = sender.uid;
+          if (target && target.modelId === activeModelId) {
+            target.inCallWith = sender.uid;
+          }
           const callId =
             typeof data.callId === 'string' && data.callId
               ? data.callId.slice(0, 128)
@@ -497,36 +4161,41 @@ async function startServer() {
             data.planDurationMinutes > 0
               ? data.planDurationMinutes
               : 15;
-          activeCallEstimate = {
+          activeCallEstimateByModel.set(activeModelId, {
             callId,
             startedAtMs: Date.now(),
             durationMinutes,
-          };
-          visitorQueueEntries.delete(sender.uid);
-          visitorQueueEntries.delete(targetUid);
-          broadcastPresence();
-          broadcastQueueSync();
+          });
+          queueMap.delete(sender.uid);
+          queueMap.delete(targetUid);
+          broadcastPresenceForModel(activeModelId);
+          broadcastQueueSyncForModel(activeModelId);
         } else if (msgType === 'call:end' || msgType === 'call:reject') {
-          if (sender.inCallWith !== `room:${MAIN_ROOM_ID}`) {
+          if (sender.inCallWith !== `room:${roomId}`) {
             sender.inCallWith = null;
           }
           const target = connectedPeers.get(targetUid);
-          if (target && target.inCallWith === sender.uid) {
+          if (
+            target &&
+            target.modelId === activeModelId &&
+            target.inCallWith === sender.uid
+          ) {
             target.inCallWith = null;
           }
+          const currentEst = activeCallEstimateByModel.get(activeModelId);
           if (
-            activeCallEstimate &&
+            currentEst &&
             (typeof data.callId !== 'string' ||
               !data.callId ||
-              activeCallEstimate.callId === data.callId)
+              currentEst.callId === data.callId)
           ) {
-            activeCallEstimate = null;
+            activeCallEstimateByModel.set(activeModelId, null);
           }
-          broadcastPresence();
-          broadcastQueueSync();
+          broadcastPresenceForModel(activeModelId);
+          broadcastQueueSyncForModel(activeModelId);
         }
 
-        sendToUser(targetUid, {
+        sendToUserInModel(activeModelId, targetUid, {
           ...data,
           fromUid: sender.uid,
           fromName: sender.displayName,
@@ -538,6 +4207,10 @@ async function startServer() {
 
       if (msgType === 'queue:entry') {
         const status = typeof data.status === 'string' ? data.status : 'idle';
+        const queueMap = getVisitorQueueMap(activeModelId);
+        const authList = authoritativeQueueByModel.get(activeModelId) || [];
+        const hasAuth = hasAuthoritativeQueueByModel.get(activeModelId) || false;
+
         if (status === 'waiting') {
           const callId =
             typeof data.callId === 'string' && data.callId
@@ -552,45 +4225,45 @@ async function startServer() {
             typeof data.createdAtMs === 'number' && data.createdAtMs > 0
               ? data.createdAtMs
               : Date.now();
+          const isVip = sender.accessStatus === 'vip' || Boolean(data.isVip);
 
-          visitorQueueEntries.set(sender.uid, {
+          queueMap.set(sender.uid, {
             callId,
             uid: sender.uid,
             planDurationMinutes,
             createdAtMs,
+            isVip,
           });
-          if (hasAuthoritativeQueue) {
-            const idx = authoritativeWaitingQueue.findIndex(
-              (item) => item.uid === sender.uid
-            );
-            const nextEntry = {
+          if (hasAuth) {
+            const idx = authList.findIndex((item) => item.uid === sender.uid);
+            const nextEntry: QueueEntryRecord = {
               callId,
               uid: sender.uid,
               planDurationMinutes,
               createdAtMs,
+              isVip,
             };
-            if (idx >= 0) {
-              authoritativeWaitingQueue[idx] = nextEntry;
-            } else {
-              authoritativeWaitingQueue.push(nextEntry);
-            }
+            if (idx >= 0) authList[idx] = nextEntry;
+            else authList.push(nextEntry);
+            authoritativeQueueByModel.set(activeModelId, authList);
           }
         } else {
-          visitorQueueEntries.delete(sender.uid);
-          if (hasAuthoritativeQueue) {
-            authoritativeWaitingQueue = authoritativeWaitingQueue.filter(
-              (item) => item.uid !== sender.uid
+          queueMap.delete(sender.uid);
+          if (hasAuth) {
+            authoritativeQueueByModel.set(
+              activeModelId,
+              authList.filter((item) => item.uid !== sender.uid)
             );
           }
         }
-        broadcastQueueSync();
+        broadcastQueueSyncForModel(activeModelId);
         return;
       }
 
       if (msgType === 'queue:authoritative_sync') {
         if (!sender.isAdmin) return;
         const rawEntries = Array.isArray(data.waiting) ? data.waiting : [];
-        authoritativeWaitingQueue = rawEntries
+        const nextList = rawEntries
           .filter(
             (item): item is Record<string, unknown> =>
               Boolean(item) &&
@@ -611,8 +4284,11 @@ async function startServer() {
               typeof item.createdAtMs === 'number' && item.createdAtMs > 0
                 ? item.createdAtMs
                 : Date.now(),
+            isVip: Boolean(item.isVip),
           }));
-        hasAuthoritativeQueue = true;
+
+        authoritativeQueueByModel.set(activeModelId, nextList);
+        hasAuthoritativeQueueByModel.set(activeModelId, true);
 
         const rawActive =
           data.activeCall && typeof data.activeCall === 'object'
@@ -629,27 +4305,27 @@ async function startServer() {
             rawActive.durationMinutes > 0
               ? Math.min(240, Math.round(rawActive.durationMinutes))
               : 15;
+          const prevEst = activeCallEstimateByModel.get(activeModelId);
           const startedAtMs =
             typeof rawActive.startedAtMs === 'number' &&
             rawActive.startedAtMs > 0
               ? rawActive.startedAtMs
-              : activeCallEstimate?.callId === callId
-                ? activeCallEstimate.startedAtMs
+              : prevEst?.callId === callId
+                ? prevEst.startedAtMs
                 : Date.now();
-          activeCallEstimate = {
+          activeCallEstimateByModel.set(activeModelId, {
             callId,
             durationMinutes,
             startedAtMs,
-          };
+          });
         } else {
-          activeCallEstimate = null;
+          activeCallEstimateByModel.set(activeModelId, null);
         }
 
-        broadcastQueueSync();
+        broadcastQueueSyncForModel(activeModelId);
         return;
       }
 
-      // Real-Time Model / Admin User Control Commands
       if (msgType === 'moderation:command') {
         if (!sender.isAdmin) return;
         const targetUid = typeof data.targetUid === 'string' ? data.targetUid : '';
@@ -657,12 +4333,14 @@ async function startServer() {
         if (!targetUid || !action) return;
 
         const target = connectedPeers.get(targetUid);
+        if (target && target.modelId !== activeModelId) return;
+
         const departedRoomPeer =
           action === 'block' || action === 'kick_call'
-            ? roomParticipants.get(targetUid)
+            ? roomMap.get(targetUid)
             : undefined;
 
-        if (target) {
+        if (target && target.modelId === activeModelId) {
           if (action === 'mute') target.accessStatus = 'muted';
           if (action === 'unmute') target.accessStatus = 'active';
           if (action === 'block') {
@@ -678,7 +4356,7 @@ async function startServer() {
           }
         }
 
-        const roomTarget = roomParticipants.get(targetUid);
+        const roomTarget = roomMap.get(targetUid);
         if (roomTarget) {
           if (action === 'mute') roomTarget.accessStatus = 'muted';
           if (action === 'unmute') roomTarget.accessStatus = 'active';
@@ -686,23 +4364,26 @@ async function startServer() {
         }
 
         if (departedRoomPeer) {
-          roomParticipants.delete(targetUid);
-          notifyRoomParticipantsAndAdmins(targetUid, {
+          roomMap.delete(targetUid);
+          notifyRoomParticipantsAndAdminsForModel(activeModelId, targetUid, {
             type: 'room:peer_left',
-            roomId: MAIN_ROOM_ID,
+            roomId,
             participant: departedRoomPeer,
           });
         }
 
-        sendToUser(targetUid, {
+        sendToUserInModel(activeModelId, targetUid, {
           type: 'moderation:effect',
           action,
           byUid: sender.uid,
           byName: sender.displayName,
           reason: typeof data.reason === 'string' ? data.reason : '',
         });
-        broadcastRoomSync();
-        broadcastPresence();
+        broadcastRoomSyncForModel(activeModelId);
+        broadcastPresenceForModel(activeModelId);
+        if (action === 'vip' || action === 'unmute') {
+          broadcastQueueSyncForModel(activeModelId);
+        }
       }
     });
 
@@ -711,42 +4392,58 @@ async function startServer() {
       if (authenticatedUid) {
         const current = connectedPeers.get(authenticatedUid);
         if (current && current.ws === ws) {
-          const departedRoomPeer = roomParticipants.get(authenticatedUid);
+          const activeModelId = current.modelId;
+          const roomMap = getRoomMap(activeModelId);
+          const roomId = getModelRoomId(activeModelId);
+          const departedRoomPeer = roomMap.get(authenticatedUid);
           if (departedRoomPeer) {
-            roomParticipants.delete(authenticatedUid);
+            roomMap.delete(authenticatedUid);
           }
 
           if (
             current.inCallWith &&
-            current.inCallWith !== `room:${MAIN_ROOM_ID}`
+            current.inCallWith !== `room:${roomId}`
           ) {
-            sendToUser(current.inCallWith, {
+            sendToUserInModel(activeModelId, current.inCallWith, {
               type: 'call:end',
               fromUid: authenticatedUid,
               reason: 'peer_disconnected',
             });
             const peer = connectedPeers.get(current.inCallWith);
-            if (peer && peer.inCallWith === authenticatedUid) {
+            if (
+              peer &&
+              peer.modelId === activeModelId &&
+              peer.inCallWith === authenticatedUid
+            ) {
               peer.inCallWith = null;
             }
           }
           connectedPeers.delete(authenticatedUid);
-          visitorQueueEntries.delete(authenticatedUid);
-          if (current.isAdmin && connectedPeers.size === 0) {
-            hasAuthoritativeQueue = false;
-            authoritativeWaitingQueue = [];
-            activeCallEstimate = null;
+          getVisitorQueueMap(activeModelId).delete(authenticatedUid);
+
+          const modelPeersLeft = Array.from(connectedPeers.values()).some(
+            (p) => p.modelId === activeModelId
+          );
+          if (current.isAdmin && !modelPeersLeft) {
+            hasAuthoritativeQueueByModel.set(activeModelId, false);
+            authoritativeQueueByModel.set(activeModelId, []);
+            activeCallEstimateByModel.set(activeModelId, null);
           }
+
           if (departedRoomPeer) {
-            broadcastRoomSync();
-            notifyRoomParticipantsAndAdmins(authenticatedUid, {
-              type: 'room:peer_left',
-              roomId: MAIN_ROOM_ID,
-              participant: departedRoomPeer,
-            });
+            broadcastRoomSyncForModel(activeModelId);
+            notifyRoomParticipantsAndAdminsForModel(
+              activeModelId,
+              authenticatedUid,
+              {
+                type: 'room:peer_left',
+                roomId,
+                participant: departedRoomPeer,
+              }
+            );
           }
-          broadcastPresence();
-          broadcastQueueSync();
+          broadcastPresenceForModel(activeModelId);
+          broadcastQueueSyncForModel(activeModelId);
         }
       }
     });

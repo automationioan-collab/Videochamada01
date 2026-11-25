@@ -2,6 +2,7 @@ import React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   CheckCircle2,
+  Crown,
   ShieldAlert,
   UserMinus,
   UserPlus,
@@ -12,6 +13,7 @@ export type ToastVariant =
   | 'user_joined'
   | 'user_left'
   | 'call_accepted'
+  | 'vip_priority'
   | 'info'
   | 'warning';
 
@@ -51,6 +53,11 @@ const VARIANT_CONFIG: Record<
     iconColor: 'text-[#F4C2D7]',
     labelColor: 'text-[#F4C2D7]',
   },
+  vip_priority: {
+    icon: Crown,
+    iconColor: 'text-[#FBBF24]',
+    labelColor: 'text-[#FDE68A]',
+  },
   info: {
     icon: CheckCircle2,
     iconColor: 'text-[#F8D6E3]',
@@ -77,6 +84,7 @@ export const ToastOverlay: React.FC<ToastOverlayProps> = ({
         {toasts.map((toast) => {
           const config = VARIANT_CONFIG[toast.variant];
           const Icon = config.icon;
+          const isVipPriority = toast.variant === 'vip_priority';
 
           return (
             <motion.div
@@ -86,7 +94,11 @@ export const ToastOverlay: React.FC<ToastOverlayProps> = ({
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
               role="status"
-              className="pointer-events-auto bg-[#150D1D]/95 backdrop-blur-md border border-[#F4C2D7]/25 rounded-2xl p-4 shadow-xl flex items-start gap-3"
+              className={`pointer-events-auto bg-[#150D1D]/95 backdrop-blur-md border rounded-2xl p-4 shadow-xl flex items-start gap-3 ${
+                isVipPriority
+                  ? 'border-[#FBBF24]/55 shadow-[0_14px_38px_-12px_rgba(251,191,36,0.35)]'
+                  : 'border-[#F4C2D7]/25'
+              }`}
             >
               <div className="pt-0.5 shrink-0">
                 <Icon className={`w-4 h-4 ${config.iconColor}`} />

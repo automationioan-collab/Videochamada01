@@ -5,17 +5,21 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Lock,
   PhoneCall,
   PhoneOff,
   ShieldAlert,
+  UserPlus,
   Video,
 } from 'lucide-react';
+import { ADMIN_MODEL_THEMES } from './lib/modelThemes';
 import { CallQueuePanel } from './components/CallQueuePanel';
 import { Header, type WorkspaceTab } from './components/Header';
 import { LoginView } from './components/LoginView';
 import { ModelAdminPage } from './components/ModelAdminPage';
 import { ModelOfflineView } from './components/ModelOfflineView';
 import { ModelProfileBioSection } from './components/ModelProfileBioSection';
+import { PixPaymentModal } from './components/PixPaymentModal';
 import { PrivateAlbumViewer } from './components/PrivateAlbumViewer';
 import {
   RatingSystem,
@@ -29,13 +33,16 @@ import {
   type ToastVariant,
 } from './components/ToastOverlay';
 import { VideoCallStage } from './components/VideoCallStage';
+import {
+  WhatsappInviteCheckoutView,
+  type InviteCheckoutSelection,
+} from './components/WhatsappInviteCheckoutView';
 import { useStudioAuth } from './hooks/useStudioAuth';
 import { useWebRTC } from './hooks/useWebRTC';
 import {
   useWebSocketStudio,
   type ModerationEffect,
   type PresenceEvent,
-  type RoomEvent,
   type SignalPayload,
 } from './hooks/useWebSocketStudio';
 import {
@@ -54,7 +61,31 @@ import {
   isWithinOperatingHours,
   serializeSchedulePeriodsDigest,
 } from './lib/schedule';
-import type { CallEntryIntent, CallPlan, CallRequest } from './types/studio';
+import type {
+  CallPlan,
+  CallRequest,
+  PixChargeRecord,
+  PublicWhatsappInviteData,
+} from './types/studio';
+
+const PENDING_INVITE_CHECKOUT_KEY = 'model_gat_pending_invite_checkout';
+
+function parseWhatsappInviteIdFromLocation(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const match = window.location.pathname.match(
+      /^\/convite\/([a-zA-Z0-9_-]+)/
+    );
+    if (match?.[1]) return match[1];
+    const fromQuery = new URLSearchParams(window.location.search)
+      .get('convite')
+      ?.trim();
+    if (fromQuery) return fromQuery;
+  } catch {
+    // Ignore URL restrictions
+  }
+  return null;
+}
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -65,8 +96,6 @@ interface ActiveCallSession {
   callId: string;
   partnerUid: string;
   partnerName: string;
-  isGroupRoom?: boolean;
-  queueCallId?: string;
   planId?: string;
   planName?: string;
   planDurationMinutes?: number;
@@ -87,14 +116,16 @@ export default function App() {
   const {
     user,
     modelSession,
+    modelAccount,
     modelToken,
     modelAuthId,
     authLoading,
     authError,
     modelAuthError,
     modelAuthSubmitting,
+    primaryNeedsClaim,
+    primaryClaimInfo,
     isAdmin,
-    isSuperAdmin,
     activeModelId,
     activeAdminThemeId,
     effectiveActorUid,
@@ -103,9 +134,6 @@ export default function App() {
     setSelectedPublicModelId,
     publicRatings,
     publicShowcaseLoading,
-    superAdminSelectedModelId,
-    setSuperAdminSelectedModelId,
-    superAdminModels,
     myProfile,
     modelProfile,
     allProfiles,
@@ -115,21 +143,21 @@ export default function App() {
     privateAlbumSummary,
     privateAlbumItems,
     visitorUnlockedPrivateItems,
-    pendingGalleryItems,
     callQueue,
     callMessages,
     callHistory,
     interestMessages,
     callPlans,
     pixCharges,
+    whatsappInvites,
     refreshWorkspace,
     refreshPublicModels,
     loginWithGoogle,
     loginAsModel,
+    claimPrimaryModelPassword,
+    registerAsModel,
     logout,
-    createModelAccount,
-    updateModelAccount,
-    deleteModelAccount,
+    updateMyModelAccount,
     updateStudioState,
     saveStudioConfig,
     uploadStudioImage,
@@ -137,7 +165,6 @@ export default function App() {
     saveGalleryItem,
     deleteGalleryItem,
     restoreDefaultGallery,
-    moderatePublicGalleryItem,
     toggleMediaVisibility,
     savePrivateAlbumSettings,
     savePrivateAlbumItem,
@@ -150,6 +177,8 @@ export default function App() {
     cancelPixCharge,
     confirmModelPixCharge,
     cancelModelPixCharge,
+    createWhatsappInvite,
+    deleteWhatsappInvite,
     updateUserControl,
     deleteUserProfile,
     requestVideoCall,
@@ -169,12 +198,30 @@ export default function App() {
     sendTipContribution,
   } = useStudioAuth();
 
+  const [adminAuthMode, setAdminAuthMode] = useState<'login' | 'register'>(
+    'login'
+  );
   const [modelLoginInput, setModelLoginInput] = useState('');
   const [modelPasswordInput, setModelPasswordInput] = useState('');
   const [showModelPassword, setShowModelPassword] = useState(false);
 
+  // Self-registration form for new private model admin panels
+  const [regDisplayName, setRegDisplayName] = useState('');
+  const [regLoginInput, setRegLoginInput] = useState('');
+  const [regPasswordInput, setRegPasswordInput] = useState('');
+  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [regThemeColor, setRegThemeColor] = useState<string>('rose_velvet');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [regLocalError, setRegLocalError] = useState<string | null>(null);
+
+  // First-run primary model password claim state
+  const [claimLoginInput, setClaimLoginInput] = useState('');
+  const [claimPasswordInput, setClaimPasswordInput] = useState('');
+  const [claimConfirmPassword, setClaimConfirmPassword] = useState('');
+  const [showClaimPassword, setShowClaimPassword] = useState(false);
+  const [claimLocalError, setClaimLocalError] = useState<string | null>(null);
+
   const isAuthenticated = Boolean(user || modelSession);
-  const activeRoomId = `room_${activeModelId}`;
   const activeModelDisplayName =
     studioConfig?.modelName ||
     studioState?.modelName ||
@@ -188,6 +235,28 @@ export default function App() {
   const [currentPath, setCurrentPath] = useState<string>(() =>
     typeof window !== 'undefined' ? window.location.pathname : '/'
   );
+  const [activeInviteId, setActiveInviteId] = useState<string | null>(() =>
+    parseWhatsappInviteIdFromLocation()
+  );
+  const [inviteData, setInviteData] = useState<PublicWhatsappInviteData | null>(
+    null
+  );
+  const [inviteLoading, setInviteLoading] = useState<boolean>(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteSubmitting, setInviteSubmitting] = useState<boolean>(false);
+  const [inviteCheckoutError, setInviteCheckoutError] = useState<string | null>(
+    null
+  );
+  const [invitePixCharge, setInvitePixCharge] =
+    useState<PixChargeRecord | null>(null);
+  const [pendingInvitePixMeta, setPendingInvitePixMeta] = useState<{
+    plan: CallPlan;
+    topic: string;
+    inviteId: string;
+  } | null>(null);
+  const pendingInviteAutoCheckoutRef = useRef<
+    (InviteCheckoutSelection & { inviteId: string }) | null
+  >(null);
   const [highContrastAdmin, setHighContrastAdmin] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -202,7 +271,6 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
     isAudioSoundEnabled()
   );
-  const [entryIntent, setEntryIntent] = useState<CallEntryIntent>('group');
   const [activeSession, setActiveSession] = useState<ActiveCallSession | null>(
     null
   );
@@ -225,8 +293,6 @@ export default function App() {
   const elapsedSecondsRef = useRef<number>(0);
   const sendWsRef = useRef<(payload: unknown) => void>(() => {});
   const pendingPublicJoinRef = useRef<boolean>(false);
-  const pendingEntryIntentRef = useRef<CallEntryIntent>('group');
-  const roomStartedAtMapRef = useRef<Map<string, number>>(new Map());
   const seenQueueIdsRef = useRef<Set<string>>(new Set());
   const notifiedVipQueueIdsRef = useRef<Set<string>>(new Set());
   const queueInitializedRef = useRef<boolean>(false);
@@ -336,10 +402,18 @@ export default function App() {
     (path: '/' | '/admin', options?: { previewVisitor?: boolean }) => {
       if (path === '/admin') {
         setAllowAdminVisitorPreview(false);
-      } else if (options?.previewVisitor) {
-        setAllowAdminVisitorPreview(true);
+        setActiveInviteId(null);
+      } else {
+        setActiveInviteId(null);
+        if (options?.previewVisitor) {
+          setAllowAdminVisitorPreview(true);
+        }
       }
-      if (typeof window !== 'undefined' && window.location.pathname !== path) {
+      if (
+        typeof window !== 'undefined' &&
+        (window.location.pathname !== path ||
+          window.location.search.includes('convite='))
+      ) {
         try {
           window.history.pushState({}, '', path);
         } catch {
@@ -354,21 +428,28 @@ export default function App() {
   useEffect(() => {
     const onPopState = () => {
       setCurrentPath(window.location.pathname);
+      setActiveInviteId(parseWhatsappInviteIdFromLocation());
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  // Automatically isolate authenticated Model Admin onto /admin unless explicitly previewing /
+  // Automatically isolate authenticated Model Admin onto /admin unless explicitly previewing / or inspecting an invite
   useEffect(() => {
     if (!isAuthenticated) {
       setAllowAdminVisitorPreview(false);
       return;
     }
-    if (isAdmin && currentPath !== '/admin' && !allowAdminVisitorPreview) {
+    if (
+      isAdmin &&
+      currentPath !== '/admin' &&
+      !allowAdminVisitorPreview &&
+      !activeInviteId
+    ) {
       navigateRoute('/admin');
     }
   }, [
+    activeInviteId,
     allowAdminVisitorPreview,
     currentPath,
     isAdmin,
@@ -469,6 +550,21 @@ export default function App() {
             type: 'call:reject',
             targetUid: signal.fromUid,
             callId: signal.callId || `direct_${Date.now()}`,
+            reason: 'A modelo está em Modo Não Perturbe no momento.',
+          });
+          return;
+        }
+        if (
+          isAdmin &&
+          activeSessionRef.current &&
+          activeSessionRef.current.partnerUid !== signal.fromUid
+        ) {
+          sendWsRef.current({
+            type: 'call:reject',
+            targetUid: signal.fromUid,
+            callId: signal.callId || `direct_${Date.now()}`,
+            reason:
+              'A modelo já está em sala privativa com outro internauta. Você continua na fila.',
           });
           return;
         }
@@ -518,17 +614,19 @@ export default function App() {
         setActiveTab('call');
         pushToast(
           'call_accepted',
-          'Chamada aceita',
-          `${partnerName} aceitou a videochamada. Conectando vídeo...`
+          'Sala privativa conectada',
+          `${partnerName} aceitou a videochamada 1-para-1. Conectando vídeo...`
         );
         void webrtcOfferRef.current(signal.fromUid, callId);
         return;
       }
 
       if (signal.type === 'call:reject') {
-        const msg = `${signal.fromName || 'O participante'} recusou a videochamada.`;
+        const msg =
+          signal.reason ||
+          `${signal.fromName || 'O participante'} recusou a videochamada.`;
         setNoticeBanner(msg);
-        pushToast('warning', 'Chamada recusada', msg);
+        pushToast('warning', 'Sala privativa indisponível', msg);
         setActiveSession(null);
         webrtcCloseRef.current();
         return;
@@ -558,14 +656,14 @@ export default function App() {
         setIncomingRing(null);
         setActiveSession(null);
         webrtcCloseRef.current();
-        setNoticeBanner('A videochamada foi encerrada.');
+        setNoticeBanner('A videochamada privativa foi encerrada.');
         pushToast('info', 'Chamada encerrada', 'A sessão de vídeo foi finalizada.');
         return;
       }
 
       void webrtcSignalRef.current(signal);
     },
-    [isAdmin, pushToast]
+    [activeModelDisplayName, isAdmin, pushToast]
   );
 
   const handlePresenceEvent = useCallback(
@@ -621,76 +719,11 @@ export default function App() {
     [pushToast]
   );
 
-  const handleRoomEvent = useCallback(
-    (event: RoomEvent) => {
-      if (event.kind === 'peer_joined') {
-        roomStartedAtMapRef.current.set(event.participant.uid, Date.now());
-        if (event.participant.uid !== myUidRef.current) {
-          playNotificationDing('user_joined');
-        }
-        if (activeSessionRef.current?.isGroupRoom || isAdmin) {
-          pushToast(
-            'user_joined',
-            'Entrou na sala de vídeo',
-            `${event.participant.displayName} entrou na videochamada ao vivo.`
-          );
-        }
-        return;
-      }
-
-      if (event.kind === 'peer_left') {
-        webrtcCloseRef.current(event.participant.uid);
-        const startedAt =
-          roomStartedAtMapRef.current.get(event.participant.uid) || Date.now();
-        roomStartedAtMapRef.current.delete(event.participant.uid);
-
-        if (isAdmin && !event.participant.isAdmin && event.participant.callId) {
-          const durationSeconds = Math.max(
-            1,
-            Math.round((Date.now() - startedAt) / 1000)
-          );
-          const amountCents =
-            event.participant.planPriceCents &&
-            event.participant.planPriceCents > 0
-              ? event.participant.planPriceCents
-              : Math.max(
-                  ratePerMinuteCents,
-                  Math.round((durationSeconds / 60) * ratePerMinuteCents)
-                );
-
-          void recordCallHistory({
-            callId: event.participant.callId,
-            userId: event.participant.uid,
-            userName: event.participant.displayName,
-            durationSeconds,
-            amountCents,
-            planId: event.participant.planId,
-            planName: event.participant.planName,
-            planDurationMinutes: event.participant.planDurationMinutes,
-          });
-          void updateCallStatus(event.participant.callId, 'ended', 'captured');
-        }
-
-        if (activeSessionRef.current?.isGroupRoom || isAdmin) {
-          pushToast(
-            'user_left',
-            'Saiu da sala de vídeo',
-            `${event.participant.displayName} saiu da videochamada.`
-          );
-        }
-      }
-    },
-    [isAdmin, pushToast, ratePerMinuteCents, recordCallHistory, updateCallStatus]
-  );
-
   const {
     wsConnected,
     peers,
-    roomParticipants,
     queueSummary,
     sendWs,
-    joinRoom,
-    leaveRoom,
     sendModerationCommand,
     syncQueueEntry,
     syncAuthoritativeQueue,
@@ -699,12 +732,10 @@ export default function App() {
     modelToken,
     modelAuthId,
     selectedModelId: activeModelId,
-    isSuperAdminOperating: isSuperAdmin,
     profile: myProfile,
     onSignal: handleIncomingSignal,
     onModerationEffect: handleModerationEffect,
     onPresenceEvent: handlePresenceEvent,
-    onRoomEvent: handleRoomEvent,
     onStudioRefresh: () => {
       void refreshWorkspace();
     },
@@ -716,8 +747,6 @@ export default function App() {
   const {
     localStream,
     remoteStream,
-    remoteStreams,
-    peerConnectionStates,
     micEnabled,
     camEnabled,
     mediaError,
@@ -725,7 +754,6 @@ export default function App() {
     elapsedSeconds,
     acquireLocalMedia,
     startCallOffer,
-    syncMeshPeers,
     handleSignal,
     closePeerConnection,
     toggleMic,
@@ -784,6 +812,14 @@ export default function App() {
 
   const handleDirectCallUser = useCallback(
     async (target: { uid: string; displayName: string; photoUrl?: string }) => {
+      if (activeSessionRef.current) {
+        pushToast(
+          'warning',
+          'Sala privativa ocupada (1/1)',
+          'Você já está em atendimento com 1 internauta. Encerre a chamada atual antes de chamar outro.'
+        );
+        return;
+      }
       const callId = `direct_${Date.now()}_${target.uid.slice(0, 6)}`;
       const planMeta = defaultPlan
         ? {
@@ -814,13 +850,30 @@ export default function App() {
           activeCallUserName: target.displayName,
         });
       }
-      setNoticeBanner(`Chamando ${target.displayName} para a sala de vídeo...`);
+      setNoticeBanner(
+        `Chamando ${target.displayName} para sala privativa 1-para-1...`
+      );
     },
-    [acquireLocalMedia, defaultPlan, isAdmin, sendWs, updateStudioState]
+    [
+      acquireLocalMedia,
+      defaultPlan,
+      isAdmin,
+      pushToast,
+      sendWs,
+      updateStudioState,
+    ]
   );
 
   const handleAcceptQueueAndCall = useCallback(
     async (req: CallRequest) => {
+      if (activeSessionRef.current) {
+        pushToast(
+          'warning',
+          'Sala privativa ocupada (1/1)',
+          'Encerre o atendimento atual antes de atender o próximo internauta da fila.'
+        );
+        return;
+      }
       await updateCallStatus(req.id, 'accepted');
       const planMeta = {
         planId: req.planId,
@@ -849,98 +902,12 @@ export default function App() {
       });
       pushToast(
         'call_accepted',
-        'Chamada aceita',
-        `Solicitação de ${req.userName} aceita. Chamando para o vídeo...`
+        'Chamada privativa aceita',
+        `Solicitação de ${req.userName} aceita. Chamando para a sala 1-para-1...`
       );
     },
     [acquireLocalMedia, pushToast, sendWs, updateCallStatus, updateStudioState]
   );
-
-  const handleVisitorJoinGroupRoom = useCallback(
-    async (topic: string, plan: CallPlan, existingCallRequestId?: string) => {
-      if (isDndActiveNow(studioState, new Date())) {
-        const msg =
-          'A modelo está em Modo Não Perturbe. Novas entradas estão temporariamente bloqueadas.';
-        setNoticeBanner(msg);
-        pushToast('warning', 'Modo Não Perturbe ativo', msg);
-        return;
-      }
-      if (studioState?.callMode === 'paused') {
-        setNoticeBanner('A sala de videochamada está temporariamente pausada.');
-        return;
-      }
-      const queueCallId =
-        existingCallRequestId || (await requestVideoCall(topic, plan));
-      if (!queueCallId) return;
-
-      await updateCallStatus(queueCallId, 'in_call');
-      const modelName = activeModelDisplayName;
-
-      setEndedCallForRating(null);
-      sessionStartedAtRef.current = Date.now();
-      setActiveSession({
-        callId: activeRoomId,
-        queueCallId,
-        isGroupRoom: true,
-        partnerUid: activeRoomId,
-        partnerName: `Sala Ao Vivo · ${modelName}`,
-        planId: plan.id,
-        planName: plan.name,
-        planDurationMinutes: plan.durationMinutes,
-        planPriceCents: plan.priceCents,
-      });
-      setActiveTab('call');
-      await acquireLocalMedia();
-      joinRoom({
-        roomId: activeRoomId,
-        callId: queueCallId,
-        planId: plan.id,
-        planName: plan.name,
-        planDurationMinutes: plan.durationMinutes,
-        planPriceCents: plan.priceCents,
-      });
-      pushToast(
-        'call_accepted',
-        'Na sala ao vivo',
-        `Você entrou na videochamada ao vivo (${plan.name}). Outros participantes conectam automaticamente.`
-      );
-    },
-    [
-      acquireLocalMedia,
-      activeModelDisplayName,
-      activeRoomId,
-      joinRoom,
-      pushToast,
-      requestVideoCall,
-      studioState,
-      updateCallStatus,
-    ]
-  );
-
-  const handleAdminJoinGroupRoom = useCallback(async () => {
-    setEndedCallForRating(null);
-    sessionStartedAtRef.current = Date.now();
-    setActiveSession({
-      callId: activeRoomId,
-      isGroupRoom: true,
-      partnerUid: activeRoomId,
-      partnerName: `Sala Ao Vivo · ${activeModelDisplayName}`,
-    });
-    setActiveTab('call');
-    await acquireLocalMedia();
-    joinRoom({ roomId: activeRoomId });
-    pushToast(
-      'call_accepted',
-      'Sala ao vivo aberta',
-      'Você entrou na sala de videochamada para atender múltiplos internautas.'
-    );
-  }, [
-    acquireLocalMedia,
-    activeModelDisplayName,
-    activeRoomId,
-    joinRoom,
-    pushToast,
-  ]);
 
   const handleVisitorDirectCallModel = useCallback(
     async (topic: string, plan: CallPlan, existingCallRequestId?: string) => {
@@ -1144,39 +1111,6 @@ export default function App() {
   );
 
   const handleEndCall = useCallback(async () => {
-    if (activeSession?.isGroupRoom) {
-      const fallbackDuration = sessionStartedAtRef.current
-        ? Math.max(
-            1,
-            Math.round((Date.now() - sessionStartedAtRef.current) / 1000)
-          )
-        : 0;
-      const durationSeconds =
-        elapsedSeconds > 0 ? elapsedSeconds : fallbackDuration;
-
-      leaveRoom(activeRoomId);
-
-      if (!isAdmin) {
-        if (activeSession.queueCallId) {
-          await updateCallStatus(activeSession.queueCallId, 'ended');
-        }
-        if (sessionStartedAtRef.current) {
-          setEndedCallForRating({
-            callId: activeSession.queueCallId || activeSession.callId,
-            partnerName: activeSession.partnerName,
-            planName: activeSession.planName,
-            durationSeconds,
-          });
-          setActiveTab('studio');
-        }
-      }
-
-      sessionStartedAtRef.current = null;
-      closePeerConnection();
-      setActiveSession(null);
-      return;
-    }
-
     if (activeSession) {
       const fallbackDuration = sessionStartedAtRef.current
         ? Math.max(
@@ -1254,25 +1188,11 @@ export default function App() {
     closePeerConnection,
     elapsedSeconds,
     isAdmin,
-    leaveRoom,
     ratePerMinuteCents,
     recordCallHistory,
     sendWs,
     updateCallStatus,
     updateStudioState,
-  ]);
-
-  // Mesh peer synchronization when connected inside the shared group room
-  useEffect(() => {
-    if (!effectiveActorUid || !activeSession?.isGroupRoom) return;
-    const participantUids = roomParticipants.map((p) => p.uid);
-    void syncMeshPeers(effectiveActorUid, participantUids, activeRoomId);
-  }, [
-    activeRoomId,
-    activeSession?.isGroupRoom,
-    effectiveActorUid,
-    roomParticipants,
-    syncMeshPeers,
   ]);
 
   // Play incoming call ding & toast when a call request enters waiting queue for admin (with VIP priority alert)
@@ -1400,20 +1320,19 @@ export default function App() {
       ? callQueue.find((q) => q.id === studioState.activeCallId)
       : undefined;
 
-    const activeCall =
-      activeSession && !activeSession.isGroupRoom
+    const activeCall = activeSession
+      ? {
+          callId: activeSession.callId,
+          durationMinutes: activeSession.planDurationMinutes || 15,
+          startedAtMs: sessionStartedAtRef.current ?? undefined,
+        }
+      : studioState?.activeCallId
         ? {
-            callId: activeSession.callId,
-            durationMinutes: activeSession.planDurationMinutes || 15,
-            startedAtMs: sessionStartedAtRef.current ?? undefined,
+            callId: studioState.activeCallId,
+            durationMinutes: activeQueueReq?.planDurationMinutes || 15,
+            startedAtMs: activeQueueReq?.updatedAt?.toMillis?.() ?? undefined,
           }
-        : studioState?.activeCallId
-          ? {
-              callId: studioState.activeCallId,
-              durationMinutes: activeQueueReq?.planDurationMinutes || 15,
-              startedAtMs: activeQueueReq?.updatedAt?.toMillis?.() ?? undefined,
-            }
-          : null;
+        : null;
 
     syncAuthoritativeQueue({
       waiting: waitingEntries,
@@ -1434,8 +1353,6 @@ export default function App() {
   useEffect(() => {
     if (!isAuthenticated || !pendingPublicJoinRef.current) return;
     pendingPublicJoinRef.current = false;
-    const nextIntent = pendingEntryIntentRef.current;
-    pendingEntryIntentRef.current = 'group';
     if (isAdmin) {
       navigateRoute('/admin');
       return;
@@ -1443,7 +1360,6 @@ export default function App() {
     if (isAdminRoute) {
       navigateRoute('/');
     }
-    setEntryIntent(nextIntent);
     setActiveTab('studio');
   }, [isAdmin, isAdminRoute, isAuthenticated, navigateRoute]);
 
@@ -1480,7 +1396,7 @@ export default function App() {
         'Tempo do plano concluído',
         `Os ${activeSession.planDurationMinutes} minutos contratados foram finalizados.`
       );
-      if (isAdmin || activeSession.isGroupRoom) {
+      if (isAdmin) {
         void handleEndCall();
       }
     }
@@ -1655,6 +1571,7 @@ export default function App() {
 
   const handleModelLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setRegLocalError(null);
     if (!modelLoginInput.trim() || !modelPasswordInput) return;
     const ok = await loginAsModel(modelLoginInput.trim(), modelPasswordInput);
     if (ok) {
@@ -1662,6 +1579,215 @@ export default function App() {
       navigateRoute('/admin');
     }
   };
+
+  const handleModelRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegLocalError(null);
+    if (regDisplayName.trim().length < 2) {
+      setRegLocalError('Informe seu nome artístico (mínimo 2 caracteres).');
+      return;
+    }
+    if (regLoginInput.trim().length < 3) {
+      setRegLocalError('Informe um login de acesso (mínimo 3 caracteres).');
+      return;
+    }
+    if (regPasswordInput.length < 6) {
+      setRegLocalError('Sua senha privativa deve ter pelo menos 6 caracteres.');
+      return;
+    }
+    if (regPasswordInput !== regConfirmPassword) {
+      setRegLocalError('A confirmação da senha não confere.');
+      return;
+    }
+    const res = await registerAsModel({
+      displayName: regDisplayName.trim(),
+      loginUsername: regLoginInput.trim(),
+      password: regPasswordInput,
+      adminThemeColor: regThemeColor,
+    });
+    if (res.ok) {
+      setRegPasswordInput('');
+      setRegConfirmPassword('');
+      navigateRoute('/admin');
+    }
+  };
+
+  const handlePrimaryClaimSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setClaimLocalError(null);
+    if (claimPasswordInput.length < 6) {
+      setClaimLocalError('A senha inicial deve ter pelo menos 6 caracteres.');
+      return;
+    }
+    if (claimPasswordInput !== claimConfirmPassword) {
+      setClaimLocalError('A confirmação da senha não confere.');
+      return;
+    }
+    const res = await claimPrimaryModelPassword({
+      password: claimPasswordInput,
+      ...(claimLoginInput.trim()
+        ? { loginUsername: claimLoginInput.trim() }
+        : {}),
+    });
+    if (res.ok) {
+      setClaimPasswordInput('');
+      setClaimConfirmPassword('');
+      navigateRoute('/admin');
+    }
+  };
+
+  // Load WhatsApp Invite landing data when visiting /convite/:inviteId
+  useEffect(() => {
+    if (!activeInviteId) {
+      setInviteData(null);
+      setInviteError(null);
+      setInviteLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setInviteLoading(true);
+    setInviteError(null);
+    void fetch(`/api/public/invites/${encodeURIComponent(activeInviteId)}`)
+      .then(async (res) => {
+        const json = (await res.json().catch(() => ({}))) as PublicWhatsappInviteData & {
+          ok?: boolean;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok || !json.ok || !json.invite) {
+          setInviteData(null);
+          setInviteError(json.error || 'Convite não encontrado ou expirado.');
+          return;
+        }
+        setInviteData({
+          invite: json.invite,
+          model: json.model,
+          studioConfig: json.studioConfig,
+          studioState: json.studioState,
+          callPlans: json.callPlans,
+        });
+        setSelectedPublicModelId(json.model.id);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setInviteError('Não foi possível carregar o convite agora.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setInviteLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeInviteId, setSelectedPublicModelId]);
+
+  const handleInvitePayAndHire = useCallback(
+    async (selection: InviteCheckoutSelection) => {
+      if (!inviteData) return;
+      const availablePlans =
+        activePlans.length > 0 ? activePlans : inviteData.callPlans;
+      const plan =
+        availablePlans.find((p) => p.id === selection.planId) ||
+        availablePlans[0];
+      if (!plan) {
+        setInviteCheckoutError('Nenhum pacote ativo disponível neste convite.');
+        return;
+      }
+
+      setInviteSubmitting(true);
+      setInviteCheckoutError(null);
+      try {
+        const pixRes = await createPixCharge({
+          modelId: inviteData.model.id,
+          kind: 'call_plan',
+          planId: plan.id,
+          callMode: 'private',
+          topic: selection.topic,
+          inviteId: inviteData.invite.id,
+        });
+        if (!pixRes.ok || !pixRes.charge) {
+          setInviteCheckoutError(
+            pixRes.error || 'Não foi possível gerar o QR Code PIX.'
+          );
+          return;
+        }
+        setPendingInvitePixMeta({
+          plan,
+          topic: selection.topic,
+          inviteId: inviteData.invite.id,
+        });
+        setInvitePixCharge(pixRes.charge);
+      } finally {
+        setInviteSubmitting(false);
+      }
+    },
+    [
+      activePlans,
+      createPixCharge,
+      dndActiveNow,
+      handleVisitorDirectCallModel,
+      inviteData,
+      modelOnline,
+      modelProfile,
+      navigateRoute,
+      pushToast,
+      refreshWorkspace,
+      requestVideoCall,
+      studioState?.activeCallId,
+      studioState?.callMode,
+      studioState?.isLive,
+    ]
+  );
+
+  // Resume WhatsApp Invite checkout automatically right after visitor signs in with Google
+  useEffect(() => {
+    if (!isAuthenticated || isAdmin || !inviteData || isAdminRoute) return;
+    if (selectedPublicModelId !== inviteData.model.id) return;
+
+    let pending: (InviteCheckoutSelection & { inviteId: string }) | null =
+      pendingInviteAutoCheckoutRef.current;
+
+    if (!pending && typeof window !== 'undefined') {
+      try {
+        const raw = window.sessionStorage.getItem(PENDING_INVITE_CHECKOUT_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as InviteCheckoutSelection & {
+            inviteId?: string;
+          };
+          if (parsed && parsed.inviteId === inviteData.invite.id) {
+            pending = {
+              inviteId: parsed.inviteId,
+              planId: parsed.planId,
+              paymentMethod: parsed.paymentMethod,
+              callMode: parsed.callMode,
+              topic: parsed.topic,
+            };
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+
+    if (!pending || pending.inviteId !== inviteData.invite.id) return;
+
+    pendingInviteAutoCheckoutRef.current = null;
+    if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage.removeItem(PENDING_INVITE_CHECKOUT_KEY);
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    void handleInvitePayAndHire(pending);
+  }, [
+    handleInvitePayAndHire,
+    inviteData,
+    isAdmin,
+    isAdminRoute,
+    isAuthenticated,
+    selectedPublicModelId,
+  ]);
 
   if (authLoading) {
     return (
@@ -1689,7 +1815,7 @@ export default function App() {
       >
         <TechAmbientField />
         <Header
-          studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+          studioBrand={studioConfig?.studioBrand || 'Model Gat Brasil'}
           isAuthenticated={isAuthenticated}
           isAdmin={isAdmin}
           isAdminRoute={isAdminRoute}
@@ -1718,33 +1844,271 @@ export default function App() {
           }}
         />
 
-        {!isAuthenticated ? (
-          isAdminRoute ? (
-            <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-12 flex items-center justify-center">
-              <section className="max-w-lg w-full luxury-card tech-reticle border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-6">
-                <div className="space-y-2">
-                  <p className="text-xs font-medium text-[#F4C2D7]">
-                    Acesso Restrito · Área das Modelos
-                  </p>
-                  <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-                    Central Exclusiva da Modelo
-                  </h1>
-                  <p className="text-sm text-[#C9BAC4] leading-relaxed">
-                    Entre com seu login e senha individuais para abrir seu painel isolado, seus planos, sua agenda e atender videochamadas privativas.
-                  </p>
-                </div>
+        {activeInviteId && !isAdminRoute && !activeSession ? (
+          inviteLoading ? (
+            <main className="relative z-10 flex-1 max-w-[1280px] w-full mx-auto px-6 py-16 flex items-center justify-center">
+              <p className="text-sm text-[#C9BAC4]">
+                Carregando convite exclusivo...
+              </p>
+            </main>
+          ) : inviteError || !inviteData ? (
+            <main className="relative z-10 flex-1 max-w-[1280px] w-full mx-auto px-6 py-16 flex items-center justify-center">
+              <section className="max-w-md w-full luxury-card border border-[#F4C2D7]/20 rounded-3xl p-8 text-center space-y-4">
+                <h1 className="font-display text-2xl font-semibold text-[#FAF4F7]">
+                  Convite indisponível
+                </h1>
+                <p className="text-sm text-[#C9BAC4]">
+                  {inviteError ||
+                    'Este link de convite não foi encontrado ou já expirou.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigateRoute('/')}
+                  className="px-6 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta cursor-pointer"
+                >
+                  Ir para Vitrine Principal
+                </button>
+              </section>
+            </main>
+          ) : (
+            <WhatsappInviteCheckoutView
+              inviteData={inviteData}
+              isAuthenticated={isAuthenticated}
+              isAdmin={isAdmin}
+              isBlocked={myProfile?.accessStatus === 'blocked'}
+              activePlans={activePlans}
+              submitting={inviteSubmitting}
+              errorMsg={inviteCheckoutError}
+              authError={authError}
+              onRequireAuthAndPay={(selection) => {
+                const payload = {
+                  ...selection,
+                  inviteId: inviteData.invite.id,
+                };
+                pendingInviteAutoCheckoutRef.current = payload;
+                try {
+                  window.sessionStorage.setItem(
+                    PENDING_INVITE_CHECKOUT_KEY,
+                    JSON.stringify(payload)
+                  );
+                } catch {
+                  // Ignore storage restrictions
+                }
+                void loginWithGoogle();
+              }}
+              onPayAndHire={handleInvitePayAndHire}
+              onGoToFullCatalog={() => navigateRoute('/')}
+              onBackToAdmin={
+                isAdmin ? () => navigateRoute('/admin') : undefined
+              }
+            />
+          )
+        ) : isAdminRoute && !isAdmin ? (
+          <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-12 flex items-center justify-center">
+            <section className="max-w-lg w-full luxury-card tech-reticle border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-6">
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-[#F4C2D7] inline-flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Acesso Privativo · Painel Individual da Modelo</span>
+                </p>
+                <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
+                  Painel Exclusivo da Modelo
+                </h1>
+                <p className="text-sm text-[#C9BAC4] leading-relaxed">
+                  Cada modelo possui seu próprio painel de administração isolado, acessível exclusivamente pelo seu login e senha individuais. Ninguém mais tem acesso ao seu painel.
+                </p>
+              </div>
 
-                {/* Individual Model Credentials Form */}
+              {user && !modelSession && (
+                <div className="p-3.5 rounded-xl bg-[#21142D]/85 border border-[#F4C2D7]/30 text-xs text-[#F8D6E3]">
+                  Você está conectado(a) como internauta ({user.displayName || 'Google'}). Para abrir seu painel administrativo particular, entre com seu login e senha de modelo abaixo.
+                </div>
+              )}
+
+              {primaryNeedsClaim && (
+                <form
+                  onSubmit={(e) => void handlePrimaryClaimSubmit(e)}
+                  className="p-5 rounded-2xl bg-[#150D1D] border border-[#38BDF8]/40 space-y-4"
+                >
+                  <div className="space-y-1">
+                    <p className="text-xs font-semibold text-[#38BDF8]">
+                      Configuração Inicial · Definir Senha do Painel Principal
+                    </p>
+                    <p className="text-xs text-[#C9BAC4] leading-relaxed">
+                      O painel principal de{' '}
+                      <strong className="text-[#FAF4F7]">
+                        {primaryClaimInfo?.displayName || 'Lorena Noir'}
+                      </strong>{' '}
+                      (login{' '}
+                      <span className="font-mono text-[#F4C2D7]">
+                        {primaryClaimInfo?.loginUsername || 'lorena@modelgat.local'}
+                      </span>
+                      ) ainda não possui senha definida. Crie uma senha exclusiva abaixo para ativar e entrar no painel.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="claim-primary-login"
+                      className="block text-xs font-medium text-[#C9BAC4]"
+                    >
+                      Login de Acesso (opcional alterar)
+                    </label>
+                    <input
+                      id="claim-primary-login"
+                      type="text"
+                      maxLength={120}
+                      autoComplete="username"
+                      value={claimLoginInput}
+                      onChange={(e) => setClaimLoginInput(e.target.value)}
+                      placeholder={
+                        primaryClaimInfo?.loginUsername || 'lorena@modelgat.local'
+                      }
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#38BDF8]"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="claim-primary-pass"
+                        className="block text-xs font-medium text-[#C9BAC4]"
+                      >
+                        Nova Senha Inicial (mín. 6)
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="claim-primary-pass"
+                          type={showClaimPassword ? 'text' : 'password'}
+                          required
+                          minLength={6}
+                          maxLength={80}
+                          autoComplete="new-password"
+                          value={claimPasswordInput}
+                          onChange={(e) => setClaimPasswordInput(e.target.value)}
+                          placeholder="Crie sua senha"
+                          className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl pl-4 pr-10 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#38BDF8]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowClaimPassword((p) => !p)}
+                          aria-label={
+                            showClaimPassword ? 'Ocultar senha' : 'Mostrar senha'
+                          }
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                        >
+                          {showClaimPassword ? (
+                            <EyeOff className="w-4 h-4" />
+                          ) : (
+                            <Eye className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="claim-primary-confirm"
+                        className="block text-xs font-medium text-[#C9BAC4]"
+                      >
+                        Confirmar Senha
+                      </label>
+                      <input
+                        id="claim-primary-confirm"
+                        type={showClaimPassword ? 'text' : 'password'}
+                        required
+                        minLength={6}
+                        maxLength={80}
+                        autoComplete="new-password"
+                        value={claimConfirmPassword}
+                        onChange={(e) => setClaimConfirmPassword(e.target.value)}
+                        placeholder="Repita sua senha"
+                        className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#38BDF8]"
+                      />
+                    </div>
+                  </div>
+
+                  {(claimLocalError || modelAuthError) && (
+                    <div
+                      role="alert"
+                      className="p-3 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
+                    >
+                      {claimLocalError || modelAuthError}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={
+                      modelAuthSubmitting ||
+                      claimPasswordInput.length < 6 ||
+                      !claimConfirmPassword
+                    }
+                    className="w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all cursor-pointer"
+                  >
+                    <KeyRound className="w-4 h-4 shrink-0" />
+                    <span>
+                      {modelAuthSubmitting
+                        ? 'Salvando senha inicial...'
+                        : 'Definir Senha e Entrar no Painel'}
+                    </span>
+                  </button>
+                </form>
+              )}
+
+              {/* Mode Switch: Login vs Create Private Panel */}
+              <div
+                role="tablist"
+                aria-label="Tipo de acesso ao painel da modelo"
+                className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-[#0B060F] border border-[#F4C2D7]/20"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={adminAuthMode === 'login'}
+                  onClick={() => {
+                    setAdminAuthMode('login');
+                    setRegLocalError(null);
+                  }}
+                  className={`inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
+                    adminAuthMode === 'login'
+                      ? 'bg-[#21142D] text-[#FAF4F7] border border-[#F4C2D7]/35'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                  }`}
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Entrar no Meu Painel</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={adminAuthMode === 'register'}
+                  onClick={() => {
+                    setAdminAuthMode('register');
+                    setRegLocalError(null);
+                  }}
+                  className={`inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl transition-colors cursor-pointer ${
+                    adminAuthMode === 'register'
+                      ? 'bg-[#21142D] text-[#FAF4F7] border border-[#F4C2D7]/35'
+                      : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
+                  }`}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Criar Meu Painel</span>
+                </button>
+              </div>
+
+              {adminAuthMode === 'login' ? (
                 <form
                   onSubmit={(e) => void handleModelLoginSubmit(e)}
-                  className="space-y-4 pt-2"
+                  className="space-y-4"
                 >
                   <div className="space-y-1.5">
                     <label
                       htmlFor="model-login-input"
                       className="block text-xs font-medium text-[#C9BAC4]"
                     >
-                      Login ou E-mail da Modelo
+                      Seu Login ou E-mail da Modelo
                     </label>
                     <input
                       id="model-login-input"
@@ -1753,7 +2117,7 @@ export default function App() {
                       autoComplete="username"
                       value={modelLoginInput}
                       onChange={(e) => setModelLoginInput(e.target.value)}
-                      placeholder="Ex.: camila ou camila@studio.com"
+                      placeholder="Ex.: camila ou camila@modelgat.local"
                       className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
                     />
                   </div>
@@ -1763,7 +2127,7 @@ export default function App() {
                       htmlFor="model-password-input"
                       className="block text-xs font-medium text-[#C9BAC4]"
                     >
-                      Senha Exclusiva
+                      Sua Senha Exclusiva
                     </label>
                     <div className="relative">
                       <input
@@ -1773,7 +2137,7 @@ export default function App() {
                         autoComplete="current-password"
                         value={modelPasswordInput}
                         onChange={(e) => setModelPasswordInput(e.target.value)}
-                        placeholder="Digite sua senha individual"
+                        placeholder="Digite sua senha privativa"
                         className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl pl-4 pr-11 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
                       />
                       <button
@@ -1814,202 +2178,298 @@ export default function App() {
                     <KeyRound className="w-4 h-4 shrink-0" />
                     <span>
                       {modelAuthSubmitting
-                        ? 'Entrando...'
-                        : 'Entrar no Painel da Modelo'}
+                        ? 'Entrando no painel...'
+                        : 'Entrar no Meu Painel Privativo'}
                     </span>
                   </button>
                 </form>
+              ) : (
+                <form
+                  onSubmit={(e) => void handleModelRegisterSubmit(e)}
+                  className="space-y-4"
+                >
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="reg-model-name"
+                      className="block text-xs font-medium text-[#C9BAC4]"
+                    >
+                      Seu Nome Artístico na Vitrine
+                    </label>
+                    <input
+                      id="reg-model-name"
+                      type="text"
+                      required
+                      minLength={2}
+                      maxLength={80}
+                      value={regDisplayName}
+                      onChange={(e) => setRegDisplayName(e.target.value)}
+                      placeholder="Ex.: Valentina Lux"
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                    />
+                  </div>
 
-                <div className="pt-4 border-t border-[#F4C2D7]/15 space-y-3">
-                  <p className="text-[11px] text-[#938291]">
-                    Administração Geral (cadastro de modelos, senhas e gestão):
-                  </p>
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="reg-model-login"
+                      className="block text-xs font-medium text-[#C9BAC4]"
+                    >
+                      Seu Login Privativo (único)
+                    </label>
+                    <input
+                      id="reg-model-login"
+                      type="text"
+                      required
+                      minLength={3}
+                      maxLength={120}
+                      autoComplete="username"
+                      value={regLoginInput}
+                      onChange={(e) => setRegLoginInput(e.target.value)}
+                      placeholder="Ex.: valentina ou valentina@modelgat.local"
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                    />
+                  </div>
 
-                  {authError && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="reg-model-pass"
+                        className="block text-xs font-medium text-[#C9BAC4]"
+                      >
+                        Senha Privativa (mín. 6)
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="reg-model-pass"
+                          type={showRegPassword ? 'text' : 'password'}
+                          required
+                          minLength={6}
+                          maxLength={120}
+                          autoComplete="new-password"
+                          value={regPasswordInput}
+                          onChange={(e) => setRegPasswordInput(e.target.value)}
+                          placeholder="Crie sua senha"
+                          className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl pl-4 pr-10 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRegPassword((p) => !p)}
+                          aria-label={
+                            showRegPassword ? 'Ocultar senha' : 'Mostrar senha'
+                          }
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                        >
+                          {showRegPassword ? (
+                            <EyeOff className="w-4 h-4" />
+                          ) : (
+                            <Eye className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="reg-model-confirm"
+                        className="block text-xs font-medium text-[#C9BAC4]"
+                      >
+                        Confirmar Senha
+                      </label>
+                      <input
+                        id="reg-model-confirm"
+                        type={showRegPassword ? 'text' : 'password'}
+                        required
+                        minLength={6}
+                        maxLength={120}
+                        autoComplete="new-password"
+                        value={regConfirmPassword}
+                        onChange={(e) => setRegConfirmPassword(e.target.value)}
+                        placeholder="Repita sua senha"
+                        className="w-full bg-[#0B060F] border border-[#F4C2D7]/25 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] placeholder:text-[#938291] focus:outline-none focus:border-[#F4C2D7]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <span className="block text-xs font-medium text-[#C9BAC4]">
+                      Cor do Seu Painel Administrativo
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {ADMIN_MODEL_THEMES.map((theme) => {
+                        const selected = regThemeColor === theme.id;
+                        return (
+                          <button
+                            key={theme.id}
+                            type="button"
+                            title={theme.label}
+                            aria-label={`Escolher cor ${theme.label}`}
+                            aria-pressed={selected}
+                            onClick={() => setRegThemeColor(theme.id)}
+                            className={`w-6 h-6 rounded-full transition-transform cursor-pointer ${
+                              selected
+                                ? 'ring-2 ring-white ring-offset-2 ring-offset-[#0B060F] scale-110'
+                                : 'opacity-80 hover:opacity-100 border border-white/25'
+                            }`}
+                            style={{ backgroundColor: theme.swatchHex }}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {(regLocalError || modelAuthError) && (
                     <div
                       role="alert"
                       className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200"
                     >
-                      {authError}
+                      {regLocalError || modelAuthError}
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => void loginWithGoogle()}
-                      className="px-5 py-2.5 text-xs font-semibold rounded-full bg-[#21142D] border border-[#F4C2D7]/35 text-[#FAF4F7] hover:border-[#F4C2D7] transition-colors cursor-pointer"
-                    >
-                      Entrar como Administradora Geral (Google)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateRoute('/')}
-                      className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors cursor-pointer"
-                    >
-                      Ir para área dos internautas
-                    </button>
-                  </div>
-                </div>
-              </section>
-            </main>
-          ) : (
-            <LoginView
-              studioConfig={studioConfig}
-              studioState={studioState}
-              galleryItems={galleryItems}
-              callPlans={callPlans}
-              publicModels={publicModels}
-              publicRatings={publicRatings}
-              publicShowcaseLoading={publicShowcaseLoading}
-              selectedModelId={selectedPublicModelId}
-              onSelectModel={setSelectedPublicModelId}
-              privateAlbumSummary={privateAlbumSummary}
-              onUnlockPrivateAlbum={unlockPrivateAlbum}
-              onRequirePrivateAlbumAuth={() => {
-                void loginWithGoogle();
-              }}
-              onEnterVideoCall={() => {
-                pendingPublicJoinRef.current = true;
-                pendingEntryIntentRef.current = 'group';
-                void loginWithGoogle();
-              }}
-              onEnterPrivateCall={() => {
-                pendingPublicJoinRef.current = true;
-                pendingEntryIntentRef.current = 'private';
-                void loginWithGoogle();
-              }}
-              onNavigateToAdmin={() => navigateRoute('/admin')}
-              authError={authError}
-            />
-          )
-        ) : isAdminRoute ? (
-          <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
-            {!isAdmin ? (
-              <section className="max-w-lg mx-auto my-12 luxury-card border border-[#F4C2D7]/20 rounded-3xl p-8 space-y-5">
-                <div className="space-y-2">
-                  <p className="text-xs font-medium text-[#FCA5A5]">
-                    Acesso Restrito
-                  </p>
-                  <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#FAF4F7]">
-                    Área Exclusiva da Modelo
-                  </h1>
-                  <p className="text-sm text-[#C9BAC4] leading-relaxed">
-                    A conta conectada atualmente não possui permissão administrativa para acessar o painel da modelo.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-3">
                   <button
-                    type="button"
-                    onClick={() => navigateRoute('/')}
-                    className="px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all cursor-pointer"
+                    type="submit"
+                    disabled={modelAuthSubmitting}
+                    className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all cursor-pointer"
                   >
-                    Ir para Recepção de Videochamada
+                    <UserPlus className="w-4 h-4 shrink-0" />
+                    <span>
+                      {modelAuthSubmitting
+                        ? 'Criando painel exclusivo...'
+                        : 'Criar e Entrar no Meu Painel Privativo'}
+                    </span>
                   </button>
+                </form>
+              )}
+
+              <div className="pt-4 border-t border-[#F4C2D7]/15 flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => navigateRoute('/')}
+                  className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] transition-colors cursor-pointer"
+                >
+                  Ir para área dos internautas
+                </button>
+                {user && (
                   <button
                     type="button"
                     onClick={() => void logout()}
-                    className="px-5 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837] transition-colors cursor-pointer"
+                    className="px-4 py-2 text-xs text-[#938291] hover:text-[#FAF4F7] cursor-pointer"
                   >
-                    Trocar de Conta
+                    Sair da conta Google
                   </button>
-                </div>
-              </section>
-            ) : (
-              <ModelAdminPage
-                myUid={effectiveActorUid}
-                myProfile={myProfile}
-                modelProfile={modelProfile}
-                allProfiles={allProfiles}
-                peers={peers}
-                roomParticipants={roomParticipants}
-                studioState={studioState}
-                studioConfig={studioConfig}
-                galleryItems={galleryItems}
-                privateAlbumSummary={privateAlbumSummary}
-                privateAlbumItems={privateAlbumItems}
-                pendingGalleryItems={pendingGalleryItems}
-                callQueue={callQueue}
-                callMessages={callMessages}
-                callHistory={callHistory}
-                interestMessages={interestMessages}
-                callPlans={callPlans}
-                ratePerMinuteCents={ratePerMinuteCents}
-                onChangeRatePerMinuteCents={setRatePerMinuteCents}
-                soundEnabled={soundEnabled}
-                onToggleSoundEnabled={toggleSoundEnabled}
-                onTestSoundDing={() => {
-                  unlockAudioContext();
-                  playNotificationDing('test', true);
-                }}
-                wsConnected={wsConnected}
-                isGroupRoom={Boolean(activeSession?.isGroupRoom)}
-                activeCallId={activeSession?.callId || null}
-                activePartnerUid={activeSession?.partnerUid || null}
-                activePartnerName={activeSession?.partnerName || ''}
-                activePlan={activeStagePlan}
-                incomingRing={incomingRing}
-                localStream={localStream}
-                remoteStream={remoteStream}
-                remoteStreams={remoteStreams}
-                peerConnectionStates={peerConnectionStates}
-                micEnabled={micEnabled}
-                camEnabled={camEnabled}
-                mediaError={mediaError}
-                connectionState={connectionState}
-                elapsedSeconds={elapsedSeconds}
-                onAcquireMedia={acquireLocalMedia}
-                onToggleMic={() => toggleMic()}
-                onToggleCam={toggleCam}
-                onEndCall={handleEndCall}
-                onJoinGroupRoomAdmin={handleAdminJoinGroupRoom}
-                onSendMessage={handleSendMessage}
-                onAcceptIncomingRing={handleAcceptIncomingRing}
-                onRejectIncomingRing={handleRejectIncomingRing}
-                onAcceptQueueAndCall={handleAcceptQueueAndCall}
-                onUpdateCallStatus={updateCallStatus}
-                onDeleteCallRequest={deleteCallRequest}
-                onDirectCallUser={handleDirectCallUser}
-                onSavePlan={saveCallPlan}
-                onDeletePlan={deleteCallPlan}
-                onUpdateStudioState={updateStudioState}
-                onUploadImage={uploadStudioImage}
-                onUploadMedia={uploadStudioMedia}
-                onSaveStudioConfig={saveStudioConfig}
-                onSaveGalleryItem={saveGalleryItem}
-                onDeleteGalleryItem={deleteGalleryItem}
-                onRestoreDefaultGallery={restoreDefaultGallery}
-                onModerateGalleryItem={moderatePublicGalleryItem}
-                onToggleMediaVisibility={toggleMediaVisibility}
-                onSavePrivateAlbumSettings={savePrivateAlbumSettings}
-                onSavePrivateAlbumItem={savePrivateAlbumItem}
-                onDeletePrivateAlbumItem={deletePrivateAlbumItem}
-                onUpdateUserControl={updateUserControl}
-                onDeleteUserProfile={deleteUserProfile}
-                onSendModeration={sendModerationCommand}
-                onRecordCallHistory={recordCallHistory}
-                onUpdateCallHistoryStatus={updateCallHistoryStatus}
-                onUpdateCallHistoryRecord={updateCallHistoryRecord}
-                onDeleteCallHistoryRecord={deleteCallHistoryRecord}
-                onUpdateInterestMessageStatus={updateInterestMessageStatus}
-                onDeleteInterestMessage={deleteInterestMessage}
-                isSuperAdmin={isSuperAdmin}
-                activeModelId={
-                  isSuperAdmin ? superAdminSelectedModelId : activeModelId
-                }
-                activeAdminThemeId={activeAdminThemeId}
-                superAdminModels={superAdminModels}
-                onCreateModelAccount={createModelAccount}
-                onUpdateModelAccount={updateModelAccount}
-                onDeleteModelAccount={deleteModelAccount}
-                onSelectModelWorkspace={(modelId) => {
-                  setSuperAdminSelectedModelId(modelId);
-                }}
-                pixCharges={pixCharges}
-                onConfirmModelPixCharge={confirmModelPixCharge}
-                onCancelModelPixCharge={cancelModelPixCharge}
-              />
-            )}
+                )}
+              </div>
+            </section>
+          </main>
+        ) : !isAuthenticated ? (
+          <LoginView
+            studioConfig={studioConfig}
+            studioState={studioState}
+            galleryItems={galleryItems}
+            callPlans={callPlans}
+            publicModels={publicModels}
+            publicRatings={publicRatings}
+            publicShowcaseLoading={publicShowcaseLoading}
+            selectedModelId={selectedPublicModelId}
+            onSelectModel={setSelectedPublicModelId}
+            privateAlbumSummary={privateAlbumSummary}
+            onUnlockPrivateAlbum={unlockPrivateAlbum}
+            onRequirePrivateAlbumAuth={() => {
+              void loginWithGoogle();
+            }}
+            onEnterVideoCall={() => {
+              pendingPublicJoinRef.current = true;
+              void loginWithGoogle();
+            }}
+            onEnterPrivateCall={() => {
+              pendingPublicJoinRef.current = true;
+              void loginWithGoogle();
+            }}
+            onNavigateToAdmin={() => navigateRoute('/admin')}
+            authError={authError}
+          />
+        ) : isAdminRoute ? (
+          <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
+            <ModelAdminPage
+              myUid={effectiveActorUid}
+              myProfile={myProfile}
+              modelProfile={modelProfile}
+              allProfiles={allProfiles}
+              peers={peers}
+              studioState={studioState}
+              studioConfig={studioConfig}
+              galleryItems={galleryItems}
+              privateAlbumSummary={privateAlbumSummary}
+              privateAlbumItems={privateAlbumItems}
+              callQueue={callQueue}
+              callMessages={callMessages}
+              callHistory={callHistory}
+              interestMessages={interestMessages}
+              callPlans={callPlans}
+              ratePerMinuteCents={ratePerMinuteCents}
+              onChangeRatePerMinuteCents={setRatePerMinuteCents}
+              soundEnabled={soundEnabled}
+              onToggleSoundEnabled={toggleSoundEnabled}
+              onTestSoundDing={() => {
+                unlockAudioContext();
+                playNotificationDing('test', true);
+              }}
+              wsConnected={wsConnected}
+              activeCallId={activeSession?.callId || null}
+              activePartnerUid={activeSession?.partnerUid || null}
+              activePartnerName={activeSession?.partnerName || ''}
+              activePlan={activeStagePlan}
+              incomingRing={incomingRing}
+              localStream={localStream}
+              remoteStream={remoteStream}
+              micEnabled={micEnabled}
+              camEnabled={camEnabled}
+              mediaError={mediaError}
+              connectionState={connectionState}
+              elapsedSeconds={elapsedSeconds}
+              onAcquireMedia={acquireLocalMedia}
+              onToggleMic={() => toggleMic()}
+              onToggleCam={toggleCam}
+              onEndCall={handleEndCall}
+              onSendMessage={handleSendMessage}
+              onAcceptIncomingRing={handleAcceptIncomingRing}
+              onRejectIncomingRing={handleRejectIncomingRing}
+              onAcceptQueueAndCall={handleAcceptQueueAndCall}
+              onUpdateCallStatus={updateCallStatus}
+              onDeleteCallRequest={deleteCallRequest}
+              onDirectCallUser={handleDirectCallUser}
+              onSavePlan={saveCallPlan}
+              onDeletePlan={deleteCallPlan}
+              onUpdateStudioState={updateStudioState}
+              onUploadImage={uploadStudioImage}
+              onUploadMedia={uploadStudioMedia}
+              onSaveStudioConfig={saveStudioConfig}
+              onSaveGalleryItem={saveGalleryItem}
+              onDeleteGalleryItem={deleteGalleryItem}
+              onRestoreDefaultGallery={restoreDefaultGallery}
+              onToggleMediaVisibility={toggleMediaVisibility}
+              onSavePrivateAlbumSettings={savePrivateAlbumSettings}
+              onSavePrivateAlbumItem={savePrivateAlbumItem}
+              onDeletePrivateAlbumItem={deletePrivateAlbumItem}
+              onUpdateUserControl={updateUserControl}
+              onDeleteUserProfile={deleteUserProfile}
+              onSendModeration={sendModerationCommand}
+              onRecordCallHistory={recordCallHistory}
+              onUpdateCallHistoryStatus={updateCallHistoryStatus}
+              onUpdateCallHistoryRecord={updateCallHistoryRecord}
+              onDeleteCallHistoryRecord={deleteCallHistoryRecord}
+              onUpdateInterestMessageStatus={updateInterestMessageStatus}
+              onDeleteInterestMessage={deleteInterestMessage}
+              activeModelId={activeModelId}
+              activeAdminThemeId={activeAdminThemeId}
+              modelAccount={modelAccount}
+              onUpdateMyModelAccount={updateMyModelAccount}
+              pixCharges={pixCharges}
+              onConfirmModelPixCharge={confirmModelPixCharge}
+              onCancelModelPixCharge={cancelModelPixCharge}
+              whatsappInvites={whatsappInvites}
+              onCreateWhatsappInvite={createWhatsappInvite}
+              onDeleteWhatsappInvite={deleteWhatsappInvite}
+            />
           </main>
         ) : (
           <main className="relative z-10 flex-1 max-w-[1440px] w-full mx-auto px-6 py-8 space-y-6">
@@ -2038,23 +2498,30 @@ export default function App() {
                     onClick={() => navigateRoute('/admin')}
                     className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-full bg-[#21142D] border border-[#F4C2D7]/35 text-[#FAF4F7] hover:bg-[#281837] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <span>Voltar à Administração da Modelo</span>
+                    <span>Voltar ao Meu Painel Privativo</span>
                   </button>
                 )}
-                {!isModelUnavailable && (
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('call')}
-                    className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <Video className="w-3.5 h-3.5" />
-                    <span>
-                      {activeSession
-                        ? 'Voltar para Chamada'
-                        : 'Abrir Sala de Vídeo'}
-                    </span>
-                  </button>
-                )}
+                {!isModelUnavailable &&
+                  (activeSession ||
+                    callQueue.some(
+                      (q) =>
+                        q.status === 'waiting' ||
+                        q.status === 'accepted' ||
+                        q.status === 'in_call'
+                    )) && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('call')}
+                      className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Video className="w-3.5 h-3.5" />
+                      <span>
+                        {activeSession
+                          ? 'Voltar para Sala Privativa'
+                          : 'Abrir Sala de Espera Privativa'}
+                      </span>
+                    </button>
+                  )}
               </div>
             </div>
 
@@ -2260,11 +2727,42 @@ export default function App() {
           ) : (
             <>
               {activeTab === 'call' &&
-                (!activeSession &&
-                myProfile?.accessStatus !== 'blocked' &&
-                callQueue.some(
-                  (q) => q.status === 'waiting' || q.status === 'accepted'
-                ) ? (
+                (activeSession ||
+                callQueue.some((q) => q.status === 'in_call') ? (
+                  <VideoCallStage
+                    isAdmin={false}
+                    modelId={activeModelId}
+                    myProfile={myProfile}
+                    modelProfile={modelProfile}
+                    studioState={studioState}
+                    activeCallId={activeSession?.callId || null}
+                    activePartnerName={activeSession?.partnerName || ''}
+                    activePartnerUid={activeSession?.partnerUid || null}
+                    activePlan={activeStagePlan}
+                    localStream={localStream}
+                    remoteStream={remoteStream}
+                    micEnabled={micEnabled}
+                    camEnabled={camEnabled}
+                    mediaError={mediaError}
+                    connectionState={connectionState}
+                    elapsedSeconds={elapsedSeconds}
+                    wsConnected={wsConnected}
+                    messages={callMessages}
+                    onAcquireMedia={acquireLocalMedia}
+                    onToggleMic={() => toggleMic()}
+                    onToggleCam={toggleCam}
+                    onEndCall={() => void handleEndCall()}
+                    onSendMessage={handleSendMessage}
+                    onSendTip={sendTipContribution}
+                    onCreatePixCharge={createPixCharge}
+                    onCheckPixCharge={checkPixChargeStatus}
+                    onConfirmPixCharge={confirmPixCharge}
+                    onCancelPixCharge={cancelPixCharge}
+                  />
+                ) : myProfile?.accessStatus !== 'blocked' &&
+                  callQueue.some(
+                    (q) => q.status === 'waiting' || q.status === 'accepted'
+                  ) ? (
                   <SalaDeEspera
                     request={
                       callQueue.find(
@@ -2296,40 +2794,46 @@ export default function App() {
                     }
                   />
                 ) : (
-                  <VideoCallStage
-                    isAdmin={false}
-                    modelId={activeModelId}
-                    isGroupRoom={Boolean(activeSession?.isGroupRoom)}
-                    myProfile={myProfile}
-                    modelProfile={modelProfile}
-                    studioState={studioState}
-                    activeCallId={activeSession?.callId || null}
-                    activePartnerName={activeSession?.partnerName || ''}
-                    activePartnerUid={activeSession?.partnerUid || null}
-                    activePlan={activeStagePlan}
-                    localStream={localStream}
-                    remoteStream={remoteStream}
-                    remoteStreams={remoteStreams}
-                    peerConnectionStates={peerConnectionStates}
-                    roomParticipants={roomParticipants}
-                    micEnabled={micEnabled}
-                    camEnabled={camEnabled}
-                    mediaError={mediaError}
-                    connectionState={connectionState}
-                    elapsedSeconds={elapsedSeconds}
-                    wsConnected={wsConnected}
-                    messages={callMessages}
-                    onAcquireMedia={acquireLocalMedia}
-                    onToggleMic={() => toggleMic()}
-                    onToggleCam={toggleCam}
-                    onEndCall={() => void handleEndCall()}
-                    onSendMessage={handleSendMessage}
-                    onSendTip={sendTipContribution}
-                    onCreatePixCharge={createPixCharge}
-                    onCheckPixCharge={checkPixChargeStatus}
-                    onConfirmPixCharge={confirmPixCharge}
-                    onCancelPixCharge={cancelPixCharge}
-                  />
+                  <div className="space-y-6">
+                    <div className="px-5 py-3.5 rounded-2xl luxury-card border border-[#F4C2D7]/35 text-xs text-[#F8D6E3]">
+                      Acesso exclusivo mediante pagamento: selecione um plano abaixo e conclua via PIX QR Code para liberar sua sala privativa 1-para-1 com {activeModelDisplayName}.
+                    </div>
+                    <CallQueuePanel
+                      isAdmin={false}
+                      modelId={activeModelId}
+                      myProfile={myProfile}
+                      modelProfile={modelProfile}
+                      studioState={studioState}
+                      studioConfig={studioConfig}
+                      galleryItems={galleryItems}
+                      callQueue={callQueue}
+                      callPlans={callPlans}
+                      peers={peers}
+                      queueSummary={queueSummary}
+                      wsConnected={wsConnected}
+                      localStream={localStream}
+                      micEnabled={micEnabled}
+                      camEnabled={camEnabled}
+                      mediaError={mediaError}
+                      onAcquireMedia={acquireLocalMedia}
+                      onToggleMic={() => toggleMic()}
+                      onToggleCam={toggleCam}
+                      onRequestCall={requestVideoCall}
+                      onDirectCallModel={handleVisitorDirectCallModel}
+                      onRefreshWorkspace={refreshWorkspace}
+                      onAcceptAndCall={handleAcceptQueueAndCall}
+                      onUpdateCallStatus={updateCallStatus}
+                      onDeleteCallRequest={deleteCallRequest}
+                      onEnterAcceptedCall={(req) =>
+                        void handleEnterAcceptedCall(req)
+                      }
+                      onSendTip={sendTipContribution}
+                      onCreatePixCharge={createPixCharge}
+                      onCheckPixCharge={checkPixChargeStatus}
+                      onConfirmPixCharge={confirmPixCharge}
+                      onCancelPixCharge={cancelPixCharge}
+                    />
+                  </div>
                 ))}
 
               {activeTab === 'queue' && (
@@ -2337,7 +2841,6 @@ export default function App() {
                   <CallQueuePanel
                     isAdmin={false}
                     modelId={activeModelId}
-                    entryIntent={entryIntent}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
                     studioState={studioState}
@@ -2346,7 +2849,6 @@ export default function App() {
                     callQueue={callQueue}
                     callPlans={callPlans}
                     peers={peers}
-                    roomParticipants={roomParticipants}
                     queueSummary={queueSummary}
                     wsConnected={wsConnected}
                     localStream={localStream}
@@ -2358,7 +2860,6 @@ export default function App() {
                     onToggleCam={toggleCam}
                     onRequestCall={requestVideoCall}
                     onDirectCallModel={handleVisitorDirectCallModel}
-                    onJoinGroupRoom={handleVisitorJoinGroupRoom}
                     onRefreshWorkspace={refreshWorkspace}
                     onAcceptAndCall={handleAcceptQueueAndCall}
                     onUpdateCallStatus={updateCallStatus}
@@ -2372,7 +2873,7 @@ export default function App() {
                   />
                   <ModelProfileBioSection
                     modelName={activeModelDisplayName}
-                    studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                    studioBrand={studioConfig?.studioBrand || 'Model Gat Brasil'}
                     modelBio={studioConfig?.modelBio}
                     basicInfo={studioConfig?.basicInfo}
                     avatarUrl={
@@ -2410,7 +2911,6 @@ export default function App() {
                   <CallQueuePanel
                     isAdmin={false}
                     modelId={activeModelId}
-                    entryIntent={entryIntent}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
                     studioState={studioState}
@@ -2419,7 +2919,6 @@ export default function App() {
                     callQueue={callQueue}
                     callPlans={callPlans}
                     peers={peers}
-                    roomParticipants={roomParticipants}
                     queueSummary={queueSummary}
                     wsConnected={wsConnected}
                     localStream={localStream}
@@ -2431,7 +2930,6 @@ export default function App() {
                     onToggleCam={toggleCam}
                     onRequestCall={requestVideoCall}
                     onDirectCallModel={handleVisitorDirectCallModel}
-                    onJoinGroupRoom={handleVisitorJoinGroupRoom}
                     onRefreshWorkspace={refreshWorkspace}
                     onAcceptAndCall={handleAcceptQueueAndCall}
                     onUpdateCallStatus={updateCallStatus}
@@ -2445,7 +2943,7 @@ export default function App() {
                   />
                   <ModelProfileBioSection
                     modelName={activeModelDisplayName}
-                    studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                    studioBrand={studioConfig?.studioBrand || 'Model Gat Brasil'}
                     modelBio={studioConfig?.modelBio}
                     basicInfo={studioConfig?.basicInfo}
                     avatarUrl={
@@ -2483,7 +2981,7 @@ export default function App() {
             <div className="space-y-8 pt-2">
               <ModelProfileBioSection
                 modelName={activeModelDisplayName}
-                studioBrand={studioConfig?.studioBrand || 'Maison Aura'}
+                studioBrand={studioConfig?.studioBrand || 'Model Gat Brasil'}
                 modelBio={studioConfig?.modelBio}
                 basicInfo={studioConfig?.basicInfo}
                 avatarUrl={
@@ -2509,6 +3007,72 @@ export default function App() {
             </div>
           )}
         </main>
+      )}
+
+      {invitePixCharge && pendingInvitePixMeta && (
+        <PixPaymentModal
+          charge={invitePixCharge}
+          title={`Pagamento PIX · ${pendingInvitePixMeta.plan.name}`}
+          subtitle={`Chamada Privativa 1-para-1 · Convite com ${
+            inviteData?.model.displayName || activeModelDisplayName
+          }`}
+          confirmLabel="Já Paguei via PIX · Liberar Sala Privativa"
+          onClose={() => {
+            setInvitePixCharge(null);
+            setPendingInvitePixMeta(null);
+          }}
+          onCancelCharge={cancelPixCharge}
+          onCheckStatus={checkPixChargeStatus}
+          onConfirmPayment={confirmPixCharge}
+          onRegenerate={async () => {
+            if (!inviteData) return;
+            const res = await createPixCharge({
+              modelId: inviteData.model.id,
+              kind: 'call_plan',
+              planId: pendingInvitePixMeta.plan.id,
+              callMode: 'private',
+              topic: pendingInvitePixMeta.topic,
+              inviteId: pendingInvitePixMeta.inviteId,
+            });
+            if (res.ok && res.charge) {
+              setInvitePixCharge(res.charge);
+            }
+          }}
+          onPaid={async (res) => {
+            const meta = pendingInvitePixMeta;
+            const modelDisplay =
+              inviteData?.model.displayName || activeModelDisplayName;
+            setInvitePixCharge(null);
+            setPendingInvitePixMeta(null);
+
+            const canDirectCallNow =
+              Boolean(modelProfile) &&
+              modelOnline &&
+              !dndActiveNow &&
+              !studioState?.activeCallId &&
+              (studioState?.isLive ?? true) &&
+              (studioState?.callMode ?? 'open') === 'open';
+
+            navigateRoute('/');
+
+            if (canDirectCallNow) {
+              await handleVisitorDirectCallModel(
+                meta.topic,
+                meta.plan,
+                res.callRequestId
+              );
+            } else {
+              setActiveTab('call');
+              await refreshWorkspace();
+            }
+
+            pushToast(
+              'call_accepted',
+              'PIX confirmado!',
+              `Sala privativa 1-para-1 com ${modelDisplay} liberada.`
+            );
+          }}
+        />
       )}
 
       <ToastOverlay toasts={toasts} onDismiss={dismissToast} />

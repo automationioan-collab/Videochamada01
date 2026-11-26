@@ -186,7 +186,7 @@ export const GaleriaModelo: React.FC<GaleriaModeloProps> = ({
           </h2>
           <p className="text-sm text-[#B6C2E2] leading-relaxed">
             Explore os ensaios recentes e o cenário oficial de transmissão antes
-            de iniciar sua videochamada ao vivo ou privativa.
+            de iniciar sua videochamada privativa 1-para-1.
           </p>
         </div>
 

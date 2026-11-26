@@ -182,8 +182,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
     studioConfig?.heroSubtitle ||
     selectedModelSummary?.headline ||
     DEFAULT_STUDIO_CONFIG.heroSubtitle;
-  const groupButtonLabel =
-    studioConfig?.groupButtonLabel || DEFAULT_STUDIO_CONFIG.groupButtonLabel;
   const privateButtonLabel =
     studioConfig?.privateButtonLabel ||
     DEFAULT_STUDIO_CONFIG.privateButtonLabel;
@@ -544,7 +542,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                         alt={
                           featuredDirectoryModel
                             ? `Estúdio ao vivo de ${featuredDirectoryModel.displayName}`
-                            : 'Ambiente ao vivo Maison Aura'
+                            : 'Ambiente ao vivo Model Gat Brasil'
                         }
                         referrerPolicy="no-referrer"
                         draggable={false}
@@ -657,7 +655,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     [
                       { id: 'all', label: 'Todos' },
                       { id: 'online', label: 'Online Agora' },
-                      { id: 'live', label: 'Sala Aberta' },
+                      { id: 'live', label: 'Sala Privativa' },
                       { id: 'private_album', label: 'Álbum Privativo' },
                     ] as const
                   ).map((tab) => {
@@ -718,7 +716,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   Online Agora
                 </p>
                 <p className="text-[11px] text-[#94A3B8] truncate">
-                  Prontas para chamada ao vivo
+                  Salas privativas 1-para-1 mediante pagamento
                 </p>
               </div>
             </div>
@@ -876,18 +874,22 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
                             <span
                               className={`text-[11px] font-semibold whitespace-nowrap shrink-0 ${
-                                model.modelOnline
-                                  ? 'text-[#38BDF8]'
-                                  : model.isLive
-                                    ? 'text-[#C4B5FD]'
-                                    : 'text-[#94A3B8]'
+                                (model.roomParticipantCount ?? 0) > 0
+                                  ? 'text-[#FCD34D]'
+                                  : model.modelOnline
+                                    ? 'text-[#38BDF8]'
+                                    : model.isLive
+                                      ? 'text-[#C4B5FD]'
+                                      : 'text-[#94A3B8]'
                               }`}
                             >
-                              {model.modelOnline
-                                ? 'Online agora'
-                                : model.isLive
-                                  ? 'Sala aberta'
-                                  : 'Em descanso'}
+                              {(model.roomParticipantCount ?? 0) > 0
+                                ? 'Em sala privativa (1/1)'
+                                : model.modelOnline
+                                  ? 'Livre · Privativa 1-para-1'
+                                  : model.isLive
+                                    ? 'Sala privativa livre'
+                                    : 'Em descanso'}
                             </span>
                           </div>
                         </div>
@@ -1039,7 +1041,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
               {!directoryLoungeImgFailed ? (
                 <img
                   src={DEFAULT_STUDIO_CONFIG.loungeImageUrl}
-                  alt="Sala privativa de atendimento Maison Aura"
+                  alt="Sala privativa de atendimento Model Gat Brasil"
                   referrerPolicy="no-referrer"
                   draggable={false}
                   onError={() => setDirectoryLoungeImgFailed(true)}
@@ -1090,13 +1092,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   icon: <Lock className="w-5 h-5 text-[#38BDF8]" />,
                   title: 'Sala 1-para-1 Exclusiva',
                   description:
-                    'Converse com áudio e vídeo em sala fechada com duração escolhida e privacidade garantida.',
+                    'Converse com áudio e vídeo em sala fechada mediante pagamento, com duração escolhida e privacidade garantida.',
                 },
                 {
                   icon: <Users className="w-5 h-5 text-[#A5B4FC]" />,
-                  title: 'Sala Compartilhada ao Vivo',
+                  title: '1 Internauta por Vez · Privacidade Total',
                   description:
-                    'Participe da transmissão aberta do estúdio com interação em chat e envio de gorjetas em tempo real.',
+                    'Enquanto você estiver em atendimento, nenhum outro visitante pode entrar ou assistir a modelo.',
                 },
                 {
                   icon: <Sparkles className="w-5 h-5 text-[#C4B5FD]" />,
@@ -1313,10 +1315,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       <span className="truncate font-mono tabular-nums">
                         {studioBrand} ·{' '}
                         {roomCount > 0
-                          ? `${roomCount} na videochamada agora`
+                          ? 'Em sala privativa (1/1) · Entre na fila'
                           : publicStatus?.modelOnline
-                            ? `${modelName} Online Agora`
-                            : 'Perfil Individual & Atendimento'}
+                            ? `${modelName} Livre para Privativa 1-para-1`
+                            : 'Sala Privativa 1-para-1 Exclusiva'}
                       </span>
                       <span
                         aria-hidden="true"
@@ -1324,7 +1326,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       />
                     </div>
 
-                    <h1 className="font-display text-4xl sm:text-5xl lg:text-[56px] font-bold leading-[1.04] text-[#F8FAFC] [text-wrap:balance]">
+                    <h1 className="font-display text-4xl sm:text-5xl lg:text-[58px] font-bold leading-[1.03] text-[#F8FAFC] [text-wrap:balance]">
                       {heroHeadingParts.lead ? `${heroHeadingParts.lead} ` : ''}
                       <span className="neo-gradient-text font-bold">
                         {heroHeadingParts.accent}
@@ -1340,21 +1342,21 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3.5">
                       <button
                         type="button"
-                        onClick={onEnterVideoCall}
+                        onClick={onEnterPrivateCall}
                         className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 text-sm font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F8FAFC]"
                       >
-                        <Users className="w-4 h-4 shrink-0" />
-                        <span>{groupButtonLabel}</span>
+                        <Lock className="w-4 h-4 shrink-0" />
+                        <span>{privateButtonLabel}</span>
                         <ArrowRight className="w-4 h-4 shrink-0" />
                       </button>
 
                       <button
                         type="button"
-                        onClick={onEnterPrivateCall}
+                        onClick={() => scrollToSection('planos')}
                         className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 text-sm font-semibold rounded-full bg-[#0D1330]/85 border border-[#818CF8]/35 text-[#F8FAFC] hover:bg-[#161F49] hover:border-[#38BDF8]/70 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
                       >
-                        <Lock className="w-4 h-4 text-[#38BDF8] shrink-0" />
-                        <span>{privateButtonLabel}</span>
+                        <CreditCard className="w-4 h-4 text-[#38BDF8] shrink-0" />
+                        <span>Ver Planos e Valores</span>
                       </button>
                     </div>
 
@@ -1370,9 +1372,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     <p className="text-xs text-[#94A3B8] font-mono tabular-nums">
                       Valor base: {BRL_FORMATTER.format(selectedModelRateCents / 100)}
                       /min · {activeShowcasePlans.length} plano(s) ativo(s) ·{' '}
-                      {roomCount === 0
-                        ? `Atendimento exclusivo com ${modelName}`
-                        : `${roomCount} participante(s) na sala agora`}
+                      {roomCount > 0
+                        ? 'Em atendimento privativo (1/1)'
+                        : `1 internauta por vez com ${modelName}`}
                     </p>
                   </div>
                 </div>
@@ -1412,8 +1414,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
                           </p>
                           <p className="text-[10px] font-mono tabular-nums text-[#38BDF8] truncate">
                             {roomCount > 0
-                              ? `${roomCount} participante(s)`
-                              : 'Vídeo HD 1080p'}
+                              ? 'Sala ocupada (1/1)'
+                              : 'Sala Privativa 1-para-1'}
                           </p>
                         </div>
                       </div>
@@ -1674,15 +1676,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
           {/* 4. Exclusive Public Gallery of This Professional */}
           {showSection('gallery') && (
-            <GaleriaModelo
-              modelName={modelName}
-              items={galleryItems}
-              hasCustomSource={Boolean(studioConfig) || !isPrimaryModel}
-              ctaLabel={groupButtonLabel}
-              privateCtaLabel={privateButtonLabel}
-              onPrimaryAction={onEnterVideoCall}
-              onPrivateAction={onEnterPrivateCall}
-            />
+              <GaleriaModelo
+                modelName={modelName}
+                items={galleryItems}
+                hasCustomSource={Boolean(studioConfig) || !isPrimaryModel}
+                ctaLabel={privateButtonLabel}
+                onPrimaryAction={onEnterPrivateCall}
+              />
           )}
 
           {/* 5. Exclusive Private Photo & Video Album (Paid Access Gate) */}
@@ -1745,8 +1745,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   <li className="flex items-start gap-2.5">
                     <Check className="w-4 h-4 text-[#38BDF8] shrink-0 mt-0.5" />
                     <span>
-                      Acesse a sala ao vivo em grupo ou chame na sala privativa
-                      1-para-1
+                      Acesse a sala privativa 1-para-1 mediante pagamento — apenas
+                      1 internauta vê a modelo por vez
                     </span>
                   </li>
                   <li className="flex items-start gap-2.5">
@@ -1829,19 +1829,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <div className="flex flex-wrap items-center gap-3 pt-1">
                   <button
                     type="button"
-                    onClick={onEnterVideoCall}
+                    onClick={onEnterPrivateCall}
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <span>Entrar e Escolher Plano</span>
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Contratar Plano e Entrar na Sala Privativa</span>
                     <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onEnterPrivateCall}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-full bg-[#0D1330]/85 border border-[#818CF8]/35 text-[#F8FAFC] hover:border-[#38BDF8] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <Lock className="w-3.5 h-3.5 text-[#38BDF8]" />
-                    <span>Ir Direto para Privativa</span>
                   </button>
                 </div>
               </TechSpotlightCard>
@@ -1935,7 +1928,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </p>
             <p className="text-xs text-[#94A3B8] max-w-sm leading-relaxed">
               {viewMode === 'directory'
-                ? 'Catálogo privado de profissionais para videochamadas ao vivo, sessões 1-para-1 e álbuns exclusivos.'
+                ? 'Catálogo privado de profissionais para salas privativas 1-para-1 mediante pagamento e álbuns exclusivos.'
                 : `Página pública individual de ${modelName} com agenda, galeria, álbum privativo e planos sob medida.`}
             </p>
           </div>
@@ -2015,17 +2008,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={onEnterVideoCall}
+                onClick={onEnterPrivateCall}
                 className="px-4 py-2 rounded-full luxury-rose-cta font-semibold whitespace-nowrap shrink-0 cursor-pointer"
               >
-                Sala ao Vivo
-              </button>
-              <button
-                type="button"
-                onClick={onEnterPrivateCall}
-                className="px-4 py-2 rounded-full bg-[#0D1330] border border-[#818CF8]/30 text-[#F8FAFC] hover:border-[#38BDF8] font-medium whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Chamada Privativa
+                Entrar na Sala Privativa (1-para-1)
               </button>
             </div>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#94A3B8] pt-2">

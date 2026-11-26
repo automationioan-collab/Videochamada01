@@ -316,9 +316,43 @@ export interface PixChargeRecord {
   merchantCity: string;
   usingDemoKey?: boolean;
   callRequestId?: string;
+  inviteId?: string;
   createdAt: number;
   expiresAt: number;
   paidAt?: number;
+  visitorReportedPaidAt?: number;
+}
+
+export type WhatsappInviteStatus = 'pending' | 'viewed' | 'paid';
+
+export interface WhatsappInviteRecord {
+  id: string;
+  modelId: string;
+  recipientName?: string;
+  recipientPhone?: string;
+  photoUrl: string;
+  message: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
+  callMode: CallEntryIntent;
+  status: WhatsappInviteStatus;
+  clickCount: number;
+  createdAt: number;
+  viewedAt?: number;
+  paidAt?: number;
+  paidByName?: string;
+  callRequestId?: string;
+  pixChargeId?: string;
+}
+
+export interface PublicWhatsappInviteData {
+  invite: Omit<WhatsappInviteRecord, 'recipientPhone' | 'pixChargeId'>;
+  model: PublicModelSummary;
+  studioConfig: StudioConfig;
+  studioState: StudioState;
+  callPlans: CallPlan[];
 }
 
 export interface StudioConfig {
@@ -341,6 +375,10 @@ export interface StudioConfig {
   pixKeyType?: PixKeyType;
   pixMerchantName?: string;
   pixMerchantCity?: string;
+  whatsappInvitePhotoUrl?: string;
+  whatsappInviteMessage?: string;
+  whatsappInvitePlanId?: string;
+  whatsappInviteCallMode?: CallEntryIntent;
   updatedAt?: Timestamp;
 }
 

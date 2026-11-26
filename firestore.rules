@@ -238,13 +238,12 @@ service cloud.firestore {
 
     // --- Collection Rules ---
 
-    // 1. Studio Profiles (Public room metadata & access controls; zero PII)
+    // 1. Studio Profiles (Owner & admin scoped; zero PII)
     match /studioProfiles/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isSignedIn() && (
         isTokenAdmin() ||
-        resource.data.uid == request.auth.uid ||
-        resource.data.role == 'model'
+        resource.data.uid == request.auth.uid
       );
       allow create: if isSignedIn() && isVerifiedUser() && isValidId(userId) &&
         isValidStudioProfile(incoming()) &&

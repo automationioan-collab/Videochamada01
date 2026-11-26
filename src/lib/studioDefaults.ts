@@ -23,20 +23,20 @@ export interface DefaultStudioConfigValues {
 }
 
 export const DEFAULT_STUDIO_CONFIG: DefaultStudioConfigValues = {
-  studioBrand: 'Maison Aura',
+  studioBrand: 'Model Gat Brasil',
   modelName: 'Lorena Noir',
   modelAvatarUrl: '/src/assets/images/model_avatar_camila_1794946401641.jpg',
   heroImageUrl: '/src/assets/images/model_studio_hero_1794946401293.jpg',
   loungeImageUrl: '/src/assets/images/studio_backdrop_lounge_1794946401840.jpg',
   modelBio:
-    'Atendimento ao vivo exclusivo, sala multi-participantes e chamadas privativas 1-para-1 em vídeo HD.',
-  heroTitle: 'Videochamada ao vivo com Lorena Noir.',
+    'Atendimento exclusivo em sala privativa 1-para-1 mediante pagamento em vídeo HD, com apenas 1 internauta por sessão.',
+  heroTitle: 'Sala privativa ao vivo com Lorena Noir.',
   heroSubtitle:
-    'Entre na sala ao vivo compartilhada com vários internautas conectados simultaneamente, ou inicie uma videochamada privativa exclusiva 1-para-1 somente com a modelo.',
+    'Atendimento 100% privativo (1-para-1) liberado mediante pagamento. Apenas 1 internauta por vez na sala com total exclusividade.',
   headline:
-    'Atendimento privativo 1-para-1 e sala ao vivo em videochamada com Lorena Noir.',
-  groupButtonLabel: 'Entrar na Videochamada ao Vivo',
-  privateButtonLabel: 'Chamada Privativa (Só com a Modelo)',
+    'Sala privativa 1-para-1 exclusiva com Lorena Noir mediante pagamento.',
+  groupButtonLabel: 'Entrar na Sala Privativa (1-para-1)',
+  privateButtonLabel: 'Contratar Sala Privativa (1-para-1)',
   ratePerMinuteCents: 1500,
   privateAlbumPriceCents: 3900,
 };
@@ -118,13 +118,13 @@ export const DEFAULT_GALLERY_ITEMS: ReadonlyArray<DefaultGalleryItemInput> = [
   },
   {
     id: 'lounge_backdrop',
-    title: 'Salão Maison Aura',
+    title: 'Salão Model Gat Brasil',
     caption:
       'Ambiente reservado do estúdio com acústica tratada e atmosfera acolhedora para conversas exclusivas.',
     category: 'studio',
     specs: 'Sala Privada · Acústica Tratada',
     src: '/src/assets/images/studio_backdrop_lounge_1794946401840.jpg',
-    alt: 'Ambiente interno do salão privado Maison Aura',
+    alt: 'Ambiente interno do salão privado Model Gat Brasil',
     sortOrder: 6,
     active: true,
   },

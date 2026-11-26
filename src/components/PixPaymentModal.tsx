@@ -79,6 +79,7 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
   const [confirming, setConfirming] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [pendingNotice, setPendingNotice] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [localCharge, setLocalCharge] = useState<PixChargeRecord | null>(charge);
 
@@ -86,6 +87,7 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
     setLocalCharge(charge);
     setCopied(false);
     setFeedbackError(null);
+    setPendingNotice(null);
     setNowMs(Date.now());
   }, [charge]);
 
@@ -154,6 +156,7 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
     if (confirming || isExpired || isPaid) return;
     setConfirming(true);
     setFeedbackError(null);
+    setPendingNotice(null);
     try {
       const res = await onConfirmPayment(localCharge.modelId, localCharge.id);
       if (res.charge) {
@@ -161,6 +164,11 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
       }
       if (res.ok && res.charge?.status === 'paid') {
         await onPaid(res);
+      } else if (res.pending) {
+        setPendingNotice(
+          res.error ||
+            'Aviso de pagamento enviado! Aguarde a modelo confirmar o recebimento no banco — esta tela atualiza automaticamente.'
+        );
       } else {
         setFeedbackError(
           res.error ||
@@ -354,6 +362,15 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
               </span>
             </div>
           </div>
+
+          {pendingNotice && (
+            <div
+              role="status"
+              className="p-3 rounded-xl bg-[#0EA5E9]/15 border border-[#38BDF8]/40 text-xs text-[#E0F2FE]"
+            >
+              {pendingNotice}
+            </div>
+          )}
 
           {feedbackError && (
             <div

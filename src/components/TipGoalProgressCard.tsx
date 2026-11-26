@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle2, CreditCard, Gift, QrCode, Target, Users } from 'lucide-react';
+import { CheckCircle2, Gift, QrCode, Target, Users } from 'lucide-react';
 import { PixPaymentModal, type PixConfirmationResponse } from './PixPaymentModal';
 import type { PixChargeKind, PixChargeRecord, StudioState } from '../types/studio';
 
@@ -60,7 +60,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
 }) => {
   const [selectedCents, setSelectedCents] = useState<number>(2500);
   const [customReais, setCustomReais] = useState<string>('');
-  const [paymentMethod, setPaymentMethod] = useState<'pix' | 'card'>('pix');
+  const paymentMethod = 'pix' as const;
   const [note, setNote] = useState<string>('');
   const [sending, setSending] = useState(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
@@ -307,31 +307,9 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
                 />
               </div>
 
-              <div className="flex items-center gap-1 p-1 bg-[#070B1E]/85 border border-[#818CF8]/25 rounded-full">
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('pix')}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full cursor-pointer ${
-                    paymentMethod === 'pix'
-                      ? 'luxury-rose-cta font-semibold'
-                      : 'text-[#B6C2E2] hover:text-[#F8FAFC]'
-                  }`}
-                >
-                  <QrCode className="w-3 h-3" />
-                  <span>PIX</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('card')}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full cursor-pointer ${
-                    paymentMethod === 'card'
-                      ? 'luxury-rose-cta font-semibold'
-                      : 'text-[#B6C2E2] hover:text-[#F8FAFC]'
-                  }`}
-                >
-                  <CreditCard className="w-3 h-3" />
-                  <span>Cartão</span>
-                </button>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#070B1E]/85 border border-[#38BDF8]/35 rounded-full text-[11px] font-medium text-[#38BDF8]">
+                <QrCode className="w-3.5 h-3.5" />
+                <span>PIX Verificado</span>
               </div>
             </div>
 
@@ -352,23 +330,13 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
                 onClick={() => void handleSubmitTip(resolvedAmountCents)}
                 className="inline-flex items-center justify-center gap-2 px-5 py-2 text-xs font-semibold rounded-full luxury-rose-cta transition-all whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45"
               >
-                {paymentMethod === 'pix' ? (
-                  <QrCode className="w-3.5 h-3.5" />
-                ) : (
-                  <Target className="w-3.5 h-3.5" />
-                )}
+                <QrCode className="w-3.5 h-3.5" />
                 <span>
                   {sending
-                    ? paymentMethod === 'pix'
-                      ? 'Gerando PIX...'
-                      : 'Enviando...'
-                    : paymentMethod === 'pix'
-                      ? `Gerar PIX · ${BRL_FORMATTER.format(
-                          Math.max(0, resolvedAmountCents) / 100
-                        )}`
-                      : `Enviar Gorjeta · ${BRL_FORMATTER.format(
-                          Math.max(0, resolvedAmountCents) / 100
-                        )}`}
+                    ? 'Gerando PIX...'
+                    : `Gerar PIX · ${BRL_FORMATTER.format(
+                        Math.max(0, resolvedAmountCents) / 100
+                      )}`}
                 </span>
               </button>
             </div>

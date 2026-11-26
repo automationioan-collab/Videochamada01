@@ -8,7 +8,6 @@ import {
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import {
   OperationType,
-  STUDIO_ADMIN_EMAIL,
   auth,
   db,
   googleAuthProvider,
@@ -23,6 +22,7 @@ import {
 import { hydrateTimestampFields } from '../lib/timestampAdapter';
 import type {
   AccessStatus,
+  CallEntryIntent,
   CallHistoryRecord,
   CallHistoryStatus,
   CallMessage,
@@ -37,8 +37,6 @@ import type {
   MediaAssetType,
   MediaVisibility,
   ModelAccountSummary,
-  ModelBasicInfo,
-  PendingGalleryReviewItem,
   PixChargeKind,
   PixChargeRecord,
   PrivateAlbumItemRecord,
@@ -51,10 +49,12 @@ import type {
   StudioRole,
   StudioState,
   StudioStateUpdatePatch,
+  WhatsappInviteRecord,
 } from '../types/studio';
 
 export const DEFAULT_PRIMARY_MODEL_ID = 'lorena_noir';
-const PUBLIC_MODEL_STORAGE_KEY = 'maison_aura_selected_public_model';
+const PUBLIC_MODEL_STORAGE_KEY = 'model_gat_selected_public_model';
+const LEGACY_MODEL_SESSION_STORAGE_KEY = 'model_gat_model_session_token';
 
 function resolveInitialPublicModelId(): string {
   if (typeof window === 'undefined') return DEFAULT_PRIMARY_MODEL_ID;
@@ -84,6 +84,11 @@ export function useStudioAuth() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [modelAuthError, setModelAuthError] = useState<string | null>(null);
   const [modelAuthSubmitting, setModelAuthSubmitting] = useState(false);
+  const [primaryNeedsClaim, setPrimaryNeedsClaim] = useState(false);
+  const [primaryClaimInfo, setPrimaryClaimInfo] = useState<{
+    displayName: string;
+    loginUsername: string;
+  } | null>(null);
 
   const [publicModels, setPublicModels] = useState<PublicModelSummary[]>([]);
   const [selectedPublicModelId, setSelectedPublicModelIdState] = useState<string>(
@@ -91,11 +96,6 @@ export function useStudioAuth() {
   );
   const [publicRatings, setPublicRatings] = useState<PublicRatingRecord[]>([]);
   const [publicShowcaseLoading, setPublicShowcaseLoading] = useState<boolean>(false);
-  const [superAdminSelectedModelId, setSuperAdminSelectedModelId] =
-    useState<string>(DEFAULT_PRIMARY_MODEL_ID);
-  const [superAdminModels, setSuperAdminModels] = useState<
-    ModelAccountSummary[]
-  >([]);
 
   const [myProfile, setMyProfile] = useState<StudioProfile | null>(null);
   const [modelProfile, setModelProfile] = useState<StudioProfile | null>(null);
@@ -110,9 +110,6 @@ export function useStudioAuth() {
   >([]);
   const [visitorUnlockedPrivateItems, setVisitorUnlockedPrivateItems] =
     useState<PrivateAlbumItemRecord[]>([]);
-  const [pendingGalleryItems, setPendingGalleryItems] = useState<
-    PendingGalleryReviewItem[]
-  >([]);
   const [callQueue, setCallQueue] = useState<CallRequest[]>([]);
   const [callMessages, setCallMessages] = useState<CallMessage[]>([]);
   const [callHistory, setCallHistory] = useState<CallHistoryRecord[]>([]);
@@ -121,6 +118,9 @@ export function useStudioAuth() {
   );
   const [callPlans, setCallPlans] = useState<CallPlan[]>([]);
   const [pixCharges, setPixCharges] = useState<PixChargeRecord[]>([]);
+  const [whatsappInvites, setWhatsappInvites] = useState<WhatsappInviteRecord[]>(
+    []
+  );
 
   const setSelectedPublicModelId = useCallback((modelId: string) => {
     const cleanId = modelId.trim() || DEFAULT_PRIMARY_MODEL_ID;
@@ -139,48 +139,24 @@ export function useStudioAuth() {
     }
   }, []);
 
-  const isSuperAdmin = useMemo(() => {
-    if (modelSession) return false;
-    return Boolean(
-      user?.email === STUDIO_ADMIN_EMAIL && user?.emailVerified === true
-    );
-  }, [modelSession, user]);
-
-  const isAdmin = useMemo(() => {
-    return Boolean(modelSession) || isSuperAdmin;
-  }, [isSuperAdmin, modelSession]);
+  const isAdmin = useMemo(() => Boolean(modelSession), [modelSession]);
 
   const activeModelId = useMemo(() => {
     if (modelSession) return modelSession.model.id;
-    if (isSuperAdmin) return superAdminSelectedModelId;
     return selectedPublicModelId;
-  }, [
-    isSuperAdmin,
-    modelSession,
-    selectedPublicModelId,
-    superAdminSelectedModelId,
-  ]);
+  }, [modelSession, selectedPublicModelId]);
 
   const effectiveActorUid = useMemo(() => {
     if (modelSession) return `model_${modelSession.model.id}`;
-    if (isSuperAdmin) return `model_${superAdminSelectedModelId}`;
     return user?.uid || '';
-  }, [isSuperAdmin, modelSession, superAdminSelectedModelId, user?.uid]);
+  }, [modelSession, user?.uid]);
 
   const activeAdminThemeId = useMemo(() => {
     if (modelSession?.model.adminThemeColor) {
       return modelSession.model.adminThemeColor;
     }
-    if (isSuperAdmin) {
-      const selected = superAdminModels.find(
-        (m) => m.id === superAdminSelectedModelId
-      );
-      if (selected?.adminThemeColor) {
-        return selected.adminThemeColor;
-      }
-    }
     return 'rose_velvet';
-  }, [isSuperAdmin, modelSession, superAdminModels, superAdminSelectedModelId]);
+  }, [modelSession]);
 
   const authHeaderRef = useRef<() => Promise<Record<string, string>>>(
     async () => ({})
@@ -194,15 +170,8 @@ export function useStudioAuth() {
         Authorization: `Bearer ${modelSession.token}`,
       };
     }
-    if (user && isSuperAdmin) {
-      const token = await user.getIdToken();
-      return {
-        Authorization: `Bearer ${token}`,
-        'x-model-id': superAdminSelectedModelId,
-      };
-    }
     return {};
-  }, [isSuperAdmin, modelSession, superAdminSelectedModelId, user]);
+  }, [modelSession]);
 
   authHeaderRef.current = getOperatorHeaders;
 
@@ -217,33 +186,10 @@ export function useStudioAuth() {
   }, [user]);
 
   const syncUserDocuments = useCallback(async (firebaseUser: User) => {
-    const isAdminUser =
-      firebaseUser.email === STUDIO_ADMIN_EMAIL &&
-      firebaseUser.emailVerified === true;
-
-    const cleanName = isAdminUser
-      ? 'Lorena Noir'
-      : (firebaseUser.displayName || 'Participante').trim().slice(0, 80);
+    const cleanName = (firebaseUser.displayName || 'Participante')
+      .trim()
+      .slice(0, 80);
     const cleanPhoto = (firebaseUser.photoURL || '').slice(0, 500);
-
-    if (isAdminUser) {
-      const adminRef = doc(db, 'admins', firebaseUser.uid);
-      try {
-        const adminSnap = await getDoc(adminRef);
-        if (!adminSnap.exists()) {
-          await setDoc(adminRef, {
-            uid: firebaseUser.uid,
-            createdAt: serverTimestamp(),
-          });
-        }
-      } catch (err) {
-        handleFirestoreError(
-          err,
-          OperationType.WRITE,
-          `admins/${firebaseUser.uid}`
-        );
-      }
-    }
 
     const profileRef = doc(db, 'studioProfiles', firebaseUser.uid);
     try {
@@ -253,8 +199,8 @@ export function useStudioAuth() {
           uid: firebaseUser.uid,
           displayName: cleanName,
           photoUrl: cleanPhoto,
-          role: isAdminUser ? 'model' : 'viewer',
-          accessStatus: isAdminUser ? 'vip' : 'active',
+          role: 'viewer',
+          accessStatus: 'active',
           isOnline: true,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -301,17 +247,60 @@ export function useStudioAuth() {
     }
   }, []);
 
+  const refreshBootstrapStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/model-auth/bootstrap-status');
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        ok?: boolean;
+        primaryNeedsClaim?: boolean;
+        primaryDisplayName?: string;
+        primaryLoginUsername?: string;
+      };
+      if (json.ok && json.primaryNeedsClaim) {
+        setPrimaryNeedsClaim(true);
+        setPrimaryClaimInfo({
+          displayName: json.primaryDisplayName || 'Lorena Noir',
+          loginUsername: json.primaryLoginUsername || 'lorena@modelgat.local',
+        });
+      } else {
+        setPrimaryNeedsClaim(false);
+        setPrimaryClaimInfo(null);
+      }
+    } catch {
+      // Ignore transient bootstrap status check failure
+    }
+  }, []);
+
   useEffect(() => {
-    let settled = false;
+    let disposed = false;
+    let firebaseSettled = false;
+
+    if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage.removeItem(LEGACY_MODEL_SESSION_STORAGE_KEY);
+      } catch {
+        // Ignore storage errors
+      }
+    }
+
+    void refreshBootstrapStatus();
+
+    const finishIfReady = () => {
+      if (firebaseSettled && !disposed) {
+        setAuthLoading(false);
+      }
+    };
+
     const bootTimer = window.setTimeout(() => {
-      if (!settled) setAuthLoading(false);
+      if (!disposed) setAuthLoading(false);
     }, 3500);
 
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      settled = true;
+      firebaseSettled = true;
       window.clearTimeout(bootTimer);
       setUser(firebaseUser);
-      setAuthLoading(false);
+      finishIfReady();
 
       if (firebaseUser) {
         void syncUserDocuments(firebaseUser).catch((err) => {
@@ -321,10 +310,11 @@ export function useStudioAuth() {
     });
 
     return () => {
+      disposed = true;
       window.clearTimeout(bootTimer);
       unsubscribe();
     };
-  }, [syncUserDocuments]);
+  }, [refreshBootstrapStatus, syncUserDocuments]);
 
   const applyWorkspaceSnapshot = useCallback(
     (json: Record<string, unknown>) => {
@@ -467,6 +457,12 @@ export function useStudioAuth() {
       } else {
         setPixCharges([]);
       }
+
+      if (Array.isArray(json.whatsappInvites)) {
+        setWhatsappInvites(json.whatsappInvites as WhatsappInviteRecord[]);
+      } else {
+        setWhatsappInvites([]);
+      }
     },
     []
   );
@@ -562,40 +558,12 @@ export function useStudioAuth() {
     }
   }, [getVisitorHeaders, user]);
 
-  const refreshSuperAdminModels = useCallback(async () => {
-    if (!isSuperAdmin || !user) {
-      setSuperAdminModels([]);
-      setPendingGalleryItems([]);
-      return;
-    }
-    try {
-      const token = await user.getIdToken();
-      const res = await fetch('/api/super-admin/models', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const json = (await res.json()) as {
-        ok?: boolean;
-        models?: ModelAccountSummary[];
-        pendingGallery?: PendingGalleryReviewItem[];
-      };
-      if (json.ok && Array.isArray(json.models)) {
-        setSuperAdminModels(json.models);
-        setPendingGalleryItems(
-          Array.isArray(json.pendingGallery) ? json.pendingGallery : []
-        );
-      }
-    } catch {
-      // Ignore transient error
-    }
-  }, [isSuperAdmin, user]);
-
   const refreshWorkspace = useCallback(async () => {
-    if (modelSession || (isSuperAdmin && user)) {
+    if (modelSession) {
       try {
         const headers = await authHeaderRef.current();
         const res = await fetch('/api/model/workspace', { headers });
-        if (res.status === 401 && modelSession) {
+        if (res.status === 401 || res.status === 403) {
           setModelSession(null);
           return;
         }
@@ -606,9 +574,6 @@ export function useStudioAuth() {
         }
       } catch {
         // Ignore transient network error
-      }
-      if (isSuperAdmin) {
-        void refreshSuperAdminModels();
       }
       return;
     }
@@ -637,10 +602,8 @@ export function useStudioAuth() {
   }, [
     applyWorkspaceSnapshot,
     getVisitorHeaders,
-    isSuperAdmin,
     modelSession,
     refreshPublicShowcase,
-    refreshSuperAdminModels,
     selectedPublicModelId,
     user,
   ]);
@@ -656,9 +619,7 @@ export function useStudioAuth() {
     activeModelId,
     modelSession,
     user,
-    isSuperAdmin,
     selectedPublicModelId,
-    superAdminSelectedModelId,
   ]);
 
   const loginWithGoogle = useCallback(async () => {
@@ -715,7 +676,7 @@ export function useStudioAuth() {
         setModelAuthError(json.error || 'Login ou senha inválidos.');
         return false;
       }
-      // If a Google user was active, sign out Firebase session so only this model session is active
+      // Sign out any visitor Google session so only this model's private session is active
       if (auth.currentUser) {
         try {
           await signOut(auth);
@@ -724,6 +685,7 @@ export function useStudioAuth() {
         }
       }
       setModelSession({ token: json.token, model: json.model });
+      setVisitorUnlockedPrivateItems([]);
       setAuthError(null);
       return true;
     } catch {
@@ -736,15 +698,123 @@ export function useStudioAuth() {
     }
   }, []);
 
+  const claimPrimaryModelPassword = useCallback(
+    async (input: {
+      password: string;
+      loginUsername?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      setModelAuthError(null);
+      setModelAuthSubmitting(true);
+      try {
+        const res = await fetch('/api/model-auth/claim-primary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          token?: string;
+          model?: ModelAccountSummary;
+          error?: string;
+        };
+        if (!res.ok || !json.ok || !json.token || !json.model) {
+          const errMsg =
+            json.error ||
+            'Não foi possível definir a senha inicial do painel principal.';
+          setModelAuthError(errMsg);
+          await refreshBootstrapStatus();
+          return { ok: false, error: errMsg };
+        }
+        if (auth.currentUser) {
+          try {
+            await signOut(auth);
+          } catch {
+            // Ignore secondary cleanup error
+          }
+        }
+        setModelSession({ token: json.token, model: json.model });
+        setPrimaryNeedsClaim(false);
+        setPrimaryClaimInfo(null);
+        setVisitorUnlockedPrivateItems([]);
+        setAuthError(null);
+        void refreshPublicModels();
+        return { ok: true };
+      } catch {
+        const errMsg =
+          'Não foi possível conectar ao servidor para concluir a configuração inicial.';
+        setModelAuthError(errMsg);
+        return { ok: false, error: errMsg };
+      } finally {
+        setModelAuthSubmitting(false);
+      }
+    },
+    [refreshBootstrapStatus, refreshPublicModels]
+  );
+
+  const registerAsModel = useCallback(
+    async (input: {
+      displayName: string;
+      loginUsername: string;
+      password: string;
+      studioBrand?: string;
+      adminThemeColor?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      setModelAuthError(null);
+      setModelAuthSubmitting(true);
+      try {
+        const res = await fetch('/api/model-auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          token?: string;
+          model?: ModelAccountSummary;
+          error?: string;
+        };
+        if (!res.ok || !json.ok || !json.token || !json.model) {
+          const errMsg = json.error || 'Não foi possível criar o painel da modelo.';
+          setModelAuthError(errMsg);
+          return { ok: false, error: errMsg };
+        }
+        if (auth.currentUser) {
+          try {
+            await signOut(auth);
+          } catch {
+            // Ignore secondary cleanup error
+          }
+        }
+        setModelSession({ token: json.token, model: json.model });
+        setVisitorUnlockedPrivateItems([]);
+        setAuthError(null);
+        void refreshPublicModels();
+        return { ok: true };
+      } catch {
+        const errMsg = 'Não foi possível conectar ao servidor para criar sua conta.';
+        setModelAuthError(errMsg);
+        return { ok: false, error: errMsg };
+      } finally {
+        setModelAuthSubmitting(false);
+      }
+    },
+    [refreshPublicModels]
+  );
+
   const logout = useCallback(async () => {
     if (modelSession) {
       setModelSession(null);
       setMyProfile(null);
+      setModelProfile(null);
       setAllProfiles([]);
+      setPrivateAlbumItems([]);
+      setVisitorUnlockedPrivateItems([]);
       setCallQueue([]);
       setCallHistory([]);
       setInterestMessages([]);
       setCallMessages([]);
+      setPixCharges([]);
+      setWhatsappInvites([]);
       return;
     }
     if (user) {
@@ -761,153 +831,50 @@ export function useStudioAuth() {
   }, [modelSession, user]);
 
   // ============================================================================
-  // SUPER ADMIN MULTI-MODEL CRUD
+  // OWN PRIVATE MODEL ACCOUNT CREDENTIALS / THEME UPDATE
   // ============================================================================
-  const createModelAccount = useCallback(
-    async (input: {
-      displayName: string;
-      loginUsername: string;
-      password: string;
-      slug?: string;
-      studioBrand?: string;
-      modelBio?: string;
-      basicInfo?: ModelBasicInfo;
-      headline?: string;
-      heroTitle?: string;
-      heroSubtitle?: string;
-      groupButtonLabel?: string;
-      privateButtonLabel?: string;
-      avatarUrl?: string;
-      heroImageUrl?: string;
-      loungeImageUrl?: string;
-      ratePerMinuteCents?: number;
-      planPrices?: {
-        express10Cents?: number;
-        private20Cents?: number;
-        vip45Cents?: number;
-      };
-      active?: boolean;
+  const updateMyModelAccount = useCallback(
+    async (patch: {
+      loginUsername?: string;
+      currentPassword?: string;
+      newPassword?: string;
       adminThemeColor?: string;
-    }) => {
-      if (!user || !isSuperAdmin) {
-        return { ok: false, error: 'Permissão negada.' };
+    }): Promise<{ ok: boolean; error?: string }> => {
+      if (!modelSession) {
+        return { ok: false, error: 'Sessão privativa da modelo obrigatória.' };
       }
-      const token = await user.getIdToken();
-      const res = await fetch('/api/super-admin/models', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(input),
-      });
-      const json = (await res.json()) as {
-        ok?: boolean;
-        model?: ModelAccountSummary;
-        error?: string;
-      };
-      if (res.ok && json.ok) {
-        await refreshSuperAdminModels();
-        await refreshPublicModels();
-        return { ok: true, model: json.model };
-      }
-      return { ok: false, error: json.error || 'Erro ao cadastrar modelo.' };
-    },
-    [isSuperAdmin, refreshPublicModels, refreshSuperAdminModels, user]
-  );
-
-  const updateModelAccount = useCallback(
-    async (
-      modelId: string,
-      patch: {
-        displayName?: string;
-        loginUsername?: string;
-        newPassword?: string;
-        active?: boolean;
-        studioBrand?: string;
-        avatarUrl?: string;
-        heroImageUrl?: string;
-        loungeImageUrl?: string;
-        modelBio?: string;
-        basicInfo?: ModelBasicInfo;
-        heroTitle?: string;
-        heroSubtitle?: string;
-        headline?: string;
-        groupButtonLabel?: string;
-        privateButtonLabel?: string;
-        adminThemeColor?: string;
-        ratePerMinuteCents?: number;
-        privateAlbumPriceCents?: number;
-        recalculatePlans?: boolean;
-      }
-    ) => {
-      if (!user || !isSuperAdmin) {
-        return { ok: false, error: 'Permissão negada.' };
-      }
-      const token = await user.getIdToken();
-      const res = await fetch(
-        `/api/super-admin/models/${encodeURIComponent(modelId)}`,
-        {
+      try {
+        const headers = await authHeaderRef.current();
+        const res = await fetch('/api/model/account', {
           method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { 'Content-Type': 'application/json', ...headers },
           body: JSON.stringify(patch),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          token?: string;
+          model?: ModelAccountSummary;
+          error?: string;
+        };
+        if (!res.ok || !json.ok || !json.model) {
+          return {
+            ok: false,
+            error: json.error || 'Não foi possível atualizar suas credenciais.',
+          };
         }
-      );
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (res.ok && json.ok) {
-        await refreshSuperAdminModels();
-        await refreshPublicModels();
-        if (superAdminSelectedModelId === modelId) {
-          await refreshWorkspace();
-        }
-        return { ok: true };
-      }
-      return { ok: false, error: json.error || 'Erro ao atualizar modelo.' };
-    },
-    [
-      isSuperAdmin,
-      refreshPublicModels,
-      refreshSuperAdminModels,
-      refreshWorkspace,
-      superAdminSelectedModelId,
-      user,
-    ]
-  );
-
-  const deleteModelAccount = useCallback(
-    async (modelId: string) => {
-      if (!user || !isSuperAdmin) {
-        return { ok: false, error: 'Permissão negada.' };
-      }
-      const token = await user.getIdToken();
-      const res = await fetch(
-        `/api/super-admin/models/${encodeURIComponent(modelId)}`,
-        {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (res.ok && json.ok) {
-        if (superAdminSelectedModelId === modelId) {
-          setSuperAdminSelectedModelId(DEFAULT_PRIMARY_MODEL_ID);
-        }
-        await refreshSuperAdminModels();
+        const nextToken = json.token || modelSession.token;
+        setModelSession({ token: nextToken, model: json.model });
+        await refreshWorkspace();
         await refreshPublicModels();
         return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: 'Falha de conexão ao atualizar dados privativos.',
+        };
       }
-      return { ok: false, error: json.error || 'Erro ao remover modelo.' };
     },
-    [
-      isSuperAdmin,
-      refreshPublicModels,
-      refreshSuperAdminModels,
-      superAdminSelectedModelId,
-      user,
-    ]
+    [modelSession, refreshPublicModels, refreshWorkspace]
   );
 
   // ============================================================================
@@ -1009,7 +976,7 @@ export function useStudioAuth() {
   const uploadStudioMedia = useCallback(
     async (
       file: File,
-      targetModelId?: string,
+      _targetModelId?: string,
       allowVideo = true
     ): Promise<{
       ok: boolean;
@@ -1054,9 +1021,6 @@ export function useStudioAuth() {
           'Content-Type': 'application/json',
           ...baseHeaders,
         };
-        if (targetModelId && isSuperAdmin) {
-          headers['x-model-id'] = targetModelId;
-        }
         const res = await fetch('/api/media/upload', {
           method: 'POST',
           headers,
@@ -1080,7 +1044,7 @@ export function useStudioAuth() {
         return { ok: false, error: 'Não foi possível enviar o arquivo.' };
       }
     },
-    [isAdmin, isSuperAdmin]
+    [isAdmin]
   );
 
   const uploadStudioImage = useCallback(
@@ -1119,12 +1083,9 @@ export function useStudioAuth() {
       }
       await refreshWorkspace();
       await refreshPublicModels();
-      if (isSuperAdmin) {
-        await refreshSuperAdminModels();
-      }
       return { ok: true };
     },
-    [isAdmin, isSuperAdmin, refreshPublicModels, refreshSuperAdminModels, refreshWorkspace]
+    [isAdmin, refreshPublicModels, refreshWorkspace]
   );
 
   const saveGalleryItem = useCallback(
@@ -1189,46 +1150,6 @@ export function useStudioAuth() {
     await refreshPublicModels();
   }, [isAdmin, refreshPublicModels, refreshWorkspace]);
 
-  const moderatePublicGalleryItem = useCallback(
-    async (
-      modelId: string,
-      itemId: string,
-      status: 'approved' | 'rejected',
-      note?: string
-    ): Promise<{ ok: boolean; error?: string }> => {
-      if (!user || !isSuperAdmin) {
-        return { ok: false, error: 'Permissão restrita ao Administrador Geral.' };
-      }
-      const token = await user.getIdToken();
-      const res = await fetch(
-        `/api/super-admin/models/${encodeURIComponent(modelId)}/gallery/${encodeURIComponent(itemId)}/moderate`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ status, note }),
-        }
-      );
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (res.ok && json.ok) {
-        await refreshSuperAdminModels();
-        await refreshWorkspace();
-        await refreshPublicModels();
-        return { ok: true };
-      }
-      return { ok: false, error: json.error || 'Erro ao moderar mídia pública.' };
-    },
-    [
-      isSuperAdmin,
-      refreshPublicModels,
-      refreshSuperAdminModels,
-      refreshWorkspace,
-      user,
-    ]
-  );
-
   const savePrivateAlbumSettings = useCallback(
     async (input: {
       enabled?: boolean;
@@ -1247,14 +1168,11 @@ export function useStudioAuth() {
       if (res.ok && json.ok) {
         await refreshWorkspace();
         await refreshPublicModels();
-        if (isSuperAdmin) {
-          await refreshSuperAdminModels();
-        }
         return { ok: true };
       }
       return { ok: false, error: json.error || 'Erro ao salvar configurações do álbum privativo.' };
     },
-    [isAdmin, isSuperAdmin, refreshPublicModels, refreshSuperAdminModels, refreshWorkspace]
+    [isAdmin, refreshPublicModels, refreshWorkspace]
   );
 
   const toggleMediaVisibility = useCallback(
@@ -1285,9 +1203,6 @@ export function useStudioAuth() {
       if (res.ok && json.ok) {
         await refreshWorkspace();
         await refreshPublicModels();
-        if (isSuperAdmin) {
-          await refreshSuperAdminModels();
-        }
         return {
           ok: true,
           visibility: json.visibility,
@@ -1299,13 +1214,7 @@ export function useStudioAuth() {
         error: json.error || 'Erro ao alterar visibilidade da mídia.',
       };
     },
-    [
-      isAdmin,
-      isSuperAdmin,
-      refreshPublicModels,
-      refreshSuperAdminModels,
-      refreshWorkspace,
-    ]
+    [isAdmin, refreshPublicModels, refreshWorkspace]
   );
 
   const savePrivateAlbumItem = useCallback(
@@ -1516,11 +1425,8 @@ export function useStudioAuth() {
       });
       await refreshWorkspace();
       await refreshPublicModels();
-      if (isSuperAdmin) {
-        await refreshSuperAdminModels();
-      }
     },
-    [isAdmin, isSuperAdmin, refreshPublicModels, refreshSuperAdminModels, refreshWorkspace]
+    [isAdmin, refreshPublicModels, refreshWorkspace]
   );
 
   const deleteCallPlan = useCallback(
@@ -1533,15 +1439,12 @@ export function useStudioAuth() {
       });
       await refreshWorkspace();
       await refreshPublicModels();
-      if (isSuperAdmin) {
-        await refreshSuperAdminModels();
-      }
     },
-    [isAdmin, isSuperAdmin, refreshPublicModels, refreshSuperAdminModels, refreshWorkspace]
+    [isAdmin, refreshPublicModels, refreshWorkspace]
   );
 
   const requestVideoCall = useCallback(
-    async (topic: string, plan: CallPlan) => {
+    async (topic: string, plan: CallPlan, inviteId?: string) => {
       if (!user || !plan || !plan.active) return null;
       const headers = await getVisitorHeaders();
       const res = await fetch('/api/visitor/queue', {
@@ -1551,6 +1454,7 @@ export function useStudioAuth() {
           modelId: selectedPublicModelId,
           topic,
           planId: plan.id,
+          ...(inviteId ? { inviteId } : {}),
         }),
       });
       const json = (await res.json()) as { ok?: boolean; id?: string };
@@ -1836,6 +1740,7 @@ export function useStudioAuth() {
       topic?: string;
       callMode?: 'group' | 'private';
       note?: string;
+      inviteId?: string;
     }): Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }> => {
       if (!user) {
         return {
@@ -2058,17 +1963,88 @@ export function useStudioAuth() {
     [isAdmin, refreshWorkspace]
   );
 
+  const createWhatsappInvite = useCallback(
+    async (input: {
+      recipientName?: string;
+      recipientPhone?: string;
+      photoUrl: string;
+      message: string;
+      planId?: string;
+      callMode?: CallEntryIntent;
+      saveAsDefault?: boolean;
+    }): Promise<{
+      ok: boolean;
+      invite?: WhatsappInviteRecord;
+      invitePath?: string;
+      error?: string;
+    }> => {
+      if (!isAdmin) {
+        return { ok: false, error: 'Permissão administrativa necessária.' };
+      }
+      try {
+        const headers = await authHeaderRef.current();
+        const res = await fetch('/api/model/whatsapp-invites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify(input),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          invite?: WhatsappInviteRecord;
+          invitePath?: string;
+          error?: string;
+        };
+        if (res.ok && json.ok && json.invite) {
+          await refreshWorkspace();
+          return {
+            ok: true,
+            invite: json.invite,
+            invitePath: json.invitePath || `/convite/${json.invite.id}`,
+          };
+        }
+        return {
+          ok: false,
+          error: json.error || 'Não foi possível gerar o convite do WhatsApp.',
+        };
+      } catch {
+        return {
+          ok: false,
+          error: 'Falha de conexão ao gerar o convite.',
+        };
+      }
+    },
+    [isAdmin, refreshWorkspace]
+  );
+
+  const deleteWhatsappInvite = useCallback(
+    async (inviteId: string) => {
+      if (!isAdmin) return;
+      const headers = await authHeaderRef.current();
+      await fetch(
+        `/api/model/whatsapp-invites/${encodeURIComponent(inviteId)}`,
+        {
+          method: 'DELETE',
+          headers,
+        }
+      );
+      await refreshWorkspace();
+    },
+    [isAdmin, refreshWorkspace]
+  );
+
   return {
     user,
     modelSession,
+    modelAccount: modelSession?.model || null,
     modelToken: modelSession?.token || null,
     modelAuthId: modelSession?.model.id || null,
     authLoading,
     authError,
     modelAuthError,
     modelAuthSubmitting,
+    primaryNeedsClaim,
+    primaryClaimInfo,
     isAdmin,
-    isSuperAdmin,
     activeModelId,
     activeAdminThemeId,
     effectiveActorUid,
@@ -2077,9 +2053,6 @@ export function useStudioAuth() {
     setSelectedPublicModelId,
     publicRatings,
     publicShowcaseLoading,
-    superAdminSelectedModelId,
-    setSuperAdminSelectedModelId,
-    superAdminModels,
     myProfile,
     modelProfile,
     allProfiles,
@@ -2089,23 +2062,23 @@ export function useStudioAuth() {
     privateAlbumSummary,
     privateAlbumItems,
     visitorUnlockedPrivateItems,
-    pendingGalleryItems,
     callQueue,
     callMessages,
     callHistory,
     interestMessages,
     callPlans,
     pixCharges,
+    whatsappInvites,
     refreshWorkspace,
     refreshPublicModels,
     refreshPublicShowcase,
-    refreshSuperAdminModels,
+    refreshBootstrapStatus,
     loginWithGoogle,
     loginAsModel,
+    claimPrimaryModelPassword,
+    registerAsModel,
     logout,
-    createModelAccount,
-    updateModelAccount,
-    deleteModelAccount,
+    updateMyModelAccount,
     updateStudioState,
     saveStudioConfig,
     uploadStudioImage,
@@ -2113,7 +2086,6 @@ export function useStudioAuth() {
     saveGalleryItem,
     deleteGalleryItem,
     restoreDefaultGallery,
-    moderatePublicGalleryItem,
     savePrivateAlbumSettings,
     savePrivateAlbumItem,
     deletePrivateAlbumItem,
@@ -2127,6 +2099,8 @@ export function useStudioAuth() {
     cancelPixCharge,
     confirmModelPixCharge,
     cancelModelPixCharge,
+    createWhatsappInvite,
+    deleteWhatsappInvite,
     updateUserControl,
     deleteUserProfile,
     requestVideoCall,

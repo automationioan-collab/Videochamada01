@@ -64,7 +64,6 @@ interface UseWebSocketStudioOptions {
   modelToken: string | null;
   modelAuthId: string | null;
   selectedModelId: string;
-  isSuperAdminOperating: boolean;
   profile: StudioProfile | null;
   onSignal: (signal: SignalPayload) => void;
   onModerationEffect: (effect: ModerationEffect) => void;
@@ -79,7 +78,6 @@ export function useWebSocketStudio({
   modelToken,
   modelAuthId,
   selectedModelId,
-  isSuperAdminOperating,
   profile,
   onSignal,
   onModerationEffect,
@@ -180,7 +178,6 @@ export function useWebSocketStudio({
                 authMode: 'firebase',
                 token,
                 modelId: selectedModelIdRef.current,
-                operatingAsAdmin: isSuperAdminOperating,
                 profile: p
                   ? {
                       displayName: p.displayName,
@@ -347,11 +344,11 @@ export function useWebSocketStudio({
         wsRef.current = null;
       }
     };
-  }, [user, modelToken, modelAuthId, isSuperAdminOperating]);
+  }, [user, modelToken, modelAuthId]);
 
   // Switch active visitor model room over open WebSocket
   useEffect(() => {
-    if (modelToken || isSuperAdminOperating) return;
+    if (modelToken) return;
     const socket = wsRef.current;
     if (socket && socket.readyState === WebSocket.OPEN && selectedModelId) {
       hasInitialPresenceRef.current = false;
@@ -363,7 +360,7 @@ export function useWebSocketStudio({
         })
       );
     }
-  }, [isSuperAdminOperating, modelToken, selectedModelId]);
+  }, [modelToken, selectedModelId]);
 
   // Sync accessStatus changes to WebSocket presence when profile updates
   useEffect(() => {

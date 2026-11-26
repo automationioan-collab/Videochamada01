@@ -1,13 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
-  CreditCard,
   Lock,
   PhoneCall,
   PhoneOff,
   QrCode,
   Trash2,
-  Users,
   Video,
   X,
 } from 'lucide-react';
@@ -19,7 +17,6 @@ import { SalaDeEspera } from './SalaDeEspera';
 import { TechSpotlightCard } from './TechEffects';
 import { TipGoalProgressCard } from './TipGoalProgressCard';
 import type {
-  CallEntryIntent,
   CallPaymentStatus,
   CallPlan,
   CallRequest,
@@ -29,7 +26,6 @@ import type {
   PixChargeRecord,
   PresencePeer,
   QueueWaitSummary,
-  RoomParticipant,
   StudioConfig,
   StudioProfile,
   StudioState,
@@ -38,7 +34,6 @@ import type {
 interface CallQueuePanelProps {
   isAdmin: boolean;
   modelId?: string;
-  entryIntent?: CallEntryIntent;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
   studioState: StudioState | null;
@@ -47,7 +42,6 @@ interface CallQueuePanelProps {
   callQueue: CallRequest[];
   callPlans: CallPlan[];
   peers: PresencePeer[];
-  roomParticipants: RoomParticipant[];
   queueSummary?: QueueWaitSummary;
   wsConnected?: boolean;
   localStream?: MediaStream | null;
@@ -59,11 +53,6 @@ interface CallQueuePanelProps {
   onToggleCam?: () => void;
   onRequestCall: (topic: string, plan: CallPlan) => Promise<string | null>;
   onDirectCallModel: (
-    topic: string,
-    plan: CallPlan,
-    existingCallRequestId?: string
-  ) => Promise<void>;
-  onJoinGroupRoom: (
     topic: string,
     plan: CallPlan,
     existingCallRequestId?: string
@@ -122,7 +111,6 @@ const CALL_STATUS_LABEL: Record<CallStatus, string> = {
 export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   isAdmin,
   modelId,
-  entryIntent = 'group',
   myProfile,
   modelProfile,
   studioState,
@@ -131,7 +119,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   callQueue,
   callPlans,
   peers,
-  roomParticipants,
   queueSummary,
   wsConnected = false,
   localStream = null,
@@ -143,7 +130,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   onToggleCam,
   onRequestCall,
   onDirectCallModel,
-  onJoinGroupRoom,
   onRefreshWorkspace,
   onAcceptAndCall,
   onUpdateCallStatus,
@@ -157,14 +143,13 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
 }) => {
   const [topic, setTopic] = useState('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
-  const [paymentMethod, setPaymentMethod] = useState<'pix' | 'card'>('pix');
+  const paymentMethod = 'pix' as const;
   const [paymentAuthorized, setPaymentAuthorized] = useState(true);
-  const [submitting, setSubmitting] = useState<'group' | 'private' | null>(null);
+  const [submitting, setSubmitting] = useState<boolean>(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
     null
   );
   const [pendingPixCall, setPendingPixCall] = useState<{
-    mode: 'group' | 'private';
     plan: CallPlan;
     topic: string;
   } | null>(null);
@@ -230,15 +215,14 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     setLoungeFailed(false);
   }, [loungeSrc]);
 
-  const buildCleanTopic = (plan: CallPlan, mode: 'group' | 'private') => {
+  const buildCleanTopic = (plan: CallPlan) => {
     const base =
       topic.trim() ||
       `${plan.name} · Pagamento ${paymentMethod === 'pix' ? 'PIX' : 'Cartão'}`;
-    return mode === 'private' ? `[Privativa 1-para-1] ${base}` : base;
+    return `[Privativa 1-para-1] ${base}`;
   };
 
   const startCallPlanPixCharge = async (
-    mode: 'group' | 'private',
     plan: CallPlan,
     cleanTopic: string
   ) => {
@@ -248,18 +232,18 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
       modelId: modelId || 'lorena_noir',
       kind: 'call_plan',
       planId: plan.id,
-      callMode: mode,
+      callMode: 'private',
       topic: cleanTopic,
     });
     if (res.ok && res.charge) {
-      setPendingPixCall({ mode, plan, topic: cleanTopic });
+      setPendingPixCall({ plan, topic: cleanTopic });
       setActivePixCharge(res.charge);
     } else {
       setPixError(res.error || 'Não foi possível gerar o QR Code PIX.');
     }
   };
 
-  const handleJoinSharedRoom = async () => {
+  const handlePrivateOneOnOneCall = async () => {
     if (
       submitting ||
       isBlocked ||
@@ -271,38 +255,12 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
-    const cleanTopic = buildCleanTopic(selectedPlan, 'group');
-    setSubmitting('group');
+    const cleanTopic = buildCleanTopic(selectedPlan);
+    setSubmitting(true);
     setPixError(null);
     try {
       if (paymentMethod === 'pix' && onCreatePixCharge) {
-        await startCallPlanPixCharge('group', selectedPlan, cleanTopic);
-        return;
-      }
-      await onJoinGroupRoom(cleanTopic, selectedPlan);
-      setTopic('');
-    } finally {
-      setSubmitting(null);
-    }
-  };
-
-  const handlePrivateOneOnOneCall = async () => {
-    if (
-      submitting ||
-      isBlocked ||
-      dndBlocked ||
-      activeRequest ||
-      !selectedPlan ||
-      !paymentAuthorized
-    ) {
-      return;
-    }
-    const cleanTopic = buildCleanTopic(selectedPlan, 'private');
-    setSubmitting('private');
-    setPixError(null);
-    try {
-      if (paymentMethod === 'pix' && onCreatePixCharge) {
-        await startCallPlanPixCharge('private', selectedPlan, cleanTopic);
+        await startCallPlanPixCharge(selectedPlan, cleanTopic);
         return;
       }
       if (canDirectCallNow) {
@@ -312,17 +270,13 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
       }
       setTopic('');
     } finally {
-      setSubmitting(null);
+      setSubmitting(false);
     }
   };
 
   const handleRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (entryIntent === 'private') {
-      await handlePrivateOneOnOneCall();
-    } else {
-      await handleJoinSharedRoom();
-    }
+    await handlePrivateOneOnOneCall();
   };
 
   if (isAdmin) {
@@ -533,10 +487,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
           hasCustomSource={Boolean(studioConfig)}
           ctaDisabled={true}
           ctaLabel={
-            studioConfig?.groupButtonLabel ||
-            DEFAULT_STUDIO_CONFIG.groupButtonLabel
-          }
-          privateCtaLabel={
             studioConfig?.privateButtonLabel ||
             DEFAULT_STUDIO_CONFIG.privateButtonLabel
           }
@@ -579,8 +529,11 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                 ·{' '}
                 {modelOnline
                   ? `${displayModelName} conectada agora`
-                  : 'Sala aberta'}{' '}
-                · {roomParticipants.length} na videochamada agora
+                  : 'Atendimento via fila'}{' '}
+                ·{' '}
+                {modelBusyInCall
+                  ? 'Em sala privativa (1/1)'
+                  : 'Sala privativa livre (1-para-1)'}
               </p>
             </div>
           </div>
@@ -596,12 +549,12 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
               <div className="px-4 py-2.5 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/25 text-xs text-[#C9BAC4] flex flex-wrap items-center justify-between gap-2">
                 <span>
                   {modelBusyInCall
-                    ? `${displayModelName} está em atendimento privativo no momento`
+                    ? `${displayModelName} está em sala privativa (1/1) com outro internauta agora — pague para reservar sua vez na fila`
                     : `${resolvedQueueSummary.totalWaiting} ${
                         resolvedQueueSummary.totalWaiting === 1
                           ? 'internauta aguardando'
                           : 'internautas aguardando'
-                      } na fila`}
+                      } na fila privativa`}
                 </span>
                 <span className="font-mono tabular-nums text-[#F4C2D7]">
                   Espera est.: ~
@@ -616,15 +569,13 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
               </div>
             )}
 
-          {entryIntent === 'private' && (
-            <div className="px-4 py-2.5 rounded-xl bg-[#21142D] border border-[#F4C2D7]/40 text-xs text-[#F8D6E3] flex items-center gap-2">
-              <Lock className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                Modo selecionado: Chamada Privativa 1-para-1 (exclusivamente você e{' '}
-                {displayModelName}).
-              </span>
-            </div>
-          )}
+          <div className="px-4 py-2.5 rounded-xl bg-[#21142D] border border-[#F4C2D7]/40 text-xs text-[#F8D6E3] flex items-center gap-2">
+            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Exclusivo 1-para-1 mediante pagamento: apenas 1 internauta por vez
+              pode ver e conversar com {displayModelName}.
+            </span>
+          </div>
         </div>
 
         {isBlocked ? (
@@ -744,34 +695,13 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             <div className="p-4 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/15 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-xs text-[#FAF4F7]">
-                  <CreditCard className="w-4 h-4 text-[#F4C2D7] shrink-0" />
-                  <span className="font-medium">Forma de pagamento</span>
+                  <QrCode className="w-4 h-4 text-[#38BDF8] shrink-0" />
+                  <span className="font-medium">Forma de pagamento · PIX Instantâneo</span>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#150D1D] border border-[#F4C2D7]/15 rounded-full self-start sm:self-auto">
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('pix')}
-                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      paymentMethod === 'pix'
-                        ? 'luxury-rose-cta font-semibold'
-                        : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
-                    }`}
-                  >
-                    PIX Instantâneo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('card')}
-                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      paymentMethod === 'card'
-                        ? 'luxury-rose-cta font-semibold'
-                        : 'text-[#C9BAC4] hover:text-[#FAF4F7]'
-                    }`}
-                  >
-                    Cartão de Crédito
-                  </button>
-                </div>
+                <span className="px-3 py-1 text-[11px] font-medium rounded-full bg-[#150D1D] border border-[#F4C2D7]/20 text-[#C9BAC4] self-start sm:self-auto">
+                  Cartão em breve
+                </span>
               </div>
 
               <label className="flex items-start gap-2.5 text-xs text-[#C9BAC4] cursor-pointer">
@@ -782,7 +712,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   className="mt-0.5 accent-[#F4C2D7] cursor-pointer"
                 />
                 <span>
-                  Autorizo a cobrança de{' '}
+                  Autorizo a cobrança via PIX de{' '}
                   <strong className="font-mono tabular-nums text-[#F4C2D7]">
                     {selectedPlan
                       ? BRL_FORMATTER.format(selectedPlan.priceCents / 100)
@@ -796,15 +726,13 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                 </span>
               </label>
 
-              {paymentMethod === 'pix' && (
-                <p className="text-[11px] text-[#38BDF8] flex items-center gap-1.5">
-                  <QrCode className="w-3.5 h-3.5 shrink-0" />
-                  <span>
-                    Ao clicar abaixo, geraremos o QR Code PIX + Copia e Cola para
-                    liberação imediata da sua sessão.
-                  </span>
-                </p>
-              )}
+              <p className="text-[11px] text-[#38BDF8] flex items-center gap-1.5">
+                <QrCode className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Ao clicar abaixo, geraremos o QR Code PIX + Copia e Cola para
+                  liberação verificada da sua sessão 1-para-1.
+                </span>
+              </p>
             </div>
 
             {pixError && (
@@ -837,20 +765,15 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
 
             <div className="flex flex-wrap items-center gap-3">
               <button
-                type="button"
-                onClick={() => void handlePrivateOneOnOneCall()}
+                type="submit"
                 disabled={
-                  Boolean(submitting) ||
+                  submitting ||
                   dndBlocked ||
                   !selectedPlan ||
                   !paymentAuthorized ||
                   studioState?.callMode === 'paused'
                 }
-                className={`inline-flex items-center gap-2.5 px-5 py-3 text-xs font-semibold rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
-                  entryIntent === 'private'
-                    ? 'luxury-rose-cta'
-                    : 'bg-[#1A1024] border border-[#F4C2D7]/45 text-[#FAF4F7] hover:border-[#F4C2D7] hover:bg-[#281837]'
-                }`}
+                className="inline-flex items-center gap-2.5 px-6 py-3 text-xs font-semibold rounded-full luxury-rose-cta transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 {canDirectCallNow ? (
                   <Lock className="w-4 h-4 shrink-0" />
@@ -858,43 +781,25 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   <PhoneCall className="w-4 h-4 shrink-0" />
                 )}
                 <span>
-                  {submitting === 'private'
-                    ? 'Chamando no privado...'
-                    : canDirectCallNow
-                      ? `Chamada Privativa Só com ${displayModelName} (1-para-1)`
-                      : 'Solicitar Chamada Privativa (1-para-1)'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => void handleJoinSharedRoom()}
-                disabled={
-                  Boolean(submitting) ||
-                  dndBlocked ||
-                  !selectedPlan ||
-                  !paymentAuthorized ||
-                  studioState?.callMode === 'paused'
-                }
-                className={`inline-flex items-center gap-2.5 px-5 py-3 text-xs font-semibold rounded-full transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
-                  entryIntent === 'private'
-                    ? 'bg-[#1A1024] border border-[#F4C2D7]/25 text-[#FAF4F7] hover:bg-[#281837]'
-                    : 'luxury-rose-cta'
-                }`}
-              >
-                <Users className="w-4 h-4 shrink-0" />
-                <span>
                   {dndBlocked
                     ? 'Modo Não Perturbe ativo'
                     : studioState?.callMode === 'paused'
                       ? 'Sala temporariamente fechada'
-                      : submitting === 'group'
-                        ? 'Conectando na sala...'
-                        : selectedPlan
-                          ? `Sala ao Vivo (Múltiplos Internautas · ${BRL_FORMATTER.format(
-                              selectedPlan.priceCents / 100
-                            )})`
-                          : 'Selecione um plano'}
+                      : submitting
+                        ? 'Processando pagamento...'
+                        : !selectedPlan
+                          ? 'Selecione um plano'
+                          : paymentMethod === 'pix'
+                            ? `Pagar via PIX (${BRL_FORMATTER.format(
+                                selectedPlan.priceCents / 100
+                              )}) e Liberar Sala Privativa`
+                            : canDirectCallNow
+                              ? `Pagar ${BRL_FORMATTER.format(
+                                  selectedPlan.priceCents / 100
+                                )} e Entrar na Sala Privativa (1-para-1)`
+                              : `Pagar ${BRL_FORMATTER.format(
+                                  selectedPlan.priceCents / 100
+                                )} e Entrar na Fila Privativa (1-para-1)`}
                 </span>
               </button>
             </div>
@@ -906,7 +811,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         {!loungeFailed && loungeSrc ? (
           <img
             src={loungeSrc}
-            alt={`Ambiente do Salão Privado ${studioConfig?.studioBrand || 'Maison Aura'}`}
+            alt={`Ambiente do Salão Privado ${studioConfig?.studioBrand || 'Model Gat Brasil'}`}
             referrerPolicy="no-referrer"
             onError={() => setLoungeFailed(true)}
             className="w-full h-full object-cover lg:absolute lg:inset-0"
@@ -917,14 +822,15 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         <div className="absolute inset-0 bg-gradient-to-t from-[#0B060F]/95 via-[#0B060F]/35 to-transparent pointer-events-none" />
         <div className="absolute bottom-0 left-0 right-0 p-6 space-y-1">
           <p className="text-xs font-medium text-[#F4C2D7] font-mono tabular-nums">
-            Sala Ao Vivo · {roomParticipants.length} conectado
-            {roomParticipants.length === 1 ? '' : 's'}
+            {modelBusyInCall
+              ? 'Sala Privativa Ocupada (1/1)'
+              : 'Sala Privativa Livre (1-para-1)'}
           </p>
           <p className="font-display text-2xl font-semibold text-[#FAF4F7]">
-            Sala Compartilhada ou Privativa 1-para-1
+            Somente 1 Internauta por Vez
           </p>
           <p className="text-xs text-[#C9BAC4]">
-            Escolha entrar na sala compartilhada com outros internautas ou iniciar uma sessão 100% privativa somente com {displayModelName}.
+            Todas as videochamadas são 100% privativas mediante pagamento. Enquanto você estiver na sala com {displayModelName}, nenhum outro visitante entra ou assiste.
           </p>
         </div>
       </aside>
@@ -948,10 +854,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         hasCustomSource={Boolean(studioConfig)}
         ctaDisabled={isBlocked || dndBlocked || studioState?.callMode === 'paused'}
         ctaLabel={
-          studioConfig?.groupButtonLabel ||
-          DEFAULT_STUDIO_CONFIG.groupButtonLabel
-        }
-        privateCtaLabel={
           studioConfig?.privateButtonLabel ||
           DEFAULT_STUDIO_CONFIG.privateButtonLabel
         }
@@ -964,7 +866,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }
         }}
-        onPrivateAction={() => void handlePrivateOneOnOneCall()}
       />
 
       {activePixCharge &&
@@ -974,12 +875,8 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
           <PixPaymentModal
             charge={activePixCharge}
             title={`Pagamento PIX · ${pendingPixCall.plan.name}`}
-            subtitle={`${
-              pendingPixCall.mode === 'private'
-                ? 'Chamada Privativa 1-para-1'
-                : 'Sala ao Vivo'
-            } com ${displayModelName}`}
-            confirmLabel="Já Paguei via PIX · Liberar Chamada"
+            subtitle={`Chamada Privativa 1-para-1 com ${displayModelName}`}
+            confirmLabel="Já Paguei via PIX · Liberar Sala Privativa"
             onClose={() => {
               setActivePixCharge(null);
               setPendingPixCall(null);
@@ -989,7 +886,6 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             onConfirmPayment={onConfirmPixCharge}
             onRegenerate={async () => {
               await startCallPlanPixCharge(
-                pendingPixCall.mode,
                 pendingPixCall.plan,
                 pendingPixCall.topic
               );
@@ -999,13 +895,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
               setActivePixCharge(null);
               setPendingPixCall(null);
               setTopic('');
-              if (pending.mode === 'group') {
-                await onJoinGroupRoom(
-                  pending.topic,
-                  pending.plan,
-                  res.callRequestId
-                );
-              } else if (canDirectCallNow) {
+              if (canDirectCallNow) {
                 await onDirectCallModel(
                   pending.topic,
                   pending.plan,

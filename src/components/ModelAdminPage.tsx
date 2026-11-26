@@ -9,8 +9,13 @@ import {
   CheckCircle2,
   CreditCard,
   Crown,
+  Eye,
+  EyeOff,
   Film,
   Image as ImageIcon,
+  KeyRound,
+  Lock,
+  MessageCircle,
   Mic,
   MicOff,
   MoonStar,
@@ -18,6 +23,7 @@ import {
   PhoneIncoming,
   PhoneOff,
   QrCode,
+  Save,
   Search,
   ShieldCheck,
   Sparkles,
@@ -32,6 +38,7 @@ import {
 } from 'lucide-react';
 import type {
   AccessStatus,
+  CallEntryIntent,
   CallHistoryRecord,
   CallHistoryStatus,
   CallMessage,
@@ -46,20 +53,18 @@ import type {
   MediaAssetType,
   MediaVisibility,
   ModelAccountSummary,
-  ModelBasicInfo,
-  PendingGalleryReviewItem,
   PixChargeRecord,
   PixChargeStatus,
   PresencePeer,
   PrivateAlbumItemRecord,
   PrivateAlbumSummary,
   PublicApprovalStatus,
-  RoomParticipant,
   StudioConfig,
   StudioProfile,
   StudioRole,
   StudioState,
   StudioStateUpdatePatch,
+  WhatsappInviteRecord,
 } from '../types/studio';
 import type { ModerationEffect } from '../hooks/useWebSocketStudio';
 import {
@@ -80,11 +85,11 @@ import { FinancialEarningsDashboard } from './FinancialEarningsDashboard';
 import { InterestMessagesPanel } from './InterestMessagesPanel';
 import { MediaManagementPanel } from './MediaManagementPanel';
 import { OperatingSchedulePanel } from './OperatingSchedulePanel';
-import { SuperAdminModelsPanel } from './SuperAdminModelsPanel';
 import { TechVideoCallButton } from './TechEffects';
 import { TipGoalManagerCard } from './TipGoalManagerCard';
 import { UserControlPanel } from './UserControlPanel';
 import { VideoCallStage } from './VideoCallStage';
+import { WhatsappInvitePanel } from './WhatsappInvitePanel';
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -97,13 +102,11 @@ interface ModelAdminPageProps {
   modelProfile: StudioProfile | null;
   allProfiles: StudioProfile[];
   peers: PresencePeer[];
-  roomParticipants: RoomParticipant[];
   studioState: StudioState | null;
   studioConfig: StudioConfig | null;
   galleryItems: GalleryItemRecord[];
   privateAlbumSummary?: PrivateAlbumSummary | null;
   privateAlbumItems?: PrivateAlbumItemRecord[];
-  pendingGalleryItems?: PendingGalleryReviewItem[];
   callQueue: CallRequest[];
   callMessages: CallMessage[];
   callHistory: CallHistoryRecord[];
@@ -115,7 +118,6 @@ interface ModelAdminPageProps {
   onToggleSoundEnabled: () => void;
   onTestSoundDing: () => void;
   wsConnected: boolean;
-  isGroupRoom: boolean;
   activeCallId: string | null;
   activePartnerUid: string | null;
   activePartnerName: string;
@@ -134,8 +136,6 @@ interface ModelAdminPageProps {
   } | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
-  remoteStreams: Record<string, MediaStream>;
-  peerConnectionStates: Record<string, RTCPeerConnectionState>;
   micEnabled: boolean;
   camEnabled: boolean;
   mediaError: string | null;
@@ -145,7 +145,6 @@ interface ModelAdminPageProps {
   onToggleMic: () => void;
   onToggleCam: () => void;
   onEndCall: () => Promise<void>;
-  onJoinGroupRoomAdmin: () => Promise<void>;
   onSendMessage: (text: string) => Promise<void>;
   onAcceptIncomingRing: () => Promise<void>;
   onRejectIncomingRing: () => void;
@@ -207,12 +206,6 @@ interface ModelAdminPageProps {
   >;
   onDeleteGalleryItem: (itemId: string) => Promise<void>;
   onRestoreDefaultGallery: () => Promise<void>;
-  onModerateGalleryItem?: (
-    modelId: string,
-    itemId: string,
-    status: 'approved' | 'rejected',
-    note?: string
-  ) => Promise<{ ok: boolean; error?: string }>;
   onSavePrivateAlbumSettings?: (input: {
     enabled?: boolean;
     password?: string;
@@ -285,61 +278,15 @@ interface ModelAdminPageProps {
     status: InterestMessageStatus
   ) => Promise<void>;
   onDeleteInterestMessage: (messageId: string) => Promise<void>;
-  isSuperAdmin?: boolean;
   activeModelId?: string;
   activeAdminThemeId?: string;
-  superAdminModels?: ModelAccountSummary[];
-  onCreateModelAccount?: (input: {
-    displayName: string;
-    loginUsername: string;
-    password: string;
-    studioBrand?: string;
-    modelBio?: string;
-    basicInfo?: ModelBasicInfo;
-    headline?: string;
-    heroTitle?: string;
-    heroSubtitle?: string;
-    groupButtonLabel?: string;
-    privateButtonLabel?: string;
-    avatarUrl?: string;
-    heroImageUrl?: string;
-    loungeImageUrl?: string;
-    ratePerMinuteCents?: number;
-    planPrices?: {
-      express10Cents?: number;
-      private20Cents?: number;
-      vip45Cents?: number;
-    };
-    active?: boolean;
+  modelAccount?: ModelAccountSummary | null;
+  onUpdateMyModelAccount?: (patch: {
+    loginUsername?: string;
+    currentPassword?: string;
+    newPassword?: string;
     adminThemeColor?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
-  onUpdateModelAccount?: (
-    modelId: string,
-    patch: {
-      displayName?: string;
-      loginUsername?: string;
-      newPassword?: string;
-      active?: boolean;
-      studioBrand?: string;
-      avatarUrl?: string;
-      heroImageUrl?: string;
-      loungeImageUrl?: string;
-      modelBio?: string;
-      basicInfo?: ModelBasicInfo;
-      heroTitle?: string;
-      heroSubtitle?: string;
-      headline?: string;
-      groupButtonLabel?: string;
-      privateButtonLabel?: string;
-      adminThemeColor?: string;
-      ratePerMinuteCents?: number;
-      recalculatePlans?: boolean;
-    }
-  ) => Promise<{ ok: boolean; error?: string }>;
-  onDeleteModelAccount?: (
-    modelId: string
-  ) => Promise<{ ok: boolean; error?: string }>;
-  onSelectModelWorkspace?: (modelId: string) => void;
   pixCharges?: PixChargeRecord[];
   onConfirmModelPixCharge?: (
     chargeId: string
@@ -347,10 +294,27 @@ interface ModelAdminPageProps {
   onCancelModelPixCharge?: (
     chargeId: string
   ) => Promise<{ ok: boolean; error?: string }>;
+  whatsappInvites?: WhatsappInviteRecord[];
+  onCreateWhatsappInvite?: (input: {
+    recipientName?: string;
+    recipientPhone?: string;
+    photoUrl: string;
+    message: string;
+    planId?: string;
+    callMode?: CallEntryIntent;
+    saveAsDefault?: boolean;
+  }) => Promise<{
+    ok: boolean;
+    invite?: WhatsappInviteRecord;
+    invitePath?: string;
+    error?: string;
+  }>;
+  onDeleteWhatsappInvite?: (inviteId: string) => Promise<void>;
 }
 
 type AdminSection =
   | 'private_calls'
+  | 'whatsapp_invite'
   | 'users'
   | 'plans'
   | 'revenue'
@@ -359,7 +323,7 @@ type AdminSection =
   | 'schedule'
   | 'media'
   | 'site'
-  | 'models';
+  | 'account';
 
 export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   myUid,
@@ -367,13 +331,11 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   modelProfile,
   allProfiles,
   peers,
-  roomParticipants,
   studioState,
   studioConfig,
   galleryItems,
   privateAlbumSummary = null,
   privateAlbumItems = [],
-  pendingGalleryItems = [],
   callQueue,
   callMessages,
   callHistory,
@@ -385,7 +347,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onToggleSoundEnabled,
   onTestSoundDing,
   wsConnected,
-  isGroupRoom,
   activeCallId,
   activePartnerUid,
   activePartnerName,
@@ -393,8 +354,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   incomingRing,
   localStream,
   remoteStream,
-  remoteStreams,
-  peerConnectionStates,
   micEnabled,
   camEnabled,
   mediaError,
@@ -404,7 +363,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onToggleMic,
   onToggleCam,
   onEndCall,
-  onJoinGroupRoomAdmin,
   onSendMessage,
   onAcceptIncomingRing,
   onRejectIncomingRing,
@@ -421,7 +379,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onSaveGalleryItem,
   onDeleteGalleryItem,
   onRestoreDefaultGallery,
-  onModerateGalleryItem,
   onSavePrivateAlbumSettings,
   onSavePrivateAlbumItem,
   onDeletePrivateAlbumItem,
@@ -435,17 +392,16 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   onDeleteCallHistoryRecord,
   onUpdateInterestMessageStatus,
   onDeleteInterestMessage,
-  isSuperAdmin = false,
   activeModelId = 'lorena_noir',
   activeAdminThemeId = 'rose_velvet',
-  superAdminModels = [],
-  onCreateModelAccount,
-  onUpdateModelAccount,
-  onDeleteModelAccount,
-  onSelectModelWorkspace,
+  modelAccount = null,
+  onUpdateMyModelAccount,
   pixCharges = [],
   onConfirmModelPixCharge,
   onCancelModelPixCharge,
+  whatsappInvites = [],
+  onCreateWhatsappInvite,
+  onDeleteWhatsappInvite,
 }) => {
   const [section, setSection] = useState<AdminSection>('private_calls');
   const [visitorSearch, setVisitorSearch] = useState('');
@@ -457,6 +413,25 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   const [rateSavedMsg, setRateSavedMsg] = useState<string | null>(null);
   const [pixActionId, setPixActionId] = useState<string | null>(null);
   const [pixAdminMsg, setPixAdminMsg] = useState<string | null>(null);
+
+  // Own isolated account credentials state
+  const [accountLoginDraft, setAccountLoginDraft] = useState(
+    () => modelAccount?.loginUsername || ''
+  );
+  const [currentPasswordDraft, setCurrentPasswordDraft] = useState('');
+  const [newPasswordDraft, setNewPasswordDraft] = useState('');
+  const [confirmPasswordDraft, setConfirmPasswordDraft] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountErrorMsg, setAccountErrorMsg] = useState<string | null>(null);
+  const [accountSuccessMsg, setAccountSuccessMsg] = useState<string | null>(
+    null
+  );
+
+  useEffect(() => {
+    setAccountLoginDraft(modelAccount?.loginUsername || '');
+  }, [modelAccount?.loginUsername]);
 
   useEffect(() => {
     setRateDraftBrl((ratePerMinuteCents / 100).toFixed(2));
@@ -489,11 +464,59 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (!isSuperAdmin && section === 'models') {
-      setSection('private_calls');
+  const handleSaveOwnAccountCredentials = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onUpdateMyModelAccount || savingAccount) return;
+    setAccountErrorMsg(null);
+    setAccountSuccessMsg(null);
+
+    const trimmedLogin = accountLoginDraft.trim().toLowerCase();
+    if (trimmedLogin.length < 3) {
+      setAccountErrorMsg('O login privativo deve ter pelo menos 3 caracteres.');
+      return;
     }
-  }, [isSuperAdmin, section]);
+    if (!currentPasswordDraft) {
+      setAccountErrorMsg(
+        'Digite sua senha atual para confirmar alterações de login ou senha.'
+      );
+      return;
+    }
+    if (newPasswordDraft) {
+      if (newPasswordDraft.length < 6) {
+        setAccountErrorMsg('A nova senha deve ter pelo menos 6 caracteres.');
+        return;
+      }
+      if (newPasswordDraft !== confirmPasswordDraft) {
+        setAccountErrorMsg('A confirmação da nova senha não confere.');
+        return;
+      }
+    }
+
+    setSavingAccount(true);
+    try {
+      const res = await onUpdateMyModelAccount({
+        loginUsername: trimmedLogin,
+        currentPassword: currentPasswordDraft,
+        ...(newPasswordDraft ? { newPassword: newPasswordDraft } : {}),
+      });
+      if (!res.ok) {
+        setAccountErrorMsg(
+          res.error || 'Não foi possível atualizar suas credenciais.'
+        );
+        return;
+      }
+      setCurrentPasswordDraft('');
+      setNewPasswordDraft('');
+      setConfirmPasswordDraft('');
+      setAccountSuccessMsg(
+        newPasswordDraft
+          ? 'Login e senha exclusivos atualizados com segurança.'
+          : 'Login exclusivo atualizado com sucesso.'
+      );
+    } finally {
+      setSavingAccount(false);
+    }
+  };
 
   const onlineVisitors = useMemo(
     () => peers.filter((p) => p.uid !== myUid),
@@ -554,10 +577,9 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
     [pixCharges]
   );
 
-  const activePartnerProfile =
-    activePartnerUid && !isGroupRoom
-      ? profileMap.get(activePartnerUid) || null
-      : null;
+  const activePartnerProfile = activePartnerUid
+    ? profileMap.get(activePartnerUid) || null
+    : null;
   const activePartnerMuted = activePartnerProfile?.accessStatus === 'muted';
   const dndActiveNow = isDndActiveNow(studioState);
   const scheduleSnapshot = getScheduleFromState(studioState);
@@ -583,7 +605,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
     'Lorena Noir';
   const modelAvatar = studioConfig?.modelAvatarUrl || modelProfile?.photoUrl;
   const pendingPrivateCount = waitingRequests.length + (incomingRing ? 1 : 0);
-  const hasActiveCall = Boolean(activeCallId) || isGroupRoom;
+  const hasActiveCall = Boolean(activeCallId);
   const showStageNow = hasActiveCall || showCameraPreview || Boolean(localStream);
 
   const firstCallableOnlineVisitor = useMemo(
@@ -608,9 +630,10 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
         : `Próximo na fila: ${waitingRequests[0].userName}`
       : firstCallableOnlineVisitor
         ? `Conectar no privado com ${firstCallableOnlineVisitor.displayName}`
-        : 'Abre sua câmera e microfone na sala ao vivo para falar com internautas';
+        : 'Ative a prévia da sua câmera para se preparar para atender 1 internauta por vez';
 
   const handleLorenaEnterVideoCall = async () => {
+    if (hasActiveCall) return;
     if (incomingRing) {
       await onAcceptIncomingRing();
       return;
@@ -627,7 +650,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
       });
       return;
     }
-    await onJoinGroupRoomAdmin();
+    await handleOpenCameraPreview();
   };
 
   const navItems: Array<{
@@ -650,6 +673,15 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             ? `${onlineVisitors.length}`
             : undefined,
       highlight: pendingPrivateCount > 0 || hasActiveCall,
+    },
+    {
+      id: 'whatsapp_invite',
+      label: 'Convite WhatsApp',
+      hint: 'Foto, mensagem e link de pagamento',
+      icon: MessageCircle,
+      countText:
+        whatsappInvites.length > 0 ? `${whatsappInvites.length}` : undefined,
+      highlight: whatsappInvites.some((i) => i.status === 'paid'),
     },
     {
       id: 'users',
@@ -713,36 +745,19 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
       hint: 'Público ou Privado em tempo real',
       icon: Film,
       countText: `${galleryItems.length + privateAlbumItems.length}`,
-      highlight: galleryItems.some((g) => g.approvalStatus === 'pending'),
     },
     {
       id: 'site',
       label: 'Site, Perfil e Álbum',
       hint: 'Bio, textos e álbum privativo',
       icon: ImageIcon,
-      countText:
-        galleryItems.some((g) => g.approvalStatus === 'pending')
-          ? `${galleryItems.filter((g) => g.approvalStatus === 'pending').length} pendente`
-          : undefined,
-      highlight: galleryItems.some((g) => g.approvalStatus === 'pending'),
     },
-    ...(isSuperAdmin
-      ? [
-          {
-            id: 'models' as const,
-            label: 'Modelos e Senhas',
-            hint: 'Contas e autorizações públicas',
-            icon: ShieldCheck,
-            countText:
-              pendingGalleryItems.length > 0
-                ? `${pendingGalleryItems.length} pendente`
-                : superAdminModels.length > 0
-                  ? `${superAdminModels.length}`
-                  : undefined,
-            highlight: pendingGalleryItems.length > 0,
-          },
-        ]
-      : []),
+    {
+      id: 'account',
+      label: 'Minha Conta e Senha',
+      hint: 'Login privativo, senha e cor',
+      icon: KeyRound,
+    },
   ];
 
   const handleOpenCameraPreview = async () => {
@@ -758,91 +773,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Super Admin Color-Coded Model Switcher Strip */}
-      {isSuperAdmin && superAdminModels.length > 0 && onSelectModelWorkspace && (
-        <section
-          aria-label="Alternar modelo pelo tema visual"
-          className="luxury-card border border-[#F4C2D7]/20 rounded-2xl px-4 py-3.5 flex flex-col xl:flex-row xl:items-center justify-between gap-3.5"
-        >
-          <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <span className="text-xs font-medium text-[#C9BAC4] mr-1 whitespace-nowrap">
-              Painéis por Modelo:
-            </span>
-            {superAdminModels.map((m, idx) => {
-              const selected = m.id === activeModelId;
-              const mTheme = getAdminModelTheme(m.adminThemeColor, idx);
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => onSelectModelWorkspace(m.id)}
-                  aria-pressed={selected}
-                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs transition-all cursor-pointer whitespace-nowrap ${
-                    selected
-                      ? 'bg-[#21142D] text-[#FAF4F7] font-semibold'
-                      : 'bg-[#0B060F]/80 border-[#F4C2D7]/15 text-[#C9BAC4] hover:text-[#FAF4F7]'
-                  }`}
-                  style={
-                    selected
-                      ? { borderColor: mTheme.swatchHex }
-                      : undefined
-                  }
-                >
-                  <span
-                    aria-hidden="true"
-                    className="w-2.5 h-2.5 rounded-full shrink-0 border border-white/25"
-                    style={{ backgroundColor: mTheme.swatchHex }}
-                  />
-                  <span>{m.displayName}</span>
-                  {!m.active && (
-                    <span className="text-[11px] text-[#FCA5A5]">· Inativa</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {onUpdateModelAccount && (
-            <div className="flex flex-wrap items-center gap-2 shrink-0 xl:border-l xl:border-[#F4C2D7]/15 xl:pl-4">
-              <span className="text-[11px] text-[#C9BAC4] whitespace-nowrap">
-                Cor desta tela:
-              </span>
-              <span
-                className="text-[11px] font-semibold whitespace-nowrap mr-1"
-                style={{ color: currentTheme.accentText }}
-              >
-                {currentTheme.label}
-              </span>
-              <div className="flex items-center gap-1.5">
-                {ADMIN_MODEL_THEMES.map((theme) => {
-                  const isCurrent = theme.id === currentTheme.id;
-                  return (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      title={`Aplicar tema ${theme.label} para ${modelName}`}
-                      aria-label={`Aplicar cor ${theme.label} ao painel de ${modelName}`}
-                      aria-pressed={isCurrent}
-                      onClick={() =>
-                        void onUpdateModelAccount(activeModelId, {
-                          adminThemeColor: theme.id,
-                        })
-                      }
-                      className={`w-5 h-5 rounded-full transition-transform cursor-pointer ${
-                        isCurrent
-                          ? 'ring-2 ring-white ring-offset-2 ring-offset-[#0B060F] scale-110'
-                          : 'opacity-80 hover:opacity-100 hover:scale-105 border border-white/25'
-                      }`}
-                      style={{ backgroundColor: theme.swatchHex }}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
       <div className="flex flex-col lg:flex-row gap-6 items-start">
       {/* Comfortable Left Navigation & Quick Controls Sidebar */}
       <aside
@@ -1124,10 +1054,10 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
               <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-5">
                 <div className="space-y-1.5">
                   <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
-                    Sala Exclusiva de Chamada Privativa
+                    Sala Privativa 1-para-1 (1 Internauta por Vez)
                   </h2>
                   <p className="text-sm text-[#C9BAC4] leading-relaxed">
-                    Entre em videochamada com um clique ou escolha qualquer internauta conectado nas listas abaixo.
+                    Atenda um internauta por vez mediante pagamento. Enquanto estiver em chamada privativa, novos pedidos aguardam na fila.
                   </p>
                 </div>
 
@@ -1135,7 +1065,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                   {!hasActiveCall && (
                     <TechVideoCallButton
                       size="hero"
-                      label="Entrar na Videochamada"
+                      label="Atender Próximo Privativo"
                       onClick={() => void handleLorenaEnterVideoCall()}
                     />
                   )}
@@ -1149,21 +1079,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                       <Camera className="w-3.5 h-3.5 text-[#F4C2D7]" />
                       <span>
                         {showStageNow ? 'Ocultar Prévia' : 'Testar Câmera'}
-                      </span>
-                    </button>
-                  )}
-
-                  {!isGroupRoom && (
-                    <button
-                      type="button"
-                      onClick={() => void onJoinGroupRoomAdmin()}
-                      className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7] hover:bg-[#21142D] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <Users className="w-3.5 h-3.5 text-[#F4C2D7]" />
-                      <span>
-                        {roomParticipants.length > 0
-                          ? `Sala em Grupo (${roomParticipants.length})`
-                          : 'Abrir Sala em Grupo'}
                       </span>
                     </button>
                   )}
@@ -1239,6 +1154,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                     <div className="flex flex-wrap items-center gap-3 shrink-0">
                       <TechVideoCallButton
                         size="hero"
+                        disabled={hasActiveCall}
                         label="Entrar na Videochamada Privativa"
                         onClick={() => void onAcceptIncomingRing()}
                       />
@@ -1288,6 +1204,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 <div className="shrink-0">
                   <TechVideoCallButton
                     size="hero"
+                    disabled={hasActiveCall}
                     label={`Atender VIP · ${waitingVipRequests[0].userName}`}
                     onClick={() =>
                       void onAcceptQueueAndCall(waitingVipRequests[0])
@@ -1298,7 +1215,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             )}
 
             {/* Quick Moderation Strip during Active 1-on-1 Private Call */}
-            {activePartnerUid && !isGroupRoom && (
+            {activePartnerUid && (
               <section className="luxury-card border border-[#F4C2D7]/25 rounded-2xl px-6 py-4 flex flex-wrap items-center justify-between gap-4">
                 <div className="space-y-0.5">
                   <p className="text-sm font-semibold text-[#FAF4F7]">
@@ -1353,7 +1270,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
             {showStageNow && (
               <VideoCallStage
                 isAdmin={true}
-                isGroupRoom={isGroupRoom}
                 myProfile={myProfile}
                 modelProfile={modelProfile}
                 studioState={studioState}
@@ -1363,9 +1279,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 activePlan={activePlan}
                 localStream={localStream}
                 remoteStream={remoteStream}
-                remoteStreams={remoteStreams}
-                peerConnectionStates={peerConnectionStates}
-                roomParticipants={roomParticipants}
                 micEnabled={micEnabled}
                 camEnabled={camEnabled}
                 mediaError={mediaError}
@@ -1472,10 +1385,13 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                           <div className="flex items-center gap-2 shrink-0">
                             <TechVideoCallButton
                               size="compact"
+                              disabled={hasActiveCall}
                               label={
-                                isVipCaller
-                                  ? 'Atender VIP Agora'
-                                  : 'Atender Privativa'
+                                hasActiveCall
+                                  ? 'Em Atendimento (1/1)'
+                                  : isVipCaller
+                                    ? 'Atender VIP Agora'
+                                    : 'Atender Privativa'
                               }
                               onClick={() => void onAcceptQueueAndCall(req)}
                             />
@@ -1624,8 +1540,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
 
                           <TechVideoCallButton
                             size="compact"
-                            disabled={isBlocked}
-                            label="Chamar no Privado"
+                            disabled={isBlocked || hasActiveCall}
+                            label={
+                              hasActiveCall
+                                ? 'Sala Ocupada (1/1)'
+                                : 'Chamar no Privado'
+                            }
                             icon={<PhoneCall className="w-3 h-3" />}
                             onClick={() =>
                               void onDirectCallUser({
@@ -1841,7 +1761,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                         key={charge.id}
                         className="px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
                       >
-                        <div className="space-y-0.5 min-w-0">
+                        <div className="space-y-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-2 text-xs">
                             <span className="font-semibold text-[#FAF4F7]">
                               {charge.userName}
@@ -1853,6 +1773,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                               {statusUi.label}
                             </span>
                           </div>
+                          {charge.status === 'pending' &&
+                            charge.visitorReportedPaidAt && (
+                              <p className="text-[11px] font-medium text-[#38BDF8]">
+                                Internauta sinalizou pagamento · Confira seu banco e confirme abaixo
+                              </p>
+                            )}
                           <p className="text-[11px] font-mono tabular-nums text-[#938291]">
                             {BRL_FORMATTER.format(charge.amountCents / 100)} ·
                             Chave: {charge.pixKeyMasked} · TXID: {charge.txid}
@@ -1955,45 +1881,13 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
 
         {section === 'tip_goal' && (
           <div className="space-y-6">
-            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-4">
-              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-                <div className="space-y-1.5">
-                  <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
-                    Configuração da Meta de Gorjeta · {modelName}
-                  </h2>
-                  <p className="text-sm text-[#C9BAC4]">
-                    Defina o título, o valor alvo e a descrição da meta exclusiva desta modelo para exibição dinâmica na página dos visitantes.
-                  </p>
-                </div>
-
-                {isSuperAdmin &&
-                  superAdminModels.length > 1 &&
-                  onSelectModelWorkspace && (
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <span className="text-xs text-[#938291]">
-                        Configurar modelo:
-                      </span>
-                      {superAdminModels.map((m) => {
-                        const isSelected = m.id === activeModelId;
-                        return (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => onSelectModelWorkspace(m.id)}
-                            aria-pressed={isSelected}
-                            className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              isSelected
-                                ? 'luxury-rose-cta border-transparent font-semibold'
-                                : 'bg-[#0B060F]/80 border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-[#FAF4F7]'
-                            }`}
-                          >
-                            {m.displayName}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-              </div>
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-1.5">
+              <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                Configuração da Meta de Gorjeta · {modelName}
+              </h2>
+              <p className="text-sm text-[#C9BAC4]">
+                Defina o título, o valor alvo e a descrição da sua meta exclusiva para exibição dinâmica na página dos visitantes.
+              </p>
             </section>
 
             <TipGoalManagerCard
@@ -2050,7 +1944,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
           onSavePrivateAlbumSettings && (
             <MediaManagementPanel
               modelId={activeModelId}
-              isSuperAdmin={isSuperAdmin}
               galleryItems={galleryItems}
               privateAlbumItems={privateAlbumItems}
               privateAlbumSummary={privateAlbumSummary}
@@ -2061,7 +1954,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
               onDeletePrivateAlbumItem={onDeletePrivateAlbumItem}
               onToggleMediaVisibility={onToggleMediaVisibility}
               onSavePrivateAlbumSettings={onSavePrivateAlbumSettings}
-              onModerateGalleryItem={onModerateGalleryItem}
             />
           )}
 
@@ -2072,13 +1964,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 Aparência do Site, Descrição e Álbuns
               </h2>
               <p className="text-sm text-[#C9BAC4]">
-                Atualize sua descrição, informações básicas, galeria pública (sujeita à autorização do administrador) e seu álbum privativo com senha de fotos e vídeos.
+                Atualize sua descrição, informações básicas, galeria pública e seu álbum privativo com senha de fotos e vídeos.
               </p>
             </section>
 
             <AdminSiteEditor
               modelId={activeModelId}
-              isSuperAdmin={isSuperAdmin}
               modelProfile={modelProfile}
               studioConfig={studioConfig}
               galleryItems={galleryItems}
@@ -2090,7 +1981,6 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
               onSaveGalleryItem={onSaveGalleryItem}
               onDeleteGalleryItem={onDeleteGalleryItem}
               onRestoreDefaultGallery={onRestoreDefaultGallery}
-              onModerateGalleryItem={onModerateGalleryItem}
               onSavePrivateAlbumSettings={onSavePrivateAlbumSettings}
               onSavePrivateAlbumItem={onSavePrivateAlbumItem}
               onDeletePrivateAlbumItem={onDeletePrivateAlbumItem}
@@ -2099,27 +1989,274 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
           </div>
         )}
 
-        {section === 'models' &&
-          isSuperAdmin &&
-          onCreateModelAccount &&
-          onUpdateModelAccount &&
-          onDeleteModelAccount &&
-          onSelectModelWorkspace && (
-            <SuperAdminModelsPanel
-              models={superAdminModels}
-              currentOperatedModelId={activeModelId}
-              pendingGalleryItems={pendingGalleryItems}
+        {section === 'whatsapp_invite' &&
+          onCreateWhatsappInvite &&
+          onDeleteWhatsappInvite && (
+            <WhatsappInvitePanel
+              modelId={activeModelId}
+              modelName={modelName}
+              studioBrand={studioConfig?.studioBrand || 'Model Gat Brasil'}
+              studioConfig={studioConfig}
+              galleryItems={galleryItems}
+              privateAlbumItems={privateAlbumItems}
+              callPlans={callPlans}
+              allProfiles={allProfiles}
+              peers={peers}
+              whatsappInvites={whatsappInvites}
               onUploadImage={onUploadImage}
-              onModerateGalleryItem={onModerateGalleryItem}
-              onCreateModel={onCreateModelAccount}
-              onUpdateModel={onUpdateModelAccount}
-              onDeleteModel={onDeleteModelAccount}
-              onSelectModelWorkspace={(modelId, targetSection) => {
-                onSelectModelWorkspace(modelId);
-                setSection(targetSection || 'private_calls');
-              }}
+              onSaveStudioConfig={onSaveStudioConfig}
+              onCreateWhatsappInvite={onCreateWhatsappInvite}
+              onDeleteWhatsappInvite={onDeleteWhatsappInvite}
             />
           )}
+
+        {section === 'account' && (
+          <div className="space-y-6">
+            <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl p-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="inline-flex items-center gap-2 text-xs font-semibold text-[#86EFAC]">
+                    <ShieldCheck className="w-4 h-4 shrink-0" />
+                    <span>Acesso 100% Privativo e Isolado</span>
+                  </div>
+                  <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
+                    Minha Conta, Login e Senha Privativa
+                  </h2>
+                  <p className="text-sm text-[#C9BAC4] max-w-2xl">
+                    Somente você, com seu login e sua senha específicos, acessa este painel administrativo. Nenhuma outra pessoa ou modelo tem permissão para visualizar ou editar suas configurações.
+                  </p>
+                </div>
+
+                <div className="px-4 py-3 rounded-2xl bg-[#0B060F] border border-[#F4C2D7]/20 shrink-0 space-y-0.5">
+                  <p className="text-[11px] text-[#938291]">Login atual</p>
+                  <p className="text-xs font-mono text-[#FAF4F7]">
+                    {modelAccount?.loginUsername || activeModelId}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-5">
+              <div className="space-y-1">
+                <h3 className="font-display text-xl font-semibold text-[#FAF4F7]">
+                  Cor Visual do Seu Painel Particular
+                </h3>
+                <p className="text-xs text-[#C9BAC4]">
+                  Personalize o tema de cores exclusivo da sua área administrativa ({currentTheme.label}).
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                {ADMIN_MODEL_THEMES.map((theme) => {
+                  const isCurrent = theme.id === currentTheme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      aria-pressed={isCurrent}
+                      onClick={() => {
+                        if (!onUpdateMyModelAccount) return;
+                        setAccountErrorMsg(null);
+                        setAccountSuccessMsg(null);
+                        void onUpdateMyModelAccount({
+                          adminThemeColor: theme.id,
+                        }).then((res) => {
+                          if (res.ok) {
+                            setAccountSuccessMsg(
+                              `Cor do painel atualizada para ${theme.label}.`
+                            );
+                          } else {
+                            setAccountErrorMsg(
+                              res.error || 'Não foi possível alterar a cor.'
+                            );
+                          }
+                        });
+                      }}
+                      className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs transition-all cursor-pointer ${
+                        isCurrent
+                          ? 'bg-[#21142D] text-[#FAF4F7] font-semibold border-[#F4C2D7]'
+                          : 'bg-[#0B060F]/80 border-[#F4C2D7]/15 text-[#C9BAC4] hover:text-[#FAF4F7]'
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="w-3.5 h-3.5 rounded-full shrink-0 border border-white/25"
+                        style={{ backgroundColor: theme.swatchHex }}
+                      />
+                      <span>{theme.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <form
+              onSubmit={(e) => void handleSaveOwnAccountCredentials(e)}
+              className="luxury-card border border-[#F4C2D7]/15 rounded-2xl p-6 space-y-5"
+            >
+              <div className="flex items-center gap-2.5 pb-3 border-b border-[#F4C2D7]/15">
+                <Lock className="w-4 h-4 text-[#F4C2D7]" />
+                <div>
+                  <h3 className="text-sm font-semibold text-[#FAF4F7]">
+                    Alterar Login Específico e Senha de Acesso
+                  </h3>
+                  <p className="text-xs text-[#C9BAC4]">
+                    Para proteger seu painel, confirme sua senha atual antes de salvar qualquer alteração.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5 md:col-span-2">
+                  <label
+                    htmlFor="own-account-login"
+                    className="block text-xs font-medium text-[#C9BAC4]"
+                  >
+                    Seu Login ou E-mail Privativo
+                  </label>
+                  <input
+                    id="own-account-login"
+                    type="text"
+                    required
+                    minLength={3}
+                    maxLength={120}
+                    value={accountLoginDraft}
+                    onChange={(e) => setAccountLoginDraft(e.target.value)}
+                    placeholder="Ex.: seunome@modelgat.local"
+                    className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                  />
+                </div>
+
+                <div className="space-y-1.5 md:col-span-2">
+                  <label
+                    htmlFor="own-account-current-pass"
+                    className="block text-xs font-medium text-[#C9BAC4]"
+                  >
+                    Senha Atual (Obrigatória para confirmar)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="own-account-current-pass"
+                      type={showCurrentPassword ? 'text' : 'password'}
+                      required
+                      autoComplete="current-password"
+                      value={currentPasswordDraft}
+                      onChange={(e) => setCurrentPasswordDraft(e.target.value)}
+                      placeholder="Digite sua senha atual"
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl pl-4 pr-11 py-2.5 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCurrentPassword((p) => !p)}
+                      aria-label={
+                        showCurrentPassword
+                          ? 'Ocultar senha atual'
+                          : 'Mostrar senha atual'
+                      }
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                    >
+                      {showCurrentPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="own-account-new-pass"
+                    className="block text-xs font-medium text-[#C9BAC4]"
+                  >
+                    Nova Senha (opcional, mín. 6 caracteres)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="own-account-new-pass"
+                      type={showNewPassword ? 'text' : 'password'}
+                      minLength={6}
+                      maxLength={120}
+                      autoComplete="new-password"
+                      value={newPasswordDraft}
+                      onChange={(e) => setNewPasswordDraft(e.target.value)}
+                      placeholder="Deixe vazio para manter a atual"
+                      className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl pl-4 pr-11 py-2.5 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword((p) => !p)}
+                      aria-label={
+                        showNewPassword
+                          ? 'Ocultar nova senha'
+                          : 'Mostrar nova senha'
+                      }
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#C9BAC4] hover:text-[#FAF4F7] cursor-pointer"
+                    >
+                      {showNewPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="own-account-confirm-pass"
+                    className="block text-xs font-medium text-[#C9BAC4]"
+                  >
+                    Confirmar Nova Senha
+                  </label>
+                  <input
+                    id="own-account-confirm-pass"
+                    type={showNewPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    value={confirmPasswordDraft}
+                    onChange={(e) => setConfirmPasswordDraft(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    className="w-full bg-[#0B060F] border border-[#F4C2D7]/20 rounded-xl px-4 py-2.5 text-sm text-[#FAF4F7] focus:outline-none focus:border-[#F4C2D7]"
+                  />
+                </div>
+              </div>
+
+              {accountErrorMsg && (
+                <div
+                  role="alert"
+                  className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200"
+                >
+                  {accountErrorMsg}
+                </div>
+              )}
+
+              {accountSuccessMsg && (
+                <div
+                  role="status"
+                  className="p-3.5 rounded-xl bg-[#16A34A]/15 border border-[#16A34A]/40 text-xs text-[#86EFAC] flex items-center gap-2"
+                >
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{accountSuccessMsg}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={savingAccount}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>
+                    {savingAccount
+                      ? 'Salvando credenciais...'
+                      : 'Salvar Login e Senha'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
       </div>
       </div>
     </div>

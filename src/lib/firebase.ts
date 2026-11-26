@@ -10,8 +10,6 @@ export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
 googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
 
-export const STUDIO_ADMIN_EMAIL = 'automation.ioan@gmail.com';
-
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',

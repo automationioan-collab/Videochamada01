@@ -1,9 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Camera,
-  Check,
   CheckCircle2,
-  Clock3,
   Eye,
   EyeOff,
   Film,
@@ -27,7 +25,6 @@ import type {
 
 interface MediaManagementPanelProps {
   modelId: string;
-  isSuperAdmin?: boolean;
   galleryItems: GalleryItemRecord[];
   privateAlbumItems: PrivateAlbumItemRecord[];
   privateAlbumSummary?: PrivateAlbumSummary | null;
@@ -82,15 +79,9 @@ interface MediaManagementPanelProps {
     enabled?: boolean;
     priceCents?: number;
   }) => Promise<{ ok: boolean; error?: string }>;
-  onModerateGalleryItem?: (
-    modelId: string,
-    itemId: string,
-    status: 'approved' | 'rejected',
-    note?: string
-  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
-type MediaFilter = 'all' | 'public' | 'private' | 'pending';
+type MediaFilter = 'all' | 'public' | 'private';
 
 interface UnifiedMediaEntry {
   key: string;
@@ -116,7 +107,6 @@ const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
 
 export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
   modelId,
-  isSuperAdmin = false,
   galleryItems,
   privateAlbumItems,
   privateAlbumSummary = null,
@@ -127,7 +117,6 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
   onDeletePrivateAlbumItem,
   onToggleMediaVisibility,
   onSavePrivateAlbumSettings,
-  onModerateGalleryItem,
 }) => {
   const [filter, setFilter] = useState<MediaFilter>('all');
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -200,12 +189,10 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
   const counts = useMemo(() => {
     const pub = unifiedItems.filter((i) => i.visibility === 'public');
     const priv = unifiedItems.filter((i) => i.visibility === 'private');
-    const pending = pub.filter((i) => i.approvalStatus === 'pending');
     return {
       total: unifiedItems.length,
       publicCount: pub.length,
       privateCount: priv.length,
-      pendingCount: pending.length,
     };
   }, [unifiedItems]);
 
@@ -215,11 +202,6 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
     }
     if (filter === 'private') {
       return unifiedItems.filter((i) => i.visibility === 'private');
-    }
-    if (filter === 'pending') {
-      return unifiedItems.filter(
-        (i) => i.visibility === 'public' && i.approvalStatus === 'pending'
-      );
     }
     return unifiedItems;
   }, [filter, unifiedItems]);
@@ -243,10 +225,6 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
         if (targetVisibility === 'private') {
           setRealtimeMsg(
             `"${entry.title}" movido para Privado em tempo real (visível somente após pagamento).`
-          );
-        } else if (res.approvalStatus === 'pending') {
-          setRealtimeMsg(
-            `"${entry.title}" movido para Público e enviado para autorização do Administrador.`
           );
         } else {
           setRealtimeMsg(
@@ -370,7 +348,7 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
           caption: newCaption.trim() || newTitle.trim(),
           category: newCategory,
           mediaType: newMediaType,
-          specs: isSuperAdmin ? 'Publicado pelo Administrador' : 'Estúdio Oficial',
+          specs: 'Estúdio Oficial',
           src: newSrc.trim(),
           alt: newTitle.trim(),
           sortOrder,
@@ -382,9 +360,7 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
           setNewCaption('');
           setNewSrc('');
           setRealtimeMsg(
-            isSuperAdmin
-              ? 'Mídia pública salva e liberada imediatamente.'
-              : 'Mídia pública salva e enviada para autorização do Administrador.'
+            'Mídia pública salva e liberada imediatamente na sua vitrine.'
           );
         } else {
           setErrorMsg(res.error || 'Erro ao salvar mídia pública.');
@@ -430,10 +406,10 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
             </h2>
             <p className="text-xs text-[#C9BAC4] max-w-2xl">
               Marque individualmente cada foto ou vídeo como{' '}
-              <strong className="text-[#FAF4F7]">Público</strong> (todos veem após
-              autorização do Administrador) ou{' '}
+              <strong className="text-[#FAF4F7]">Público</strong> (todos os visitantes
+              da sua página podem ver) ou{' '}
               <strong className="text-[#F4C2D7]">Privado</strong> (somente
-              internautas que pagarem podem visualizar). As alterações filtram a
+              internautas que pagarem podem visualizar). As alterações filtram sua
               vitrine instantaneamente.
             </p>
           </div>
@@ -707,9 +683,7 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
                       ? 'Salvando...'
                       : newVisibility === 'private'
                         ? 'Salvar Privado'
-                        : isSuperAdmin
-                          ? 'Publicar Agora'
-                          : 'Enviar p/ Aprovação'}
+                        : 'Publicar Agora'}
                   </span>
                 </button>
               </div>
@@ -725,14 +699,6 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
                 { id: 'all', label: `Todas (${counts.total})` },
                 { id: 'public', label: `Públicas (${counts.publicCount})` },
                 { id: 'private', label: `Privadas (${counts.privateCount})` },
-                ...(counts.pendingCount > 0
-                  ? [
-                      {
-                        id: 'pending' as MediaFilter,
-                        label: `Aguardando Admin (${counts.pendingCount})`,
-                      },
-                    ]
-                  : []),
               ] as Array<{ id: MediaFilter; label: string }>
             ).map((tab) => (
               <button
@@ -836,20 +802,9 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
                           ·
                         </span>
                         {isPublic ? (
-                          entry.approvalStatus === 'approved' ? (
-                            <span className="text-[#86EFAC] font-medium">
-                              Público (Visível a todos)
-                            </span>
-                          ) : entry.approvalStatus === 'pending' ? (
-                            <span className="text-[#FDE68A] inline-flex items-center gap-1 font-medium">
-                              <Clock3 className="w-3 h-3" />
-                              <span>Aguardando Autorização Admin</span>
-                            </span>
-                          ) : (
-                            <span className="text-[#FCA5A5] font-medium">
-                              Público Recusado
-                            </span>
-                          )
+                          <span className="text-[#86EFAC] font-medium">
+                            Público (Visível na vitrine)
+                          </span>
                         ) : (
                           <span className="text-[#F4C2D7] font-medium inline-flex items-center gap-1">
                             <Lock className="w-3 h-3" />
@@ -910,27 +865,6 @@ export const MediaManagementPanel: React.FC<MediaManagementPanelProps> = ({
                         <span>Privado</span>
                       </button>
                     </div>
-
-                    {isSuperAdmin &&
-                      isPublic &&
-                      onModerateGalleryItem &&
-                      entry.approvalStatus !== 'approved' && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() =>
-                            void onModerateGalleryItem(
-                              modelId,
-                              entry.id,
-                              'approved'
-                            )
-                          }
-                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-full bg-[#16A34A]/20 border border-[#16A34A]/50 text-[#86EFAC] hover:bg-[#16A34A]/30 whitespace-nowrap cursor-pointer"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Autorizar</span>
-                        </button>
-                      )}
 
                     <button
                       type="button"

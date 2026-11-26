@@ -8,7 +8,6 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
 export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const STORE_PATH = path.join(DATA_DIR, 'studio-store.json');
-const SECRET_PATH = path.join(DATA_DIR, 'session.secret');
 
 export const PRIMARY_MODEL_ID = 'lorena_noir';
 
@@ -93,6 +92,19 @@ export function sanitizeMediaUrl(input: unknown, maxLen = 500): string {
     return trimmed;
   }
   return '';
+}
+
+export function sanitizeWhatsappPhone(input: unknown): string {
+  if (typeof input !== 'string') return '';
+  let digits = input.replace(/\D+/g, '');
+  if (!digits) return '';
+  if ((digits.length === 10 || digits.length === 11) && !digits.startsWith('55')) {
+    digits = `55${digits}`;
+  }
+  if (digits.length < 10 || digits.length > 15) {
+    return '';
+  }
+  return digits;
 }
 
 export interface StoredSchedulePeriod {
@@ -225,10 +237,35 @@ export interface StoredPixCharge {
   merchantCity: string;
   usingDemoKey?: boolean;
   callRequestId?: string;
+  inviteId?: string;
   createdAt: number;
   expiresAt: number;
   paidAt?: number;
+  visitorReportedPaidAt?: number;
   fulfilledAt?: number;
+}
+
+export interface StoredWhatsappInvite {
+  id: string;
+  modelId: string;
+  recipientName?: string;
+  recipientPhone?: string;
+  photoUrl: string;
+  message: string;
+  planId?: string;
+  planName?: string;
+  planDurationMinutes?: number;
+  planPriceCents?: number;
+  callMode: 'group' | 'private';
+  status: 'pending' | 'viewed' | 'paid';
+  clickCount: number;
+  createdAt: number;
+  viewedAt?: number;
+  paidAt?: number;
+  paidByUid?: string;
+  paidByName?: string;
+  callRequestId?: string;
+  pixChargeId?: string;
 }
 
 export interface StoredStudioConfig {
@@ -251,6 +288,10 @@ export interface StoredStudioConfig {
   pixKeyType?: PixKeyType;
   pixMerchantName?: string;
   pixMerchantCity?: string;
+  whatsappInvitePhotoUrl?: string;
+  whatsappInviteMessage?: string;
+  whatsappInvitePlanId?: string;
+  whatsappInviteCallMode?: 'group' | 'private';
   updatedAt: number;
 }
 
@@ -391,6 +432,7 @@ export interface ModelWorkspaceData {
   privateAlbumPurchases?: StoredPrivateAlbumPurchase[];
   privateAlbumItems?: StoredPrivateAlbumItem[];
   pixCharges?: StoredPixCharge[];
+  whatsappInvites?: StoredWhatsappInvite[];
   callPlans: StoredCallPlan[];
   callQueue: StoredCallRequest[];
   callMessages: StoredCallMessage[];
@@ -442,24 +484,30 @@ export function ensureUploadsDir() {
   }
 }
 
+const IN_MEMORY_SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+
 function getSessionSecret(): string {
   const fromEnv = process.env.MODEL_SESSION_SECRET?.trim();
   if (fromEnv && fromEnv.length >= 24) {
     return fromEnv;
   }
-  ensureDataDir();
-  if (fs.existsSync(SECRET_PATH)) {
-    const existing = fs.readFileSync(SECRET_PATH, 'utf8').trim();
-    if (existing.length >= 32) {
-      return existing;
+  const legacySecretPath = path.join(DATA_DIR, 'session.secret');
+  try {
+    if (fs.existsSync(legacySecretPath)) {
+      fs.unlinkSync(legacySecretPath);
     }
+  } catch {
+    // Ignore cleanup errors
   }
-  const generated = crypto.randomBytes(32).toString('hex');
-  fs.writeFileSync(SECRET_PATH, generated, { encoding: 'utf8', mode: 0o600 });
-  return generated;
+  return IN_MEMORY_SESSION_SECRET;
 }
 
 const SESSION_SECRET = getSessionSecret();
+
+export function getConfiguredPrimaryPassword(): string {
+  const val = process.env.PRIMARY_MODEL_INITIAL_PASSWORD?.trim() || '';
+  return val.length >= 6 ? val : '';
+}
 
 export function hashPassword(password: string): { salt: string; hash: string } {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -481,6 +529,39 @@ export function verifyPassword(
   } catch {
     return false;
   }
+}
+
+export function verifyTimingSafeString(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+export function verifyModelAccountPassword(
+  account: StoredModelAccount,
+  password: string
+): boolean {
+  if (!password) return false;
+  if (account.isPrimary) {
+    const envPass = getConfiguredPrimaryPassword();
+    if (envPass) {
+      return verifyTimingSafeString(password, envPass);
+    }
+  }
+  return Boolean(
+    account.passwordHash &&
+      account.passwordSalt &&
+      verifyPassword(password, account.passwordSalt, account.passwordHash)
+  );
+}
+
+export function isPrimaryClaimNeeded(): boolean {
+  if (getConfiguredPrimaryPassword()) return false;
+  const store = getStore();
+  const primary = store.models[PRIMARY_MODEL_ID];
+  if (!primary) return false;
+  return !(primary.passwordHash && primary.passwordSalt);
 }
 
 function toBase64Url(input: Buffer | string): string {
@@ -869,14 +950,14 @@ export function buildDefaultGallery(
     },
     {
       id: 'lounge_backdrop',
-      title: 'Salão Maison Aura',
+      title: 'Salão Model Gat Brasil',
       caption:
         'Ambiente reservado do estúdio com acústica tratada e atmosfera acolhedora para conversas exclusivas.',
       category: 'studio',
       mediaType: 'photo',
       specs: 'Sala Privada · Acústica Tratada',
       src: '/src/assets/images/studio_backdrop_lounge_1794946401840.jpg',
-      alt: 'Ambiente interno do salão privado Maison Aura',
+      alt: 'Ambiente interno do salão privado Model Gat Brasil',
       sortOrder: 6,
       active: true,
       approvalStatus: 'approved',
@@ -907,7 +988,7 @@ export function buildDefaultWorkspace(
   const nowMs = Date.now();
   const modelUid = getModelActorUid(account.id);
   const name = account.displayName;
-  const studioBrand = overrides?.studioBrand?.trim() || 'Maison Aura';
+  const studioBrand = overrides?.studioBrand?.trim() || 'Model Gat Brasil';
   const headline =
     overrides?.headline?.trim() ||
     `Atendimento privativo 1-para-1 e sala ao vivo em videochamada com ${name}.`;
@@ -1012,6 +1093,9 @@ export function buildDefaultWorkspace(
       pixKeyType: 'evp',
       pixMerchantName: name.slice(0, 25),
       pixMerchantCity: 'SAO PAULO',
+      whatsappInvitePhotoUrl: heroImageUrl,
+      whatsappInviteMessage: `Oi! Separei um momento exclusivo para nós dois em videochamada ao vivo. Clique no link abaixo para fazer o pagamento com segurança (PIX ou cartão) e entrar comigo agora!`,
+      whatsappInviteCallMode: 'private',
       updatedAt: nowMs,
     },
     galleryItems: buildDefaultGallery(name, nowMs),
@@ -1024,6 +1108,7 @@ export function buildDefaultWorkspace(
     privateAlbumPurchases: [],
     privateAlbumItems: [],
     pixCharges: [],
+    whatsappInvites: [],
     callPlans: buildDefaultPlans(name, nowMs, rate, overrides?.planPrices),
     callQueue: [],
     callMessages: [],
@@ -1035,13 +1120,19 @@ export function buildDefaultWorkspace(
 
 function createInitialStore(): StudioStoreData {
   const nowIso = new Date().toISOString();
+  const initialPrimaryPassword =
+    process.env.PRIMARY_MODEL_INITIAL_PASSWORD?.trim() || '';
+  const initialCreds =
+    initialPrimaryPassword.length >= 6
+      ? hashPassword(initialPrimaryPassword)
+      : { salt: '', hash: '' };
   const lorena: StoredModelAccount = {
     id: PRIMARY_MODEL_ID,
     slug: 'lorena-noir',
     displayName: 'Lorena Noir',
-    loginUsername: 'lorena@maisonaura.local',
-    passwordSalt: '',
-    passwordHash: '',
+    loginUsername: 'lorena@modelgat.local',
+    passwordSalt: initialCreds.salt,
+    passwordHash: initialCreds.hash,
     tokenVersion: 1,
     isPrimary: true,
     active: true,
@@ -1073,7 +1164,19 @@ export function getStore(): StudioStoreData {
         const ordered = Object.values(parsed.models).sort(
           (a, b) => Number(b.isPrimary) - Number(a.isPrimary)
         );
+        const envPrimaryPass =
+          process.env.PRIMARY_MODEL_INITIAL_PASSWORD?.trim() || '';
         for (const account of ordered) {
+          if (
+            account.isPrimary &&
+            !account.passwordHash &&
+            envPrimaryPass.length >= 6
+          ) {
+            const { salt, hash } = hashPassword(envPrimaryPass);
+            account.passwordSalt = salt;
+            account.passwordHash = hash;
+            mutated = true;
+          }
           if (!sanitizeAdminThemeColor(account.adminThemeColor)) {
             account.adminThemeColor = account.isPrimary
               ? 'rose_velvet'
@@ -1114,6 +1217,24 @@ export function getStore(): StudioStoreData {
               ws.pixCharges = [];
               mutated = true;
             }
+            if (!Array.isArray(ws.whatsappInvites)) {
+              ws.whatsappInvites = [];
+              mutated = true;
+            }
+            if (typeof ws.studioConfig.whatsappInviteMessage !== 'string') {
+              ws.studioConfig.whatsappInviteMessage =
+                'Oi! Separei um momento exclusivo para nós dois em videochamada ao vivo. Clique no link abaixo para fazer o pagamento com segurança (PIX ou cartão) e entrar comigo agora!';
+              ws.studioConfig.whatsappInvitePhotoUrl =
+                ws.studioConfig.whatsappInvitePhotoUrl ||
+                ws.studioConfig.heroImageUrl ||
+                ws.studioConfig.modelAvatarUrl ||
+                '';
+              ws.studioConfig.whatsappInviteCallMode =
+                ws.studioConfig.whatsappInviteCallMode === 'group'
+                  ? 'group'
+                  : 'private';
+              mutated = true;
+            }
             if (typeof ws.studioState.tipGoalEnabled !== 'boolean') {
               ws.studioState.tipGoalEnabled = false;
               ws.studioState.tipGoalTitle =
@@ -1139,6 +1260,10 @@ export function getStore(): StudioStoreData {
               ws.studioState.tipGoalDescription = '';
               mutated = true;
             }
+            if (ws.studioConfig.studioBrand === 'Maison Aura') {
+              ws.studioConfig.studioBrand = 'Model Gat Brasil';
+              mutated = true;
+            }
             for (const g of ws.galleryItems || []) {
               if (!g.approvalStatus) {
                 g.approvalStatus = 'approved';
@@ -1146,6 +1271,14 @@ export function getStore(): StudioStoreData {
               }
               if (!g.mediaType) {
                 g.mediaType = 'photo';
+                mutated = true;
+              }
+              if (g.title === 'Salão Maison Aura') {
+                g.title = 'Salão Model Gat Brasil';
+                mutated = true;
+              }
+              if (g.alt === 'Ambiente interno do salão privado Maison Aura') {
+                g.alt = 'Ambiente interno do salão privado Model Gat Brasil';
                 mutated = true;
               }
             }

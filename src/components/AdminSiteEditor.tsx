@@ -1,9 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Camera,
-  Check,
   CheckCircle2,
-  Clock3,
   Eye,
   EyeOff,
   Film,
@@ -40,7 +38,6 @@ import type {
 
 interface AdminSiteEditorProps {
   modelId?: string;
-  isSuperAdmin?: boolean;
   modelProfile: StudioProfile | null;
   studioConfig: StudioConfig | null;
   galleryItems: GalleryItemRecord[];
@@ -79,12 +76,6 @@ interface AdminSiteEditorProps {
   >;
   onDeleteGalleryItem: (itemId: string) => Promise<void>;
   onRestoreDefaultGallery: () => Promise<void>;
-  onModerateGalleryItem?: (
-    modelId: string,
-    itemId: string,
-    status: 'approved' | 'rejected',
-    note?: string
-  ) => Promise<{ ok: boolean; error?: string }>;
   onSavePrivateAlbumSettings?: (input: {
     enabled?: boolean;
     password?: string;
@@ -118,7 +109,6 @@ const CATEGORY_LABELS: Record<GalleryCategoryType, string> = {
 
 export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
   modelId = 'lorena_noir',
-  isSuperAdmin = false,
   modelProfile,
   studioConfig,
   galleryItems,
@@ -130,7 +120,6 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
   onSaveGalleryItem,
   onDeleteGalleryItem,
   onRestoreDefaultGallery,
-  onModerateGalleryItem,
   onSavePrivateAlbumSettings,
   onSavePrivateAlbumItem,
   onDeletePrivateAlbumItem,
@@ -386,7 +375,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
     setSavingGallery(true);
     setGalleryFeedback(null);
     try {
-      const result = await onSaveGalleryItem({
+      await onSaveGalleryItem({
         id: editingItemId || undefined,
         title: itemTitle,
         caption: itemCaption,
@@ -400,13 +389,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
       });
       setShowGalleryForm(false);
       setEditingItemId(null);
-      if (result && result.approvalStatus === 'pending') {
-        setGalleryFeedback(
-          'Mídia pública enviada para autorização do Administrador Geral. Ela ficará visível aos internautas assim que for aprovada.'
-        );
-      } else {
-        setGalleryFeedback('Galeria pública atualizada com sucesso.');
-      }
+      setGalleryFeedback('Galeria pública atualizada com sucesso.');
     } finally {
       setSavingGallery(false);
     }
@@ -797,7 +780,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                   htmlFor="edit-group-btn"
                   className="block text-xs font-medium text-[#C9BAC4]"
                 >
-                  Texto do Botão (Chamada Multi-Internautas)
+                  Texto do Botão Principal (Entrada na Sala Privativa)
                 </label>
                 <input
                   id="edit-group-btn"
@@ -1020,18 +1003,15 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
         </form>
       </section>
 
-      {/* 2. Full Editable Public Gallery Vitrine Manager (Requires Super Admin Approval) */}
+      {/* 2. Full Editable Public Gallery Vitrine Manager */}
       <section className="luxury-card border border-[#F4C2D7]/20 rounded-2xl overflow-hidden">
         <div className="p-6 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <h2 className="font-display text-2xl sm:text-3xl font-semibold text-[#FAF4F7]">
-              Fotos Públicas da Vitrine (Aprovação do Administrador)
+              Fotos e Vídeos Públicos da Vitrine
             </h2>
             <p className="text-xs text-[#C9BAC4]">
-              Adicione fotos ou vídeos públicos enviando do seu dispositivo ou colando link.{' '}
-              <strong className="font-medium text-[#F4C2D7]">
-                Toda nova mídia pública enviada pela modelo precisa de autorização do Administrador Geral antes de aparecer no site.
-              </strong>
+              Adicione fotos ou vídeos públicos enviando do seu dispositivo ou colando link para exibir na sua vitrine aos internautas.
             </p>
           </div>
 
@@ -1065,7 +1045,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
               <h3 className="text-sm font-semibold text-[#FAF4F7]">
                 {editingItemId
                   ? 'Editar Mídia Pública'
-                  : 'Nova Mídia Pública (Sujeita a Autorização)'}
+                  : 'Nova Mídia Pública'}
               </h3>
               <button
                 type="button"
@@ -1253,11 +1233,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                 >
                   <Save className="w-3.5 h-3.5" />
                   <span>
-                    {savingGallery
-                      ? 'Enviando...'
-                      : isSuperAdmin
-                        ? 'Salvar e Publicar'
-                        : 'Enviar p/ Autorização'}
+                    {savingGallery ? 'Salvando...' : 'Salvar e Publicar'}
                   </span>
                 </button>
               </div>
@@ -1276,7 +1252,6 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
           {displayedGallery.map((item) => {
             const thumbFailed = failedThumbIds.has(item.id);
             const isPersisted = galleryItems.some((g) => g.id === item.id);
-            const approval = item.approvalStatus || 'approved';
             const isVideo = item.mediaType === 'video';
             return (
               <div
@@ -1332,25 +1307,8 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                       <span className="text-[#938291]" aria-hidden="true">
                         ·
                       </span>
-                      <span
-                        className={
-                          approval === 'approved'
-                            ? 'text-[#86EFAC] font-medium'
-                            : approval === 'pending'
-                              ? 'text-[#FCD34D] font-medium inline-flex items-center gap-1'
-                              : 'text-[#FCA5A5] font-medium'
-                        }
-                      >
-                        {approval === 'approved' ? (
-                          'Autorizada (Pública)'
-                        ) : approval === 'pending' ? (
-                          <>
-                            <Clock3 className="w-3 h-3" />
-                            <span>Aguardando Administrador</span>
-                          </>
-                        ) : (
-                          'Recusada pelo Administrador'
-                        )}
+                      <span className="text-[#86EFAC] font-medium">
+                        Pública (Vitrine)
                       </span>
                       <span className="text-[#938291]" aria-hidden="true">
                         ·
@@ -1370,37 +1328,6 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {isSuperAdmin &&
-                    isPersisted &&
-                    onModerateGalleryItem &&
-                    approval !== 'approved' && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void onModerateGalleryItem(modelId, item.id, 'approved')
-                        }
-                        className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-semibold rounded-full bg-[#16A34A]/20 border border-[#16A34A]/50 text-[#86EFAC] hover:bg-[#16A34A]/30 transition-colors cursor-pointer"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Autorizar</span>
-                      </button>
-                    )}
-
-                  {isSuperAdmin &&
-                    isPersisted &&
-                    onModerateGalleryItem &&
-                    approval === 'pending' && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void onModerateGalleryItem(modelId, item.id, 'rejected')
-                        }
-                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-full bg-red-950/50 border border-red-500/40 text-red-200 hover:bg-red-900/50 transition-colors cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                        <span>Recusar</span>
-                      </button>
-                    )}
 
                   <button
                     type="button"
@@ -1874,9 +1801,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#86EFAC] hover:bg-[#281837] cursor-pointer"
                     >
                       <Eye className="w-3.5 h-3.5" />
-                      <span>
-                        {isSuperAdmin ? 'Tornar Público' : 'Enviar p/ Público'}
-                      </span>
+                      <span>Tornar Público</span>
                     </button>
                   )}
                   <button

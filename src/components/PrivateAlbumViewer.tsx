@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  CreditCard,
   Eye,
   EyeOff,
   Film,
@@ -117,7 +116,7 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
   onRequireAuth,
   onUnlock,
 }) => {
-  const [paymentMethod, setPaymentMethod] = useState<'pix' | 'card'>('pix');
+  const paymentMethod = 'pix' as const;
   const [purchasing, setPurchasing] = useState(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
     null
@@ -344,34 +343,15 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
             </div>
 
             <div className="lg:col-span-5 rounded-2xl bg-[#070B1E]/90 border border-[#818CF8]/25 p-5 space-y-4">
-              {isAuthenticated && (
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('pix')}
-                    className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-medium transition-colors cursor-pointer ${
-                      paymentMethod === 'pix'
-                        ? 'bg-[#161F49] border-[#38BDF8] text-[#F8FAFC]'
-                        : 'bg-[#0B1026] border-[#818CF8]/20 text-[#B6C2E2]'
-                    }`}
-                  >
-                    <QrCode className="w-3.5 h-3.5 text-[#38BDF8]" />
-                    <span>PIX</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('card')}
-                    className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-medium transition-colors cursor-pointer ${
-                      paymentMethod === 'card'
-                        ? 'bg-[#161F49] border-[#38BDF8] text-[#F8FAFC]'
-                        : 'bg-[#0B1026] border-[#818CF8]/20 text-[#B6C2E2]'
-                    }`}
-                  >
-                    <CreditCard className="w-3.5 h-3.5 text-[#A5B4FC]" />
-                    <span>Cartão</span>
-                  </button>
-                </div>
-              )}
+              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-[#161F49]/80 border border-[#38BDF8]/40 text-xs text-[#F8FAFC]">
+                <span className="inline-flex items-center gap-2 font-medium">
+                  <QrCode className="w-4 h-4 text-[#38BDF8]" />
+                  <span>PIX QR Code · Liberação Verificada</span>
+                </span>
+                <span className="text-[11px] text-[#B6C2E2]">
+                  Cartão em breve
+                </span>
+              </div>
 
               {unlockError && (
                 <p role="alert" className="text-xs text-red-300">
@@ -385,21 +365,17 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
                 onClick={() => void handlePayAndUnlock()}
                 className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-50 transition-all cursor-pointer"
               >
-                {paymentMethod === 'pix' && isAuthenticated ? (
+                {isAuthenticated ? (
                   <QrCode className="w-3.5 h-3.5 shrink-0" />
                 ) : (
                   <Lock className="w-3.5 h-3.5 shrink-0" />
                 )}
                 <span>
                   {purchasing
-                    ? paymentMethod === 'pix'
-                      ? 'Gerando QR Code PIX...'
-                      : 'Processando liberação...'
+                    ? 'Gerando QR Code PIX...'
                     : !isAuthenticated
-                      ? `Entrar e Pagar ${BRL_FORMATTER.format(priceCents / 100)} p/ Desbloquear`
-                      : paymentMethod === 'pix'
-                        ? `Gerar QR Code PIX · ${BRL_FORMATTER.format(priceCents / 100)}`
-                        : `Pagar ${BRL_FORMATTER.format(priceCents / 100)} e Ver Privados`}
+                      ? `Entrar e Pagar ${BRL_FORMATTER.format(priceCents / 100)} via PIX`
+                      : `Gerar QR Code PIX · ${BRL_FORMATTER.format(priceCents / 100)}`}
                 </span>
               </button>
 

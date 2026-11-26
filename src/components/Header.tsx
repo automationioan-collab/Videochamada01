@@ -19,7 +19,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  studioBrand = 'Maison Aura',
+  studioBrand = 'Model Gat Brasil',
   isAuthenticated,
   isAdmin,
   isAdminRoute,
@@ -56,7 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
               onClick: () => onSelectTab('studio'),
             },
             {
-              label: 'Videochamada',
+              label: 'Sala Privativa',
               active: activeTab === 'call',
               onClick: () => onSelectTab('call'),
             },

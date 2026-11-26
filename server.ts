@@ -17,12 +17,14 @@ import {
   buildPrivateAlbumSummary,
   ensureUploadsDir,
   findModelByLogin,
+  getConfiguredPrimaryPassword,
   getModelActorUid,
   getModelAndWorkspace,
   getModelRoomId,
   getStore,
   hashPassword,
   hasVisitorPaidPrivateAlbum,
+  isPrimaryClaimNeeded,
   pickNextDistinctThemeColor,
   rescalePlansForRate,
   sanitizeAdminThemeColor,
@@ -31,10 +33,12 @@ import {
   sanitizeMediaUrl,
   sanitizeModelBasicInfo,
   sanitizeSlug,
+  sanitizeWhatsappPhone,
   saveStore,
   serializeModelSummary,
   signModelSessionToken,
   signPrivateAlbumToken,
+  verifyModelAccountPassword,
   verifyModelSessionToken,
   verifyPassword,
   verifyPrivateAlbumToken,
@@ -46,6 +50,7 @@ import {
   type StoredPixCharge,
   type StoredPrivateAlbumItem,
   type StoredStudioConfig,
+  type StoredWhatsappInvite,
 } from './server/modelStore.js';
 import {
   checkMercadoPagoPaymentStatus,
@@ -68,7 +73,6 @@ if (!getApps().length) {
 }
 
 const adminAuth = getAuth();
-const ADMIN_EMAIL = 'automation.ioan@gmail.com';
 
 interface ConnectedPeer {
   ws: WebSocket;
@@ -79,7 +83,6 @@ interface ConnectedPeer {
   role: 'model' | 'viewer';
   accessStatus: 'active' | 'vip' | 'muted' | 'blocked';
   isAdmin: boolean;
-  isSuperAdmin: boolean;
   inCallWith: string | null;
   connectedAt: string;
 }
@@ -314,7 +317,7 @@ function emitWorkspaceRefresh(modelId: string, includeDirectory = false) {
 
   for (const peer of connectedPeers.values()) {
     if (peer.ws.readyState !== WebSocket.OPEN) continue;
-    if (peer.modelId === modelId || peer.isSuperAdmin) {
+    if (peer.modelId === modelId) {
       peer.ws.send(refreshPayload);
     }
     if (directoryPayload) {
@@ -348,44 +351,10 @@ function extractBearerToken(req: Request): string {
   return '';
 }
 
-function isDecodedSuperAdmin(decoded: DecodedIdToken): boolean {
-  return (
-    decoded.email === ADMIN_EMAIL && decoded.email_verified === true
-  );
-}
-
 interface AuthenticatedRequest extends Request {
   firebaseUser?: DecodedIdToken;
   modelSession?: ModelSessionPayload;
   resolvedModelId?: string;
-  isSuperAdmin?: boolean;
-}
-
-async function requireSuperAdmin(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-) {
-  const token = extractBearerToken(req);
-  if (!token) {
-    res.status(401).json({ ok: false, error: 'Autenticação obrigatória.' });
-    return;
-  }
-  try {
-    const decoded = await adminAuth.verifyIdToken(token);
-    if (!isDecodedSuperAdmin(decoded)) {
-      res.status(403).json({
-        ok: false,
-        error: 'Acesso restrito à administradora geral do estúdio.',
-      });
-      return;
-    }
-    req.firebaseUser = decoded;
-    req.isSuperAdmin = true;
-    next();
-  } catch {
-    res.status(401).json({ ok: false, error: 'Sessão inválida ou expirada.' });
-  }
 }
 
 async function requireModelOperator(
@@ -395,58 +364,38 @@ async function requireModelOperator(
 ) {
   const token = extractBearerToken(req);
   if (!token) {
-    res.status(401).json({ ok: false, error: 'Autenticação da modelo obrigatória.' });
+    res.status(401).json({ ok: false, error: 'Autenticação privativa da modelo obrigatória.' });
     return;
   }
 
-  // 1. Check dedicated model password session token (HMAC-SHA256)
+  // Strictly require a valid HMAC-SHA256 model session token tied to a single model account.
+  // Google/visitor accounts and cross-model headers/params are never accepted here.
   const modelSession = verifyModelSessionToken(token);
-  if (modelSession) {
-    const store = getStore();
-    const account = store.models[modelSession.modelId];
-    if (
-      !account ||
-      !account.active ||
-      account.tokenVersion !== modelSession.tokenVersion
-    ) {
-      res.status(401).json({
-        ok: false,
-        error: 'Sessão da modelo expirada ou desativada.',
-      });
-      return;
-    }
-    req.modelSession = modelSession;
-    req.resolvedModelId = account.id; // STRICTLY locked to token's modelId
-    req.isSuperAdmin = false;
-    next();
+  if (!modelSession) {
+    res.status(403).json({
+      ok: false,
+      error: 'Acesso restrito. Entre exclusivamente com o login e senha próprios da modelo.',
+    });
     return;
   }
 
-  // 2. Otherwise verify Firebase Super Admin Google token
-  try {
-    const decoded = await adminAuth.verifyIdToken(token);
-    if (!isDecodedSuperAdmin(decoded)) {
-      res.status(403).json({
-        ok: false,
-        error: 'Permissão negada. Entre com a senha da modelo ou conta administrativa.',
-      });
-      return;
-    }
-    const requestedModelId = sanitizeId(
-      req.header('x-model-id') || req.query.modelId,
-      PRIMARY_MODEL_ID
-    );
-    const store = getStore();
-    const targetModelId = store.models[requestedModelId]
-      ? requestedModelId
-      : PRIMARY_MODEL_ID;
-    req.firebaseUser = decoded;
-    req.resolvedModelId = targetModelId;
-    req.isSuperAdmin = true;
-    next();
-  } catch {
-    res.status(401).json({ ok: false, error: 'Sessão da modelo inválida.' });
+  const store = getStore();
+  const account = store.models[modelSession.modelId];
+  if (
+    !account ||
+    !account.active ||
+    account.tokenVersion !== modelSession.tokenVersion
+  ) {
+    res.status(401).json({
+      ok: false,
+      error: 'Sessão da modelo expirada ou desativada. Faça login novamente.',
+    });
+    return;
   }
+
+  req.modelSession = modelSession;
+  req.resolvedModelId = account.id; // STRICTLY locked to the authenticated model's own ID
+  next();
 }
 
 async function requireVisitor(
@@ -489,6 +438,60 @@ function getDefaultActiveModelId(): string {
   return firstActive?.id || PRIMARY_MODEL_ID;
 }
 
+function hasVisitorPaidActiveCallAccess(
+  workspace: ModelWorkspaceData,
+  visitorUid: string
+): boolean {
+  return workspace.callQueue.some(
+    (q) =>
+      q.userId === visitorUid &&
+      (q.status === 'waiting' ||
+        q.status === 'accepted' ||
+        q.status === 'in_call') &&
+      (q.paymentStatus === 'captured' || q.paymentStatus === 'authorized') &&
+      (Boolean(q.planId) ||
+        (typeof q.planPriceCents === 'number' && q.planPriceCents > 0))
+  );
+}
+
+function getBusyVisitorUidInPrivateCall(
+  modelId: string,
+  workspace: ModelWorkspaceData,
+  excludeVisitorUid?: string
+): string | null {
+  const activeUserId = workspace.studioState.activeCallUserId?.trim();
+  if (
+    workspace.studioState.activeCallId &&
+    activeUserId &&
+    activeUserId !== excludeVisitorUid
+  ) {
+    return activeUserId;
+  }
+
+  const activeQueueEntry = workspace.callQueue.find(
+    (q) =>
+      (q.status === 'in_call' || q.status === 'accepted') &&
+      q.userId !== excludeVisitorUid
+  );
+  if (activeQueueEntry) {
+    return activeQueueEntry.userId;
+  }
+
+  const actorUid = getModelActorUid(modelId);
+  const modelPeer = Array.from(connectedPeers.values()).find(
+    (p) => p.modelId === modelId && (p.isAdmin || p.uid === actorUid)
+  );
+  if (
+    modelPeer?.inCallWith &&
+    modelPeer.inCallWith !== excludeVisitorUid &&
+    connectedPeers.has(modelPeer.inCallWith)
+  ) {
+    return modelPeer.inCallWith;
+  }
+
+  return null;
+}
+
 function buildPublicModelSummary(model: StoredModelAccount) {
   const ctx = getModelAndWorkspace(model.id);
   if (!ctx) return null;
@@ -497,7 +500,7 @@ function buildPublicModelSummary(model: StoredModelAccount) {
   const modelOnline = Array.from(connectedPeers.values()).some(
     (p) => p.modelId === model.id && (p.isAdmin || p.uid === actorUid)
   );
-  const roomCount = getRoomMap(model.id).size;
+  const roomCount = getBusyVisitorUidInPrivateCall(model.id, workspace) ? 1 : 0;
   const activePlans = workspace.callPlans
     .filter((p) => p.active)
     .sort((a, b) => a.sortOrder - b.sortOrder);
@@ -651,10 +654,130 @@ function serializePixChargeForClient(charge: StoredPixCharge) {
     merchantCity: charge.merchantCity,
     usingDemoKey: Boolean(charge.usingDemoKey),
     ...(charge.callRequestId ? { callRequestId: charge.callRequestId } : {}),
+    ...(charge.inviteId ? { inviteId: charge.inviteId } : {}),
     createdAt: charge.createdAt,
     expiresAt: charge.expiresAt,
     ...(charge.paidAt ? { paidAt: charge.paidAt } : {}),
+    ...(charge.visitorReportedPaidAt
+      ? { visitorReportedPaidAt: charge.visitorReportedPaidAt }
+      : {}),
   };
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function findWhatsappInviteById(inviteId: string): {
+  model: StoredModelAccount;
+  workspace: ModelWorkspaceData;
+  invite: StoredWhatsappInvite;
+} | null {
+  const cleanId = sanitizeId(inviteId);
+  if (!cleanId) return null;
+  const store = getStore();
+  for (const model of Object.values(store.models)) {
+    if (!model.active) continue;
+    const workspace = store.workspaces[model.id];
+    if (!workspace || !Array.isArray(workspace.whatsappInvites)) continue;
+    const invite = workspace.whatsappInvites.find((inv) => inv.id === cleanId);
+    if (invite) {
+      return { model, workspace, invite };
+    }
+  }
+  return null;
+}
+
+function injectInviteMetaIntoHtml(
+  html: string,
+  req: Request,
+  inviteId: string
+): string {
+  const found = findWhatsappInviteById(inviteId);
+  if (!found) return html;
+  const { model, workspace, invite } = found;
+  const displayName = workspace.studioConfig.modelName || model.displayName;
+  const brand = workspace.studioConfig.studioBrand || 'Model Gat Brasil';
+  const titleText = invite.planName
+    ? `Convite Exclusivo de ${displayName} · ${invite.planName} | ${brand}`
+    : `Convite Exclusivo de ${displayName} | ${brand}`;
+  const descText =
+    invite.message.trim().slice(0, 220) ||
+    `Faça o pagamento e contrate sua videochamada ao vivo com ${displayName}.`;
+
+  const rawPhoto = sanitizeMediaUrl(
+    invite.photoUrl ||
+      workspace.studioConfig.heroImageUrl ||
+      workspace.studioConfig.modelAvatarUrl ||
+      ''
+  );
+  const envOrigin = (() => {
+    const raw = process.env.APP_URL?.trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.origin;
+      }
+    } catch {
+      // Ignore invalid APP_URL
+    }
+    return '';
+  })();
+  const protoHeader = req.headers['x-forwarded-proto'];
+  const rawProto =
+    typeof protoHeader === 'string' && protoHeader.trim()
+      ? protoHeader.split(',')[0].trim().toLowerCase()
+      : (req.protocol || 'https').toLowerCase();
+  const proto = rawProto === 'http' || rawProto === 'https' ? rawProto : 'https';
+  const rawHost = (req.get('host') || '').trim();
+  const safeHost = /^[a-zA-Z0-9.:-]+$/.test(rawHost)
+    ? rawHost
+    : 'localhost:3000';
+  const baseOrigin = envOrigin || `${proto}://${safeHost}`;
+  const resolvedPhotoUrl = rawPhoto
+    ? rawPhoto.startsWith('http://') || rawPhoto.startsWith('https://')
+      ? rawPhoto
+      : `${baseOrigin}${rawPhoto.startsWith('/') ? '' : '/'}${rawPhoto}`
+    : '';
+
+  const safeTitle = escapeHtmlAttr(titleText);
+  const safeDesc = escapeHtmlAttr(descText);
+  const safePhoto = resolvedPhotoUrl ? escapeHtmlAttr(resolvedPhotoUrl) : '';
+
+  let nextHtml = html
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
+    .replace(
+      /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:description" content="${safeDesc}" />`
+    );
+
+  if (safePhoto) {
+    const ogImageTags =
+      `\n    <meta property="og:image" content="${safePhoto}" />` +
+      `\n    <meta property="og:image:secure_url" content="${safePhoto}" />` +
+      `\n    <meta name="twitter:image" content="${safePhoto}" />`;
+    nextHtml = nextHtml.replace('</head>', `${ogImageTags}\n  </head>`);
+  }
+  return nextHtml;
+}
+
+function serializeWhatsappInviteForVisitor(invite: StoredWhatsappInvite) {
+  const { recipientPhone: _hiddenPhone, pixChargeId: _hiddenPix, ...rest } = invite;
+  return rest;
 }
 
 function fulfillPixCharge(
@@ -784,10 +907,75 @@ function fulfillPixCharge(
     charge.fulfilledAt = nowMs;
   }
 
+  if (charge.inviteId && Array.isArray(workspace.whatsappInvites)) {
+    const inv = workspace.whatsappInvites.find((i) => i.id === charge.inviteId);
+    if (inv) {
+      inv.status = 'paid';
+      inv.paidAt = inv.paidAt || nowMs;
+      inv.paidByUid = charge.userId;
+      inv.paidByName = charge.userName;
+      inv.callRequestId = charge.callRequestId;
+      inv.pixChargeId = charge.id;
+    }
+  }
+
   return {
     callRequestId: charge.callRequestId,
   };
 }
+
+function createSlidingWindowRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  message: string;
+}) {
+  const hits = new Map<string, number[]>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const xff = req.headers['x-forwarded-for'];
+    const clientIp =
+      (typeof xff === 'string' ? xff.split(',')[0]?.trim() : '') ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      'unknown';
+    const key = `${clientIp}:${req.path}`;
+    const prev = (hits.get(key) || []).filter(
+      (ts) => now - ts < options.windowMs
+    );
+    if (prev.length >= options.maxRequests) {
+      const oldest = prev[0] || now;
+      const retryAfterSec = Math.max(
+        1,
+        Math.ceil((options.windowMs - (now - oldest)) / 1000)
+      );
+      res.setHeader('Retry-After', String(retryAfterSec));
+      res.status(429).json({ ok: false, error: options.message });
+      return;
+    }
+    prev.push(now);
+    hits.set(key, prev);
+    if (hits.size > 2000) {
+      for (const [k, list] of hits.entries()) {
+        if (!list.some((ts) => now - ts < options.windowMs)) {
+          hits.delete(k);
+        }
+      }
+    }
+    next();
+  };
+}
+
+const authRateLimiter = createSlidingWindowRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 25,
+  message: 'Muitas tentativas em sequência. Aguarde alguns instantes e tente novamente.',
+});
+
+const albumUnlockRateLimiter = createSlidingWindowRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 20,
+  message: 'Muitas tentativas de desbloqueio. Aguarde um minuto antes de tentar novamente.',
+});
 
 async function startServer() {
   // Ensure initial store and uploads directory exist at startup
@@ -795,6 +983,27 @@ async function startServer() {
   ensureUploadsDir();
 
   const app = express();
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(self), microphone=(self), geolocation=()'
+    );
+    if (
+      req.secure ||
+      req.headers['x-forwarded-proto'] === 'https'
+    ) {
+      res.setHeader(
+        'Strict-Transport-Security',
+        'max-age=31536000; includeSubDomains'
+      );
+    }
+    next();
+  });
 
   app.use(
     '/uploads',
@@ -999,6 +1208,41 @@ async function startServer() {
     });
   });
 
+  app.get('/api/public/invites/:inviteId', (req, res) => {
+    const found = findWhatsappInviteById(req.params.inviteId);
+    if (!found) {
+      res.status(404).json({
+        ok: false,
+        error: 'Convite não encontrado ou modelo indisponível no momento.',
+      });
+      return;
+    }
+    const { model, workspace, invite } = found;
+    const nowMs = Date.now();
+    invite.clickCount = (invite.clickCount || 0) + 1;
+    if (invite.status === 'pending') {
+      invite.status = 'viewed';
+      invite.viewedAt = nowMs;
+    } else if (!invite.viewedAt) {
+      invite.viewedAt = nowMs;
+    }
+    saveStore();
+    emitWorkspaceRefresh(model.id, false);
+
+    const activePlans = workspace.callPlans
+      .filter((p) => p.active)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    res.json({
+      ok: true,
+      invite: serializeWhatsappInviteForVisitor(invite),
+      model: buildPublicModelSummary(model),
+      studioConfig: sanitizePublicStudioConfig(workspace.studioConfig),
+      studioState: workspace.studioState,
+      callPlans: activePlans,
+    });
+  });
+
   app.get('/api/studio/public-status', (req, res) => {
     const requestedId = sanitizeId(req.query.modelId, getDefaultActiveModelId());
     const store = getStore();
@@ -1046,8 +1290,89 @@ async function startServer() {
     });
   });
 
+  // First-Run Primary Studio Setup Status & One-Time Atomic Claim
+  app.get('/api/model-auth/bootstrap-status', (_req, res) => {
+    const primaryNeedsClaim = isPrimaryClaimNeeded();
+    if (!primaryNeedsClaim) {
+      res.json({ ok: true, primaryNeedsClaim: false });
+      return;
+    }
+    const store = getStore();
+    const primary = store.models[PRIMARY_MODEL_ID];
+    res.json({
+      ok: true,
+      primaryNeedsClaim: true,
+      primaryDisplayName: primary?.displayName || 'Lorena Noir',
+      primaryLoginUsername: primary?.loginUsername || 'lorena@modelgat.local',
+    });
+  });
+
+  app.post('/api/model-auth/claim-primary', authRateLimiter, (req, res) => {
+    if (!isPrimaryClaimNeeded()) {
+      res.status(403).json({
+        ok: false,
+        error: 'A senha inicial do painel principal já foi configurada.',
+      });
+      return;
+    }
+    const store = getStore();
+    const primary = store.models[PRIMARY_MODEL_ID];
+    if (!primary) {
+      res.status(404).json({ ok: false, error: 'Conta principal não encontrada.' });
+      return;
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!password || password.length < 6 || password.length > 80) {
+      res.status(400).json({
+        ok: false,
+        error: 'Defina uma senha inicial entre 6 e 80 caracteres.',
+      });
+      return;
+    }
+
+    if (typeof body.loginUsername === 'string' && body.loginUsername.trim()) {
+      const nextLogin = sanitizeLoginUsername(body.loginUsername);
+      if (nextLogin.length < 3) {
+        res.status(400).json({
+          ok: false,
+          error: 'O login deve ter pelo menos 3 caracteres.',
+        });
+        return;
+      }
+      const conflict = Object.values(store.models).find(
+        (m) =>
+          m.id !== primary.id &&
+          (m.loginUsername.toLowerCase() === nextLogin ||
+            m.slug.toLowerCase() === nextLogin)
+      );
+      if (conflict) {
+        res.status(409).json({
+          ok: false,
+          error: `O login "${nextLogin}" já está em uso.`,
+        });
+        return;
+      }
+      primary.loginUsername = nextLogin;
+    }
+
+    const { salt, hash } = hashPassword(password);
+    primary.passwordSalt = salt;
+    primary.passwordHash = hash;
+    primary.tokenVersion += 1;
+    primary.updatedAt = new Date().toISOString();
+    saveStore();
+
+    const token = signModelSessionToken(primary);
+    res.status(201).json({
+      ok: true,
+      token,
+      model: serializeModelSummary(primary),
+    });
+  });
+
   // Model Authentication with Separate Password
-  app.post('/api/model-auth/login', (req, res) => {
+  app.post('/api/model-auth/login', authRateLimiter, (req, res) => {
     const body = req.body as { login?: unknown; password?: unknown };
     const loginInput =
       typeof body.login === 'string' ? body.login.trim() : '';
@@ -1080,11 +1405,7 @@ async function startServer() {
       return;
     }
 
-    if (
-      !account.passwordHash ||
-      !account.passwordSalt ||
-      !verifyPassword(password, account.passwordSalt, account.passwordHash)
-    ) {
+    if (!verifyModelAccountPassword(account, password)) {
       res.status(401).json({
         ok: false,
         error: 'Login ou senha inválidos.',
@@ -1094,6 +1415,112 @@ async function startServer() {
 
     const token = signModelSessionToken(account);
     res.json({
+      ok: true,
+      token,
+      model: serializeModelSummary(account),
+    });
+  });
+
+  // Self-service Private Model Account Registration (creates an isolated workspace accessible only by this model)
+  app.post('/api/model-auth/register', authRateLimiter, (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const displayName =
+      typeof body.displayName === 'string'
+        ? body.displayName.trim().slice(0, 80)
+        : '';
+    const loginUsername = sanitizeLoginUsername(body.loginUsername);
+    const password = typeof body.password === 'string' ? body.password : '';
+    const rawSlug =
+      typeof body.slug === 'string' && body.slug.trim()
+        ? body.slug
+        : displayName;
+    const baseSlug = sanitizeSlug(rawSlug, 'modelo');
+
+    if (!displayName || displayName.length < 2) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe seu nome artístico (mínimo 2 caracteres).',
+      });
+      return;
+    }
+    if (!loginUsername || loginUsername.length < 3) {
+      res.status(400).json({
+        ok: false,
+        error: 'Informe um login ou e-mail exclusivo (mínimo 3 caracteres).',
+      });
+      return;
+    }
+    if (!password || password.length < 6 || password.length > 80) {
+      res.status(400).json({
+        ok: false,
+        error: 'Defina uma senha privativa entre 6 e 80 caracteres.',
+      });
+      return;
+    }
+
+    const store = getStore();
+    const existingLogin = Object.values(store.models).find(
+      (m) =>
+        m.loginUsername.toLowerCase() === loginUsername ||
+        m.slug.toLowerCase() === loginUsername
+    );
+    if (existingLogin) {
+      res.status(409).json({
+        ok: false,
+        error: `O login "${loginUsername}" já está em uso. Escolha outro login exclusivo.`,
+      });
+      return;
+    }
+
+    let finalSlug = baseSlug;
+    let suffix = 2;
+    while (
+      Object.values(store.models).some((m) => m.slug === finalSlug)
+    ) {
+      finalSlug = `${baseSlug}-${suffix++}`;
+    }
+
+    const id = sanitizeId(
+      `model_${finalSlug.replace(/-/g, '_')}_${Date.now().toString(36)}`
+    );
+    const { salt, hash } = hashPassword(password);
+    const nowIso = new Date().toISOString();
+    const explicitThemeColor = sanitizeAdminThemeColor(body.adminThemeColor);
+    const adminThemeColor =
+      explicitThemeColor || pickNextDistinctThemeColor(Object.values(store.models));
+
+    const account: StoredModelAccount = {
+      id,
+      slug: finalSlug,
+      displayName,
+      loginUsername,
+      passwordSalt: salt,
+      passwordHash: hash,
+      tokenVersion: 1,
+      isPrimary: false,
+      active: true,
+      adminThemeColor,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    store.models[id] = account;
+    store.workspaces[id] = buildDefaultWorkspace(account, {
+      studioBrand:
+        typeof body.studioBrand === 'string' && body.studioBrand.trim()
+          ? body.studioBrand.trim().slice(0, 60)
+          : undefined,
+      ratePerMinuteCents:
+        typeof body.ratePerMinuteCents === 'number'
+          ? body.ratePerMinuteCents
+          : undefined,
+    });
+
+    saveStore();
+    emitWorkspaceRefresh(id, true);
+
+    const token = signModelSessionToken(account);
+    res.status(201).json({
       ok: true,
       token,
       model: serializeModelSummary(account),
@@ -1123,313 +1550,51 @@ async function startServer() {
     });
   });
 
-  // ============================================================================
-  // SUPER ADMIN ROUTES (Exclusive to automation.ioan@gmail.com)
-  // ============================================================================
-  app.get('/api/super-admin/models', requireSuperAdmin, (_req, res) => {
-    const store = getStore();
-    const pendingGallery: Array<{
-      modelId: string;
-      modelName: string;
-      adminThemeColor?: string;
-      item: (typeof store.workspaces)[string]['galleryItems'][number];
-    }> = [];
-
-    const models = Object.values(store.models)
-      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary))
-      .map((model) => {
-        const summary = serializeModelSummary(model);
-        const ctx = getModelAndWorkspace(model.id)!;
-        const { workspace } = ctx;
-        const actorUid = getModelActorUid(model.id);
-        const totalRevenueCents = workspace.callHistory
-          .filter((r) => r.status === 'completed')
-          .reduce((acc, r) => acc + r.amountCents, 0);
-        const onlineNow = Array.from(connectedPeers.values()).some(
-          (p) => p.modelId === model.id && (p.isAdmin || p.uid === actorUid)
-        );
-        const modelPendingItems = workspace.galleryItems.filter(
-          (g) => (g.approvalStatus || 'approved') === 'pending'
-        );
-        for (const item of modelPendingItems) {
-          pendingGallery.push({
-            modelId: model.id,
-            modelName: workspace.studioConfig.modelName || model.displayName,
-            adminThemeColor: model.adminThemeColor,
-            item,
-          });
-        }
-        return {
-          ...summary,
-          metrics: {
-            totalCalls: workspace.callHistory.length,
-            totalRevenueCents,
-            waitingCount: workspace.callQueue.filter(
-              (q) => q.status === 'waiting'
-            ).length,
-            unreadMessagesCount: workspace.interestMessages.filter(
-              (m) => m.status === 'unread'
-            ).length,
-            pendingGalleryCount: modelPendingItems.length,
-            privateAlbumCount: (workspace.privateAlbumItems || []).filter(
-              (item) => item.active
-            ).length,
-            onlineNow,
-            roomParticipantsCount: getRoomMap(model.id).size,
-          },
-        };
-      });
-
-    res.json({ ok: true, models, pendingGallery });
-  });
-
-  app.get('/api/super-admin/pending-gallery', requireSuperAdmin, (_req, res) => {
-    const store = getStore();
-    const pendingGallery: Array<{
-      modelId: string;
-      modelName: string;
-      adminThemeColor?: string;
-      item: (typeof store.workspaces)[string]['galleryItems'][number];
-    }> = [];
-
-    for (const model of Object.values(store.models)) {
-      const ctx = getModelAndWorkspace(model.id);
-      if (!ctx) continue;
-      for (const item of ctx.workspace.galleryItems) {
-        if ((item.approvalStatus || 'approved') === 'pending') {
-          pendingGallery.push({
-            modelId: model.id,
-            modelName: ctx.workspace.studioConfig.modelName || model.displayName,
-            adminThemeColor: model.adminThemeColor,
-            item,
-          });
-        }
-      }
-    }
-
-    pendingGallery.sort((a, b) => b.item.updatedAt - a.item.updatedAt);
-    res.json({ ok: true, pendingGallery });
-  });
-
-  app.post(
-    '/api/super-admin/models/:modelId/gallery/:itemId/moderate',
-    requireSuperAdmin,
-    (req, res) => {
-      const modelId = sanitizeId(req.params.modelId);
-      const itemId = sanitizeId(req.params.itemId);
-      const ctx = getModelAndWorkspace(modelId);
-      if (!ctx) {
-        res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
-        return;
-      }
-      const item = ctx.workspace.galleryItems.find((g) => g.id === itemId);
-      if (!item) {
-        res.status(404).json({ ok: false, error: 'Foto pública não encontrada.' });
-        return;
-      }
-      const body = (req.body || {}) as { status?: unknown; note?: unknown };
-      const status =
-        body.status === 'approved' || body.status === 'rejected'
-          ? body.status
-          : null;
-      if (!status) {
-        res.status(400).json({
-          ok: false,
-          error: 'Informe o status de moderação: approved ou rejected.',
-        });
-        return;
-      }
-      const nowMs = Date.now();
-      item.approvalStatus = status;
-      item.reviewedAt = nowMs;
-      if (typeof body.note === 'string' && body.note.trim()) {
-        item.moderationNote = body.note.trim().slice(0, 200);
-      } else if (status === 'approved') {
-        delete item.moderationNote;
-      }
-      item.updatedAt = nowMs;
-      saveStore();
-      emitWorkspaceRefresh(modelId, true);
-      res.json({ ok: true, item });
-    }
-  );
-
-  app.post('/api/super-admin/models', requireSuperAdmin, (req, res) => {
-    const body = req.body as Record<string, unknown>;
-    const displayName =
-      typeof body.displayName === 'string'
-        ? body.displayName.trim().slice(0, 80)
-        : '';
-    const loginUsername = sanitizeLoginUsername(body.loginUsername);
-    const password = typeof body.password === 'string' ? body.password : '';
-    const rawSlug =
-      typeof body.slug === 'string' && body.slug.trim()
-        ? body.slug
-        : displayName;
-    const baseSlug = sanitizeSlug(rawSlug, 'modelo');
-
-    if (!displayName || displayName.length < 2) {
-      res.status(400).json({
-        ok: false,
-        error: 'Informe o nome artístico da modelo (mínimo 2 caracteres).',
-      });
-      return;
-    }
-    if (!loginUsername || loginUsername.length < 3) {
-      res.status(400).json({
-        ok: false,
-        error: 'Informe um login ou e-mail válido (mínimo 3 caracteres).',
-      });
-      return;
-    }
-    if (!password || password.length < 6) {
-      res.status(400).json({
-        ok: false,
-        error: 'A senha exclusiva da modelo deve ter pelo menos 6 caracteres.',
-      });
-      return;
-    }
-
-    const store = getStore();
-    const existingLogin = Object.values(store.models).find(
-      (m) => m.loginUsername.toLowerCase() === loginUsername
-    );
-    if (existingLogin) {
-      res.status(409).json({
-        ok: false,
-        error: `O login "${loginUsername}" já está cadastrado para outra modelo.`,
-      });
-      return;
-    }
-
-    let finalSlug = baseSlug;
-    let suffix = 2;
-    while (
-      Object.values(store.models).some((m) => m.slug === finalSlug)
-    ) {
-      finalSlug = `${baseSlug}-${suffix++}`;
-    }
-
-    const id = sanitizeId(
-      `model_${finalSlug.replace(/-/g, '_')}_${Date.now().toString(36)}`
-    );
-    const { salt, hash } = hashPassword(password);
-    const nowIso = new Date().toISOString();
-
-    const explicitThemeColor = sanitizeAdminThemeColor(body.adminThemeColor);
-    const adminThemeColor =
-      explicitThemeColor || pickNextDistinctThemeColor(Object.values(store.models));
-
-    const account: StoredModelAccount = {
-      id,
-      slug: finalSlug,
-      displayName,
-      loginUsername,
-      passwordSalt: salt,
-      passwordHash: hash,
-      tokenVersion: 1,
-      isPrimary: false,
-      active: body.active !== false,
-      adminThemeColor,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-
-    const rawPlanPrices =
-      body.planPrices && typeof body.planPrices === 'object'
-        ? (body.planPrices as Record<string, unknown>)
-        : null;
-    const planPrices: DefaultPlanPricesInput | undefined = rawPlanPrices
-      ? {
-          express10Cents:
-            typeof rawPlanPrices.express10Cents === 'number'
-              ? rawPlanPrices.express10Cents
-              : undefined,
-          private20Cents:
-            typeof rawPlanPrices.private20Cents === 'number'
-              ? rawPlanPrices.private20Cents
-              : undefined,
-          vip45Cents:
-            typeof rawPlanPrices.vip45Cents === 'number'
-              ? rawPlanPrices.vip45Cents
-              : undefined,
-        }
-      : undefined;
-
-    store.models[id] = account;
-    store.workspaces[id] = buildDefaultWorkspace(account, {
-      studioBrand:
-        typeof body.studioBrand === 'string'
-          ? body.studioBrand.trim().slice(0, 60)
-          : undefined,
-      modelBio:
-        typeof body.modelBio === 'string'
-          ? body.modelBio.trim().slice(0, 300)
-          : undefined,
-      basicInfo: body.basicInfo
-        ? sanitizeModelBasicInfo(body.basicInfo)
-        : undefined,
-      headline:
-        typeof body.headline === 'string'
-          ? body.headline.trim().slice(0, 140)
-          : undefined,
-      heroTitle:
-        typeof body.heroTitle === 'string'
-          ? body.heroTitle.trim().slice(0, 120)
-          : undefined,
-      heroSubtitle:
-        typeof body.heroSubtitle === 'string'
-          ? body.heroSubtitle.trim().slice(0, 300)
-          : undefined,
-      groupButtonLabel:
-        typeof body.groupButtonLabel === 'string'
-          ? body.groupButtonLabel.trim().slice(0, 60)
-          : undefined,
-      privateButtonLabel:
-        typeof body.privateButtonLabel === 'string'
-          ? body.privateButtonLabel.trim().slice(0, 60)
-          : undefined,
-      avatarUrl:
-        typeof body.avatarUrl === 'string' ? body.avatarUrl : undefined,
-      heroImageUrl:
-        typeof body.heroImageUrl === 'string' ? body.heroImageUrl : undefined,
-      loungeImageUrl:
-        typeof body.loungeImageUrl === 'string'
-          ? body.loungeImageUrl
-          : undefined,
-      ratePerMinuteCents:
-        typeof body.ratePerMinuteCents === 'number'
-          ? body.ratePerMinuteCents
-          : undefined,
-      planPrices,
-    });
-
-    saveStore();
-    emitWorkspaceRefresh(id, true);
-
-    res.status(201).json({
-      ok: true,
-      model: serializeModelSummary(account),
+  // Legacy cross-model super-admin routes are permanently disabled for strict per-model privacy
+  app.all('/api/super-admin/*', (_req, res) => {
+    res.status(403).json({
+      ok: false,
+      error:
+        'Cada modelo possui seu próprio painel privativo. Ninguém além da própria modelo tem acesso.',
     });
   });
 
-  app.patch('/api/super-admin/models/:modelId', requireSuperAdmin, (req, res) => {
-    const modelId = sanitizeId(req.params.modelId);
+  // Authenticated model updates ONLY her own private login/password/theme
+  app.patch('/api/model/account', authRateLimiter, requireModelOperator, (req: AuthenticatedRequest, res) => {
+    const modelId = req.resolvedModelId!;
     const ctx = getModelAndWorkspace(modelId);
     if (!ctx) {
-      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
+      res.status(404).json({ ok: false, error: 'Conta da modelo não encontrada.' });
       return;
     }
 
     const store = getStore();
-    const { model, workspace } = ctx;
-    const body = req.body as Record<string, unknown>;
+    const { model } = ctx;
+    const body = (req.body || {}) as Record<string, unknown>;
+    let rotatedToken: string | undefined;
 
-    if (typeof body.displayName === 'string' && body.displayName.trim()) {
-      const nextName = body.displayName.trim().slice(0, 80);
-      model.displayName = nextName;
-      workspace.studioConfig.modelName = nextName;
-      workspace.studioState.modelName = nextName;
+    const changingLogin =
+      typeof body.loginUsername === 'string' &&
+      body.loginUsername.trim().length > 0 &&
+      sanitizeLoginUsername(body.loginUsername) !== model.loginUsername.toLowerCase();
+    const changingPassword =
+      typeof body.newPassword === 'string' && body.newPassword.length > 0;
+
+    if (changingLogin || changingPassword) {
+      const hasExistingPassword =
+        Boolean(model.passwordHash && model.passwordSalt) ||
+        (model.isPrimary && Boolean(getConfiguredPrimaryPassword()));
+      if (hasExistingPassword) {
+        const currentPassword =
+          typeof body.currentPassword === 'string' ? body.currentPassword : '';
+        if (!verifyModelAccountPassword(model, currentPassword)) {
+          res.status(403).json({
+            ok: false,
+            error: 'Senha atual incorreta.',
+          });
+          return;
+        }
+      }
     }
 
     if (typeof body.loginUsername === 'string' && body.loginUsername.trim()) {
@@ -1437,53 +1602,48 @@ async function startServer() {
       if (nextLogin.length < 3) {
         res.status(400).json({
           ok: false,
-          error: 'Login inválido (mínimo 3 caracteres).',
+          error: 'O login deve ter pelo menos 3 caracteres.',
         });
         return;
       }
       const conflict = Object.values(store.models).find(
-        (m) => m.id !== model.id && m.loginUsername.toLowerCase() === nextLogin
+        (m) =>
+          m.id !== model.id &&
+          (m.loginUsername.toLowerCase() === nextLogin ||
+            m.slug.toLowerCase() === nextLogin)
       );
       if (conflict) {
         res.status(409).json({
           ok: false,
-          error: `O login "${nextLogin}" já pertence a outra modelo.`,
+          error: `O login "${nextLogin}" já está em uso.`,
         });
         return;
       }
       model.loginUsername = nextLogin;
     }
 
-    if (typeof body.newPassword === 'string' && body.newPassword.length > 0) {
-      if (body.newPassword.length < 6) {
-        res.status(400).json({
+    if (changingPassword) {
+      if (model.isPrimary && getConfiguredPrimaryPassword()) {
+        res.status(409).json({
           ok: false,
-          error: 'A nova senha deve ter pelo menos 6 caracteres.',
+          error:
+            'A senha principal está definida pelas variáveis de ambiente do servidor. Atualize PRIMARY_MODEL_INITIAL_PASSWORD nos Secrets para alterá-la.',
         });
         return;
       }
-      const { salt, hash } = hashPassword(body.newPassword);
+      const nextPass = String(body.newPassword);
+      if (nextPass.length < 6 || nextPass.length > 80) {
+        res.status(400).json({
+          ok: false,
+          error: 'A nova senha deve ter entre 6 e 80 caracteres.',
+        });
+        return;
+      }
+      const { salt, hash } = hashPassword(nextPass);
       model.passwordSalt = salt;
       model.passwordHash = hash;
       model.tokenVersion += 1;
-    }
-
-    if (typeof body.active === 'boolean') {
-      if (!body.active && model.isPrimary) {
-        res.status(400).json({
-          ok: false,
-          error: 'Não é possível desativar a modelo principal do estúdio.',
-        });
-        return;
-      }
-      model.active = body.active;
-      if (!body.active) {
-        model.tokenVersion += 1;
-      }
-    }
-
-    if (typeof body.studioBrand === 'string' && body.studioBrand.trim()) {
-      workspace.studioConfig.studioBrand = body.studioBrand.trim().slice(0, 60);
+      rotatedToken = signModelSessionToken(model);
     }
 
     const updatedTheme = sanitizeAdminThemeColor(body.adminThemeColor);
@@ -1491,125 +1651,15 @@ async function startServer() {
       model.adminThemeColor = updatedTheme;
     }
 
-    if (typeof body.avatarUrl === 'string') {
-      workspace.studioConfig.modelAvatarUrl = sanitizeMediaUrl(body.avatarUrl);
-    }
-
-    if (typeof body.heroImageUrl === 'string') {
-      workspace.studioConfig.heroImageUrl = sanitizeMediaUrl(body.heroImageUrl);
-    }
-
-    if (typeof body.loungeImageUrl === 'string') {
-      workspace.studioConfig.loungeImageUrl = sanitizeMediaUrl(body.loungeImageUrl);
-    }
-
-    if (typeof body.modelBio === 'string') {
-      workspace.studioConfig.modelBio = body.modelBio.trim().slice(0, 300);
-    }
-
-    if (body.basicInfo && typeof body.basicInfo === 'object') {
-      workspace.studioConfig.basicInfo = sanitizeModelBasicInfo(body.basicInfo);
-    }
-
-    if (typeof body.heroTitle === 'string' && body.heroTitle.trim()) {
-      workspace.studioConfig.heroTitle = body.heroTitle.trim().slice(0, 120);
-    }
-
-    if (typeof body.heroSubtitle === 'string' && body.heroSubtitle.trim()) {
-      workspace.studioConfig.heroSubtitle = body.heroSubtitle.trim().slice(0, 300);
-    }
-
-    if (typeof body.headline === 'string' && body.headline.trim()) {
-      const cleanHeadline = body.headline.trim().slice(0, 160);
-      workspace.studioConfig.headline = cleanHeadline;
-      workspace.studioState.headline = cleanHeadline.slice(0, 140);
-    }
-
-    if (
-      typeof body.groupButtonLabel === 'string' &&
-      body.groupButtonLabel.trim()
-    ) {
-      workspace.studioConfig.groupButtonLabel = body.groupButtonLabel
-        .trim()
-        .slice(0, 60);
-    }
-
-    if (
-      typeof body.privateButtonLabel === 'string' &&
-      body.privateButtonLabel.trim()
-    ) {
-      workspace.studioConfig.privateButtonLabel = body.privateButtonLabel
-        .trim()
-        .slice(0, 60);
-    }
-
-    if (
-      typeof body.ratePerMinuteCents === 'number' &&
-      Number.isFinite(body.ratePerMinuteCents)
-    ) {
-      const prevRate = workspace.studioConfig.ratePerMinuteCents || 1500;
-      const nextRate = Math.max(
-        100,
-        Math.min(1000000, Math.round(body.ratePerMinuteCents))
-      );
-      workspace.studioConfig.ratePerMinuteCents = nextRate;
-      if (body.recalculatePlans === true && prevRate !== nextRate) {
-        workspace.callPlans = rescalePlansForRate(
-          workspace.callPlans,
-          prevRate,
-          nextRate
-        );
-      }
-    }
-
-    if (
-      typeof body.privateAlbumPriceCents === 'number' &&
-      Number.isFinite(body.privateAlbumPriceCents)
-    ) {
-      const nextAlbumPrice = Math.max(
-        500,
-        Math.min(500000, Math.round(body.privateAlbumPriceCents))
-      );
-      workspace.privateAlbumPriceCents = nextAlbumPrice;
-      workspace.studioConfig.privateAlbumPriceCents = nextAlbumPrice;
-    }
-
     model.updatedAt = new Date().toISOString();
-    workspace.studioConfig.updatedAt = Date.now();
-    workspace.studioState.updatedAt = Date.now();
     saveStore();
-    emitWorkspaceRefresh(model.id, true);
+    emitWorkspaceRefresh(model.id, false);
 
-    res.json({ ok: true, model: serializeModelSummary(model) });
-  });
-
-  app.delete('/api/super-admin/models/:modelId', requireSuperAdmin, (req, res) => {
-    const modelId = sanitizeId(req.params.modelId);
-    const store = getStore();
-    const model = store.models[modelId];
-    if (!model) {
-      res.status(404).json({ ok: false, error: 'Modelo não encontrada.' });
-      return;
-    }
-    if (model.isPrimary) {
-      res.status(400).json({
-        ok: false,
-        error: 'A modelo principal não pode ser removida.',
-      });
-      return;
-    }
-
-    delete store.models[modelId];
-    delete store.workspaces[modelId];
-    roomParticipantsByModel.delete(modelId);
-    visitorQueueByModel.delete(modelId);
-    authoritativeQueueByModel.delete(modelId);
-    hasAuthoritativeQueueByModel.delete(modelId);
-    activeCallEstimateByModel.delete(modelId);
-
-    saveStore();
-    emitWorkspaceRefresh(modelId, true);
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      model: serializeModelSummary(model),
+      ...(rotatedToken ? { token: rotatedToken } : {}),
+    });
   });
 
   // ============================================================================
@@ -1674,6 +1724,9 @@ async function startServer() {
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, 50)
         .map(serializePixChargeForClient),
+      whatsappInvites: [...(workspace.whatsappInvites || [])]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 60),
     });
   });
 
@@ -1979,6 +2032,21 @@ async function startServer() {
         patch.pixMerchantCity || 'SAO PAULO'
       );
     }
+    if (typeof patch.whatsappInvitePhotoUrl === 'string') {
+      cfg.whatsappInvitePhotoUrl = sanitizeMediaUrl(patch.whatsappInvitePhotoUrl);
+    }
+    if (typeof patch.whatsappInviteMessage === 'string') {
+      cfg.whatsappInviteMessage = patch.whatsappInviteMessage.trim().slice(0, 600);
+    }
+    if (typeof patch.whatsappInvitePlanId === 'string') {
+      cfg.whatsappInvitePlanId = sanitizeId(patch.whatsappInvitePlanId);
+    }
+    if (
+      patch.whatsappInviteCallMode === 'private' ||
+      patch.whatsappInviteCallMode === 'group'
+    ) {
+      cfg.whatsappInviteCallMode = 'private';
+    }
 
     cfg.updatedAt = Date.now();
     workspace.studioState.updatedAt = Date.now();
@@ -1987,6 +2055,138 @@ async function startServer() {
     emitWorkspaceRefresh(modelId, true);
     res.json({ ok: true, studioConfig: cfg });
   });
+
+  app.post(
+    '/api/model/whatsapp-invites',
+    requireModelOperator,
+    (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+        return;
+      }
+      const { model, workspace } = ctx;
+      const body = (req.body || {}) as Record<string, unknown>;
+
+      const photoUrl =
+        sanitizeMediaUrl(body.photoUrl) ||
+        workspace.studioConfig.whatsappInvitePhotoUrl ||
+        workspace.studioConfig.heroImageUrl ||
+        workspace.studioConfig.modelAvatarUrl ||
+        '';
+      if (!photoUrl) {
+        res.status(400).json({
+          ok: false,
+          error: 'Selecione ou envie uma foto para o convite do WhatsApp.',
+        });
+        return;
+      }
+
+      const message =
+        typeof body.message === 'string' ? body.message.trim().slice(0, 600) : '';
+      if (!message) {
+        res.status(400).json({
+          ok: false,
+          error: 'Escreva a mensagem personalizada do convite antes de gerar.',
+        });
+        return;
+      }
+
+      const recipientName =
+        typeof body.recipientName === 'string'
+          ? body.recipientName.trim().slice(0, 80)
+          : '';
+      const rawPhone =
+        typeof body.recipientPhone === 'string' ? body.recipientPhone.trim() : '';
+      const recipientPhone = rawPhone ? sanitizeWhatsappPhone(rawPhone) : '';
+      if (rawPhone && !recipientPhone) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Número de WhatsApp inválido. Informe DDD + número (ex.: 11999998888) ou deixe vazio para escolher na agenda do WhatsApp.',
+        });
+        return;
+      }
+
+      const requestedPlanId = sanitizeId(body.planId);
+      const selectedPlan = requestedPlanId
+        ? workspace.callPlans.find((p) => p.id === requestedPlanId && p.active)
+        : undefined;
+      const callMode: 'private' = 'private';
+
+      const nowMs = Date.now();
+      const inviteId = `conv_${nowMs.toString(36)}_${crypto
+        .randomBytes(3)
+        .toString('hex')}`;
+
+      const invite: StoredWhatsappInvite = {
+        id: inviteId,
+        modelId,
+        ...(recipientName ? { recipientName } : {}),
+        ...(recipientPhone ? { recipientPhone } : {}),
+        photoUrl,
+        message,
+        ...(selectedPlan
+          ? {
+              planId: selectedPlan.id,
+              planName: selectedPlan.name,
+              planDurationMinutes: selectedPlan.durationMinutes,
+              planPriceCents: selectedPlan.priceCents,
+            }
+          : {}),
+        callMode,
+        status: 'pending',
+        clickCount: 0,
+        createdAt: nowMs,
+      };
+
+      if (!Array.isArray(workspace.whatsappInvites)) {
+        workspace.whatsappInvites = [];
+      }
+      workspace.whatsappInvites.unshift(invite);
+      if (workspace.whatsappInvites.length > 100) {
+        workspace.whatsappInvites = workspace.whatsappInvites.slice(0, 100);
+      }
+
+      if (body.saveAsDefault !== false) {
+        workspace.studioConfig.whatsappInvitePhotoUrl = photoUrl;
+        workspace.studioConfig.whatsappInviteMessage = message;
+        workspace.studioConfig.whatsappInvitePlanId = selectedPlan?.id || '';
+        workspace.studioConfig.whatsappInviteCallMode = callMode;
+        workspace.studioConfig.updatedAt = nowMs;
+      }
+
+      model.updatedAt = new Date().toISOString();
+      saveStore();
+      emitWorkspaceRefresh(modelId, false);
+
+      res.status(201).json({
+        ok: true,
+        invite,
+        invitePath: `/convite/${invite.id}`,
+      });
+    }
+  );
+
+  app.delete(
+    '/api/model/whatsapp-invites/:inviteId',
+    requireModelOperator,
+    (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false });
+        return;
+      }
+      const inviteId = sanitizeId(req.params.inviteId);
+      const list = ctx.workspace.whatsappInvites || [];
+      ctx.workspace.whatsappInvites = list.filter((i) => i.id !== inviteId);
+      saveStore();
+      emitWorkspaceRefresh(modelId, false);
+      res.json({ ok: true });
+    }
+  );
 
   app.post('/api/model/gallery', requireModelOperator, (req: AuthenticatedRequest, res) => {
     const modelId = req.resolvedModelId!;
@@ -2023,7 +2223,6 @@ async function startServer() {
     );
     const active = body.active !== false;
     const nowMs = Date.now();
-    const isSuperAdminOperator = Boolean(req.isSuperAdmin);
 
     const itemId =
       typeof body.id === 'string' && body.id.trim()
@@ -2033,32 +2232,6 @@ async function startServer() {
 
     if (existingIdx >= 0) {
       const prev = workspace.galleryItems[existingIdx];
-      const contentModified =
-        prev.src !== src ||
-        prev.title !== title ||
-        prev.caption !== caption ||
-        (prev.mediaType || 'photo') !== mediaType;
-
-      let nextApproval = prev.approvalStatus || 'approved';
-      let nextModerationNote = prev.moderationNote;
-      let nextReviewedAt = prev.reviewedAt;
-
-      if (isSuperAdminOperator) {
-        if (
-          body.approvalStatus === 'approved' ||
-          body.approvalStatus === 'pending' ||
-          body.approvalStatus === 'rejected'
-        ) {
-          nextApproval = body.approvalStatus;
-          nextReviewedAt = nowMs;
-        }
-      } else if (contentModified) {
-        // Mandatory admin approval whenever a model submits/changes public media
-        nextApproval = 'pending';
-        nextModerationNote = undefined;
-        nextReviewedAt = undefined;
-      }
-
       workspace.galleryItems[existingIdx] = {
         ...prev,
         title,
@@ -2070,19 +2243,12 @@ async function startServer() {
         alt,
         sortOrder,
         active,
-        approvalStatus: nextApproval,
-        ...(nextModerationNote ? { moderationNote: nextModerationNote } : {}),
-        ...(nextReviewedAt ? { reviewedAt: nextReviewedAt } : {}),
+        approvalStatus: 'approved',
+        reviewedAt: nowMs,
         updatedAt: nowMs,
       };
-      if (!nextModerationNote) {
-        delete workspace.galleryItems[existingIdx].moderationNote;
-      }
-      if (!nextReviewedAt) {
-        delete workspace.galleryItems[existingIdx].reviewedAt;
-      }
+      delete workspace.galleryItems[existingIdx].moderationNote;
     } else {
-      const approvalStatus = isSuperAdminOperator ? 'approved' : 'pending';
       workspace.galleryItems.push({
         id: itemId,
         title,
@@ -2094,24 +2260,19 @@ async function startServer() {
         alt,
         sortOrder,
         active,
-        approvalStatus,
-        ...(isSuperAdminOperator ? { reviewedAt: nowMs } : {}),
+        approvalStatus: 'approved',
+        reviewedAt: nowMs,
         createdAt: nowMs,
         updatedAt: nowMs,
       });
     }
 
     saveStore();
-    emitWorkspaceRefresh(modelId, isSuperAdminOperator || existingIdx < 0);
+    emitWorkspaceRefresh(modelId, true);
     res.json({
       ok: true,
       id: itemId,
-      approvalStatus:
-        existingIdx >= 0
-          ? workspace.galleryItems[existingIdx].approvalStatus
-          : isSuperAdminOperator
-            ? 'approved'
-            : 'pending',
+      approvalStatus: 'approved',
     });
   });
 
@@ -2364,8 +2525,7 @@ async function startServer() {
       return;
     }
     const [removedPriv] = workspace.privateAlbumItems.splice(privIdx, 1);
-    const isSuperAdminOperator = Boolean(req.isSuperAdmin);
-    const approvalStatus = isSuperAdminOperator ? 'approved' : 'pending';
+    const approvalStatus: 'approved' = 'approved';
     const category =
       typeof body.category === 'string' &&
       ['editorial', 'portraits', 'studio'].includes(body.category)
@@ -2383,13 +2543,13 @@ async function startServer() {
       mediaType: (removedPriv.mediaType === 'video' ? 'video' : 'photo') as
         | 'photo'
         | 'video',
-      specs: isSuperAdminOperator ? 'Publicado pelo Administrador' : 'Acervo da Modelo',
+      specs: 'Estúdio Oficial',
       src: removedPriv.src,
       alt: removedPriv.title,
       sortOrder: removedPriv.sortOrder,
       active: removedPriv.active,
-      approvalStatus: approvalStatus as 'approved' | 'pending',
-      ...(isSuperAdminOperator ? { reviewedAt: nowMs } : {}),
+      approvalStatus,
+      reviewedAt: nowMs,
       createdAt: removedPriv.createdAt || nowMs,
       updatedAt: nowMs,
     };
@@ -2411,7 +2571,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/public/models/:modelId/private-album/unlock', async (req, res) => {
+  app.post('/api/public/models/:modelId/private-album/unlock', albumUnlockRateLimiter, async (req, res) => {
     const requestedId = sanitizeId(req.params.modelId, getDefaultActiveModelId());
     const ctx = getModelAndWorkspace(requestedId);
     if (!ctx || !ctx.model.active) {
@@ -2625,7 +2785,34 @@ async function startServer() {
         body.status
       )
     ) {
+      if (body.status === 'accepted' || body.status === 'in_call') {
+        const busyUid = getBusyVisitorUidInPrivateCall(
+          modelId,
+          ctx.workspace,
+          entry.userId
+        );
+        if (busyUid) {
+          res.status(409).json({
+            ok: false,
+            error:
+              'Já existe um internauta em atendimento privativo. Encerre a chamada atual antes de conectar o próximo.',
+          });
+          return;
+        }
+      }
       entry.status = body.status as typeof entry.status;
+      if (
+        (body.status === 'ended' ||
+          body.status === 'rejected' ||
+          body.status === 'cancelled') &&
+        (ctx.workspace.studioState.activeCallId === entry.id ||
+          ctx.workspace.studioState.activeCallUserId === entry.userId)
+      ) {
+        ctx.workspace.studioState.activeCallId = '';
+        ctx.workspace.studioState.activeCallUserId = '';
+        ctx.workspace.studioState.activeCallUserName = '';
+        ctx.workspace.studioState.updatedAt = Date.now();
+      }
     }
     if (
       typeof body.paymentStatus === 'string' &&
@@ -3002,50 +3189,28 @@ async function startServer() {
         return;
       }
 
-      const body = (req.body || {}) as { paymentMethod?: unknown };
-      const paymentMethod = body.paymentMethod === 'card' ? 'card' : 'pix';
-      const nowMs = Date.now();
-      const amountCents =
-        typeof workspace.privateAlbumPriceCents === 'number' &&
-        workspace.privateAlbumPriceCents >= 500
-          ? workspace.privateAlbumPriceCents
-          : 3900;
-
-      if (!Array.isArray(workspace.privateAlbumPurchases)) {
-        workspace.privateAlbumPurchases = [];
-      }
-
+      const body = (req.body || {}) as { pixChargeId?: unknown };
       const alreadyPaid = hasVisitorPaidPrivateAlbum(workspace, firebaseUser.uid);
       if (!alreadyPaid) {
-        const buyerName =
-          visitor?.displayName ||
-          firebaseUser.name ||
-          firebaseUser.email?.split('@')[0] ||
-          'Internauta';
-        workspace.privateAlbumPurchases.push({
-          id: `albpay_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
-          userId: firebaseUser.uid,
-          userName: buyerName,
-          amountCents,
-          paymentMethod,
-          purchasedAt: nowMs,
-        });
-        workspace.callHistory.push({
-          id: `hist_album_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
-          callId: `album_${modelId}_${nowMs}`,
-          userId: firebaseUser.uid,
-          userName: buyerName,
-          modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
-          durationSeconds: 0,
-          amountCents,
-          currency: 'BRL',
-          status: 'completed',
-          planId: 'private_album_unlock',
-          planName: 'Álbum Privado (Fotos e Vídeos)',
-          planDurationMinutes: 0,
-          endedAt: nowMs,
-          createdAt: nowMs,
-        });
+        const pixChargeId = sanitizeId(body.pixChargeId);
+        const verifiedCharge = pixChargeId
+          ? (workspace.pixCharges || []).find(
+              (c) =>
+                c.id === pixChargeId &&
+                c.userId === firebaseUser.uid &&
+                c.kind === 'private_album' &&
+                c.status === 'paid'
+            )
+          : undefined;
+        if (!verifiedCharge) {
+          res.status(402).json({
+            ok: false,
+            error:
+              'Pagamento verificado via PIX obrigatório antes de liberar o álbum privativo.',
+          });
+          return;
+        }
+        fulfillPixCharge(modelId, workspace, verifiedCharge);
         saveStore();
         emitWorkspaceRefresh(modelId, false);
       }
@@ -3093,65 +3258,27 @@ async function startServer() {
         return;
       }
 
-      const body = (req.body || {}) as {
-        amountCents?: unknown;
-        paymentMethod?: unknown;
-        message?: unknown;
-      };
-      const rawAmount = Number(body.amountCents);
-      if (!Number.isFinite(rawAmount) || rawAmount < 500 || rawAmount > 10000000) {
-        res.status(400).json({
+      const body = (req.body || {}) as { pixChargeId?: unknown };
+      const pixChargeId = sanitizeId(body.pixChargeId);
+      const verifiedCharge = pixChargeId
+        ? (workspace.pixCharges || []).find(
+            (c) =>
+              c.id === pixChargeId &&
+              c.userId === firebaseUser.uid &&
+              c.kind === 'tip' &&
+              c.status === 'paid'
+          )
+        : undefined;
+      if (!verifiedCharge) {
+        res.status(402).json({
           ok: false,
-          error: 'Informe uma gorjeta entre R$ 5,00 e R$ 100.000,00.',
+          error:
+            'Envie a gorjeta gerando e confirmando um pagamento PIX verificado.',
         });
         return;
       }
 
-      const amountCents = Math.round(rawAmount);
-      const paymentMethod = body.paymentMethod === 'card' ? 'card' : 'pix';
-      const note =
-        typeof body.message === 'string' ? body.message.trim().slice(0, 120) : '';
-      const nowMs = Date.now();
-      const senderName =
-        visitor?.displayName ||
-        firebaseUser.name ||
-        firebaseUser.email?.split('@')[0] ||
-        'Internauta';
-
-      const nextCurrent =
-        (typeof workspace.studioState.tipGoalCurrentCents === 'number'
-          ? workspace.studioState.tipGoalCurrentCents
-          : 0) + amountCents;
-      const nextCount =
-        (typeof workspace.studioState.tipGoalContributorsCount === 'number'
-          ? workspace.studioState.tipGoalContributorsCount
-          : 0) + 1;
-
-      workspace.studioState.tipGoalCurrentCents = Math.min(100000000, nextCurrent);
-      workspace.studioState.tipGoalContributorsCount = nextCount;
-      workspace.studioState.tipGoalLastTipName = senderName.slice(0, 60);
-      workspace.studioState.tipGoalLastTipAmountCents = amountCents;
-      workspace.studioState.updatedAt = nowMs;
-
-      workspace.callHistory.push({
-        id: `hist_tip_${nowMs}_${firebaseUser.uid.slice(0, 6)}`,
-        callId: `tip_${modelId}_${nowMs}`,
-        userId: firebaseUser.uid,
-        userName: senderName,
-        modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
-        durationSeconds: 0,
-        amountCents,
-        currency: 'BRL',
-        status: 'completed',
-        planId: 'tip_goal_contribution',
-        planName: `Gorjeta (${paymentMethod === 'card' ? 'Cartão' : 'PIX'})${
-          note ? ` · ${note}` : ''
-        }`,
-        planDurationMinutes: 0,
-        endedAt: nowMs,
-        createdAt: nowMs,
-      });
-
+      fulfillPixCharge(modelId, workspace, verifiedCharge);
       saveStore();
       emitWorkspaceRefresh(modelId, true);
 
@@ -3198,31 +3325,30 @@ async function startServer() {
       return;
     }
 
-    const nowMs = Date.now();
-    const id = `call_${nowMs}_${firebaseUser.uid.slice(0, 8)}`;
-    const topic =
-      typeof body.topic === 'string' && body.topic.trim()
-        ? body.topic.trim().slice(0, 160)
-        : `Videochamada · ${plan.name}`;
+    const pixChargeId = sanitizeId(body.pixChargeId);
+    const verifiedCharge = pixChargeId
+      ? (workspace.pixCharges || []).find(
+          (c) =>
+            c.id === pixChargeId &&
+            c.userId === firebaseUser.uid &&
+            c.kind === 'call_plan' &&
+            c.planId === plan.id &&
+            c.status === 'paid'
+        )
+      : undefined;
+    if (!verifiedCharge) {
+      res.status(402).json({
+        ok: false,
+        error:
+          'Pagamento verificado via PIX obrigatório antes de entrar na fila da sala privativa.',
+      });
+      return;
+    }
 
-    workspace.callQueue.push({
-      id,
-      userId: firebaseUser.uid,
-      userName: visitor?.displayName || firebaseUser.name || 'Participante',
-      userPhotoUrl: visitor?.photoUrl || sanitizeMediaUrl(firebaseUser.picture),
-      topic,
-      status: 'waiting',
-      planId: plan.id,
-      planName: plan.name,
-      planDurationMinutes: plan.durationMinutes,
-      planPriceCents: plan.priceCents,
-      paymentStatus: 'authorized',
-      createdAt: nowMs,
-      updatedAt: nowMs,
-    });
+    const fulfilled = fulfillPixCharge(modelId, workspace, verifiedCharge);
     saveStore();
     emitWorkspaceRefresh(modelId, false);
-    res.status(201).json({ ok: true, id });
+    res.status(201).json({ ok: true, id: fulfilled.callRequestId });
   });
 
   app.patch('/api/visitor/queue/:requestId', requireVisitor, (req: AuthenticatedRequest, res) => {
@@ -3240,17 +3366,46 @@ async function startServer() {
 
     const nextStatus = typeof body.status === 'string' ? body.status : '';
     const allowed =
-      (entry.status === 'waiting' &&
-        (nextStatus === 'cancelled' || nextStatus === 'in_call')) ||
+      (entry.status === 'waiting' && nextStatus === 'cancelled') ||
       (entry.status === 'accepted' && nextStatus === 'in_call') ||
       (entry.status === 'in_call' && nextStatus === 'ended');
     if (!allowed) {
-      res.status(403).json({ ok: false, error: 'Transição de estado não permitida.' });
+      res.status(403).json({
+        ok: false,
+        error:
+          'Aguarde a modelo liberar sua entrada privativa antes de iniciar o vídeo.',
+      });
       return;
+    }
+
+    if (nextStatus === 'in_call') {
+      const busyUid = getBusyVisitorUidInPrivateCall(
+        modelId,
+        ctx.workspace,
+        firebaseUser.uid
+      );
+      if (busyUid) {
+        res.status(409).json({
+          ok: false,
+          error:
+            'A modelo já está em sala privativa com outro internauta. Aguarde sua vez na fila.',
+        });
+        return;
+      }
     }
 
     entry.status = nextStatus as typeof entry.status;
     entry.updatedAt = Date.now();
+    if (
+      (nextStatus === 'ended' || nextStatus === 'cancelled') &&
+      (ctx.workspace.studioState.activeCallId === entry.id ||
+        ctx.workspace.studioState.activeCallUserId === firebaseUser.uid)
+    ) {
+      ctx.workspace.studioState.activeCallId = '';
+      ctx.workspace.studioState.activeCallUserId = '';
+      ctx.workspace.studioState.activeCallUserName = '';
+      ctx.workspace.studioState.updatedAt = Date.now();
+    }
     saveStore();
     emitWorkspaceRefresh(modelId, false);
     res.json({ ok: true });
@@ -3481,7 +3636,7 @@ async function startServer() {
         amountCents = plan.priceCents;
         planName = plan.name;
         planDurationMinutes = plan.durationMinutes;
-        callMode = body.callMode === 'private' ? 'private' : 'group';
+        callMode = 'private';
         topic =
           typeof body.topic === 'string' && body.topic.trim()
             ? body.topic.trim().slice(0, 160)
@@ -3489,6 +3644,7 @@ async function startServer() {
         description = `${plan.name} ${workspace.studioConfig.modelName}`;
       }
 
+      const inviteId = sanitizeId(body.inviteId);
       const nowMs = Date.now();
       const buyerName =
         visitor?.displayName ||
@@ -3531,6 +3687,7 @@ async function startServer() {
           ...(topic ? { topic } : {}),
           ...(callMode ? { callMode } : {}),
           ...(note ? { note } : {}),
+          ...(inviteId ? { inviteId } : {}),
           status: 'pending',
           provider: assets.provider,
           ...(assets.externalPaymentId
@@ -3673,17 +3830,32 @@ async function startServer() {
         return;
       }
 
-      if (charge.status !== 'paid' && charge.provider === 'mercadopago') {
-        const mpStatus = charge.externalPaymentId
-          ? await checkMercadoPagoPaymentStatus(charge.externalPaymentId)
-          : 'pending';
-        if (mpStatus !== 'approved') {
+      if (charge.status !== 'paid') {
+        if (charge.provider === 'mercadopago') {
+          const mpStatus = charge.externalPaymentId
+            ? await checkMercadoPagoPaymentStatus(charge.externalPaymentId)
+            : 'pending';
+          if (mpStatus !== 'approved') {
+            res.status(202).json({
+              ok: false,
+              pending: true,
+              charge: serializePixChargeForClient(charge),
+              error:
+                'Pagamento PIX ainda aguardando compensação bancária. Se já pagou, aguarde alguns segundos e tente confirmar novamente.',
+            });
+            return;
+          }
+        } else {
+          // Static BACEN key cannot be self-verified by the payer; notify the model's private panel to confirm receipt
+          charge.visitorReportedPaidAt = Date.now();
+          saveStore();
+          emitWorkspaceRefresh(modelId, false);
           res.status(202).json({
             ok: false,
             pending: true,
             charge: serializePixChargeForClient(charge),
             error:
-              'Pagamento PIX ainda aguardando compensação bancária. Se já pagou, aguarde alguns segundos e tente confirmar novamente.',
+              'Pagamento sinalizado! A modelo recebeu seu aviso e liberará seu acesso assim que confirmar o PIX no painel privativo dela.',
           });
           return;
         }
@@ -3746,6 +3918,15 @@ async function startServer() {
         res.status(409).json({
           ok: false,
           error: 'Esta cobrança PIX foi cancelada.',
+        });
+        return;
+      }
+      if (charge.status === 'expired' || (charge.status === 'pending' && charge.expiresAt <= Date.now())) {
+        charge.status = 'expired';
+        saveStore();
+        res.status(410).json({
+          ok: false,
+          error: 'Este QR Code PIX já expirou. Solicite um novo pagamento ao internauta.',
         });
         return;
       }
@@ -3829,7 +4010,6 @@ async function startServer() {
           let uid = '';
           let modelId = PRIMARY_MODEL_ID;
           let isAdmin = false;
-          let isSuperAdmin = false;
           let displayName = 'Participante';
           let photoUrl = '';
           let accessStatus: 'active' | 'vip' | 'muted' | 'blocked' = 'active';
@@ -3859,7 +4039,6 @@ async function startServer() {
             modelId = account.id;
             uid = getModelActorUid(modelId);
             isAdmin = true;
-            isSuperAdmin = false;
             role = 'model';
             accessStatus = 'vip';
             const ctx = getModelAndWorkspace(modelId);
@@ -3868,52 +4047,35 @@ async function startServer() {
             photoUrl = ctx?.workspace.studioConfig.modelAvatarUrl || '';
           } else {
             const decoded = await adminAuth.verifyIdToken(token);
-            isSuperAdmin = isDecodedSuperAdmin(decoded);
-            const operatingAsAdmin =
-              isSuperAdmin && Boolean(data.operatingAsAdmin);
-
-            if (operatingAsAdmin) {
-              modelId = store.models[requestedModelId]
-                ? requestedModelId
-                : PRIMARY_MODEL_ID;
-              uid = getModelActorUid(modelId);
-              isAdmin = true;
-              role = 'model';
-              accessStatus = 'vip';
-              const ctx = getModelAndWorkspace(modelId);
-              displayName =
-                ctx?.workspace.studioConfig.modelName || 'Lorena Noir';
-              photoUrl = ctx?.workspace.studioConfig.modelAvatarUrl || '';
-            } else {
-              modelId = store.models[requestedModelId]?.active
-                ? requestedModelId
-                : getDefaultActiveModelId();
-              uid = decoded.uid;
-              isAdmin = false;
-              role = 'viewer';
-              const ctx = getModelAndWorkspace(modelId);
-              const visitor = ctx?.workspace.visitorProfiles[uid];
-              const profileInput =
-                data.profile && typeof data.profile === 'object'
-                  ? (data.profile as Record<string, unknown>)
-                  : {};
-              displayName =
-                visitor?.displayName ||
-                (typeof profileInput.displayName === 'string' &&
-                profileInput.displayName.trim()
-                  ? profileInput.displayName.trim().slice(0, 80)
-                  : typeof decoded.name === 'string' && decoded.name.trim()
-                    ? decoded.name.trim().slice(0, 80)
-                    : 'Participante');
-              photoUrl =
-                visitor?.photoUrl ||
+            modelId = store.models[requestedModelId]?.active
+              ? requestedModelId
+              : getDefaultActiveModelId();
+            uid = decoded.uid;
+            isAdmin = false;
+            role = 'viewer';
+            const ctx = getModelAndWorkspace(modelId);
+            const visitor = ctx?.workspace.visitorProfiles[uid];
+            const profileInput =
+              data.profile && typeof data.profile === 'object'
+                ? (data.profile as Record<string, unknown>)
+                : {};
+            displayName =
+              visitor?.displayName ||
+              (typeof profileInput.displayName === 'string' &&
+              profileInput.displayName.trim()
+                ? profileInput.displayName.trim().slice(0, 80)
+                : typeof decoded.name === 'string' && decoded.name.trim()
+                  ? decoded.name.trim().slice(0, 80)
+                  : 'Participante');
+            photoUrl = sanitizeMediaUrl(
+              visitor?.photoUrl ||
                 (typeof profileInput.photoUrl === 'string'
-                  ? profileInput.photoUrl.slice(0, 500)
+                  ? profileInput.photoUrl
                   : typeof decoded.picture === 'string'
-                    ? decoded.picture.slice(0, 500)
-                    : '');
-              accessStatus = visitor?.accessStatus || 'active';
-            }
+                    ? decoded.picture
+                    : '')
+            );
+            accessStatus = visitor?.accessStatus || 'active';
           }
 
           clearTimeout(authTimeout);
@@ -3939,7 +4101,6 @@ async function startServer() {
             role,
             accessStatus,
             isAdmin,
-            isSuperAdmin,
             inCallWith: roomMap.has(uid) ? `room:${roomId}` : null,
             connectedAt: new Date().toISOString(),
           });
@@ -3982,7 +4143,7 @@ async function startServer() {
 
       // Visitor switches active model on `/`
       if (msgType === 'model:select') {
-        if (sender.isAdmin && !sender.isSuperAdmin) return;
+        if (sender.isAdmin) return;
         const store = getStore();
         const nextModelId = sanitizeId(data.modelId);
         if (!nextModelId || !store.models[nextModelId]?.active) return;
@@ -4028,74 +4189,34 @@ async function startServer() {
       const roomId = getModelRoomId(activeModelId);
 
       if (msgType === 'presence:update') {
-        if (typeof data.inCallWith === 'string' || data.inCallWith === null) {
-          sender.inCallWith = data.inCallWith as string | null;
-        }
-        if (
-          typeof data.accessStatus === 'string' &&
-          ['active', 'vip', 'muted', 'blocked'].includes(data.accessStatus)
-        ) {
-          sender.accessStatus = data.accessStatus as ConnectedPeer['accessStatus'];
-          const roomRec = roomMap.get(sender.uid);
-          if (roomRec) {
-            roomRec.accessStatus = data.accessStatus;
-            broadcastRoomSyncForModel(activeModelId);
+        if (data.inCallWith === null) {
+          sender.inCallWith = null;
+        } else if (typeof data.inCallWith === 'string') {
+          const cleanPeerId = sanitizeId(data.inCallWith);
+          if (cleanPeerId && (sender.isAdmin || cleanPeerId === getModelActorUid(activeModelId))) {
+            sender.inCallWith = cleanPeerId;
           }
         }
+        // Note: accessStatus changes are strictly reserved for admin moderation commands, never client presence updates
         broadcastPresenceForModel(activeModelId);
         return;
       }
 
       if (msgType === 'room:join') {
-        if (sender.accessStatus === 'blocked' && !sender.isAdmin) {
-          ws.send(
-            JSON.stringify({
-              type: 'moderation:effect',
-              action: 'blocked',
-              reason: 'Acesso suspenso pela moderação do estúdio.',
-            })
-          );
-          return;
-        }
-
-        const participant: RoomParticipantRecord = {
-          uid: sender.uid,
-          displayName: sender.displayName,
-          photoUrl: sender.photoUrl,
-          role: sender.role,
-          accessStatus: sender.accessStatus,
-          isAdmin: sender.isAdmin,
-          joinedAt: new Date().toISOString(),
-          ...(typeof data.callId === 'string' && data.callId
-            ? { callId: data.callId.slice(0, 128) }
-            : {}),
-          ...(typeof data.planId === 'string' && data.planId
-            ? { planId: data.planId.slice(0, 128) }
-            : {}),
-          ...(typeof data.planName === 'string' && data.planName
-            ? { planName: data.planName.slice(0, 80) }
-            : {}),
-          ...(typeof data.planDurationMinutes === 'number'
-            ? { planDurationMinutes: data.planDurationMinutes }
-            : {}),
-          ...(typeof data.planPriceCents === 'number'
-            ? { planPriceCents: data.planPriceCents }
-            : {}),
-        };
-
-        const alreadyInRoom = roomMap.has(sender.uid);
-        roomMap.set(sender.uid, participant);
-        sender.inCallWith = `room:${roomId}`;
-
-        broadcastRoomSyncForModel(activeModelId);
-        if (!alreadyInRoom) {
-          notifyRoomParticipantsAndAdminsForModel(activeModelId, sender.uid, {
-            type: 'room:peer_joined',
-            roomId,
-            participant,
-          });
-        }
-        broadcastPresenceForModel(activeModelId);
+        const ctx = getModelAndWorkspace(activeModelId);
+        const modelDisplayName =
+          ctx?.workspace.studioConfig.modelName || 'Modelo';
+        ws.send(
+          JSON.stringify({
+            type: 'call:reject',
+            callId:
+              typeof data.callId === 'string' ? data.callId.slice(0, 128) : '',
+            fromUid: getModelActorUid(activeModelId),
+            fromName: modelDisplayName,
+            reason:
+              'Este estúdio opera exclusivamente com salas privativas 1-para-1 mediante pagamento.',
+          })
+        );
         return;
       }
 
@@ -4144,6 +4265,92 @@ async function startServer() {
           return;
         }
 
+        const ctx = getModelAndWorkspace(activeModelId);
+        const modelActorUid = getModelActorUid(activeModelId);
+        const modelDisplayName =
+          ctx?.workspace.studioConfig.modelName || 'Modelo';
+        const callIdStr =
+          typeof data.callId === 'string' ? data.callId.slice(0, 128) : '';
+
+        // Strictly 1-on-1 paid private room gate
+        if (
+          !sender.isAdmin &&
+          ['call:ring', 'call:accept', 'webrtc:offer', 'webrtc:answer', 'webrtc:ice'].includes(
+            msgType
+          )
+        ) {
+          const targetPeer = connectedPeers.get(targetUid);
+          const targetIsModel =
+            targetUid === modelActorUid ||
+            Boolean(targetPeer && targetPeer.modelId === activeModelId && targetPeer.isAdmin);
+          if (!targetIsModel) {
+            ws.send(
+              JSON.stringify({
+                type: 'call:reject',
+                callId: callIdStr,
+                fromUid: modelActorUid,
+                fromName: modelDisplayName,
+                reason:
+                  'Somente salas privativas diretamente com a modelo são permitidas.',
+              })
+            );
+            return;
+          }
+
+          if (!ctx || !hasVisitorPaidActiveCallAccess(ctx.workspace, sender.uid)) {
+            ws.send(
+              JSON.stringify({
+                type: 'call:reject',
+                callId: callIdStr,
+                fromUid: modelActorUid,
+                fromName: modelDisplayName,
+                reason:
+                  'Pagamento obrigatório antes de entrar na sala privativa com a modelo.',
+              })
+            );
+            return;
+          }
+
+          const busyVisitorUid = getBusyVisitorUidInPrivateCall(
+            activeModelId,
+            ctx.workspace,
+            sender.uid
+          );
+          if (busyVisitorUid) {
+            ws.send(
+              JSON.stringify({
+                type: 'call:reject',
+                callId: callIdStr,
+                fromUid: modelActorUid,
+                fromName: modelDisplayName,
+                reason:
+                  'A modelo já está em sala privativa com outro internauta. Aguarde na fila.',
+              })
+            );
+            return;
+          }
+        }
+
+        if (sender.isAdmin && (msgType === 'call:ring' || msgType === 'call:accept')) {
+          const busyVisitorUid = ctx
+            ? getBusyVisitorUidInPrivateCall(activeModelId, ctx.workspace, targetUid)
+            : null;
+          if (busyVisitorUid) {
+            ws.send(
+              JSON.stringify({
+                type: 'call:reject',
+                callId: callIdStr,
+                fromUid: targetUid,
+                fromName:
+                  connectedPeers.get(targetUid)?.displayName || 'Internauta',
+                reason:
+                  'Encerre a sala privativa atual antes de conectar outro internauta.',
+              })
+            );
+            return;
+          }
+        }
+
         const queueMap = getVisitorQueueMap(activeModelId);
 
         if (msgType === 'call:accept') {
@@ -4152,10 +4359,7 @@ async function startServer() {
           if (target && target.modelId === activeModelId) {
             target.inCallWith = sender.uid;
           }
-          const callId =
-            typeof data.callId === 'string' && data.callId
-              ? data.callId.slice(0, 128)
-              : `call_${Date.now()}`;
+          const callId = callIdStr || `call_${Date.now()}`;
           const durationMinutes =
             typeof data.planDurationMinutes === 'number' &&
             data.planDurationMinutes > 0
@@ -4166,6 +4370,18 @@ async function startServer() {
             startedAtMs: Date.now(),
             durationMinutes,
           });
+          if (ctx) {
+            const visitorUid = sender.isAdmin ? targetUid : sender.uid;
+            const visitorName = sender.isAdmin
+              ? target?.displayName || 'Internauta'
+              : sender.displayName;
+            ctx.workspace.studioState.activeCallId = callId;
+            ctx.workspace.studioState.activeCallUserId = visitorUid;
+            ctx.workspace.studioState.activeCallUserName = visitorName;
+            ctx.workspace.studioState.updatedAt = Date.now();
+            saveStore();
+            emitWorkspaceRefresh(activeModelId, true);
+          }
           queueMap.delete(sender.uid);
           queueMap.delete(targetUid);
           broadcastPresenceForModel(activeModelId);
@@ -4185,23 +4401,75 @@ async function startServer() {
           const currentEst = activeCallEstimateByModel.get(activeModelId);
           if (
             currentEst &&
-            (typeof data.callId !== 'string' ||
-              !data.callId ||
-              currentEst.callId === data.callId)
+            (!callIdStr || currentEst.callId === callIdStr)
           ) {
             activeCallEstimateByModel.set(activeModelId, null);
+          }
+          if (
+            ctx &&
+            msgType === 'call:end' &&
+            (!ctx.workspace.studioState.activeCallId ||
+              !callIdStr ||
+              ctx.workspace.studioState.activeCallId === callIdStr ||
+              ctx.workspace.studioState.activeCallUserId === sender.uid ||
+              ctx.workspace.studioState.activeCallUserId === targetUid)
+          ) {
+            ctx.workspace.studioState.activeCallId = '';
+            ctx.workspace.studioState.activeCallUserId = '';
+            ctx.workspace.studioState.activeCallUserName = '';
+            ctx.workspace.studioState.updatedAt = Date.now();
+            saveStore();
+            emitWorkspaceRefresh(activeModelId, true);
           }
           broadcastPresenceForModel(activeModelId);
           broadcastQueueSyncForModel(activeModelId);
         }
 
-        sendToUserInModel(activeModelId, targetUid, {
-          ...data,
+        if (
+          !sender.isAdmin &&
+          targetUid !== modelActorUid &&
+          sender.inCallWith !== targetUid
+        ) {
+          return;
+        }
+
+        const safeRelay: Record<string, unknown> = {
+          type: msgType,
+          callId: callIdStr,
+          targetUid,
           fromUid: sender.uid,
           fromName: sender.displayName,
           fromPhotoUrl: sender.photoUrl,
           fromRole: sender.role,
-        });
+        };
+        if (data.offer && typeof data.offer === 'object') {
+          safeRelay.offer = data.offer;
+        }
+        if (data.answer && typeof data.answer === 'object') {
+          safeRelay.answer = data.answer;
+        }
+        if (data.candidate && typeof data.candidate === 'object') {
+          safeRelay.candidate = data.candidate;
+        }
+        if (typeof data.reason === 'string') {
+          safeRelay.reason = data.reason.slice(0, 200);
+        }
+        if (typeof data.planId === 'string') {
+          safeRelay.planId = sanitizeId(data.planId);
+        }
+        if (typeof data.planName === 'string') {
+          safeRelay.planName = data.planName.slice(0, 80);
+        }
+        if (
+          typeof data.planDurationMinutes === 'number' &&
+          Number.isFinite(data.planDurationMinutes)
+        ) {
+          safeRelay.planDurationMinutes = Math.max(
+            1,
+            Math.min(240, Math.round(data.planDurationMinutes))
+          );
+        }
+        sendToUserInModel(activeModelId, targetUid, safeRelay);
         return;
       }
 
@@ -4212,6 +4480,10 @@ async function startServer() {
         const hasAuth = hasAuthoritativeQueueByModel.get(activeModelId) || false;
 
         if (status === 'waiting') {
+          const ctx = getModelAndWorkspace(activeModelId);
+          if (!ctx || !hasVisitorPaidActiveCallAccess(ctx.workspace, sender.uid)) {
+            return;
+          }
           const callId =
             typeof data.callId === 'string' && data.callId
               ? data.callId.slice(0, 128)
@@ -4225,7 +4497,7 @@ async function startServer() {
             typeof data.createdAtMs === 'number' && data.createdAtMs > 0
               ? data.createdAtMs
               : Date.now();
-          const isVip = sender.accessStatus === 'vip' || Boolean(data.isVip);
+          const isVip = sender.accessStatus === 'vip';
 
           queueMap.set(sender.uid, {
             callId,
@@ -4417,6 +4689,20 @@ async function startServer() {
             ) {
               peer.inCallWith = null;
             }
+            const closeCtx = getModelAndWorkspace(activeModelId);
+            if (
+              closeCtx &&
+              (closeCtx.workspace.studioState.activeCallUserId === authenticatedUid ||
+                current.isAdmin)
+            ) {
+              closeCtx.workspace.studioState.activeCallId = '';
+              closeCtx.workspace.studioState.activeCallUserId = '';
+              closeCtx.workspace.studioState.activeCallUserName = '';
+              closeCtx.workspace.studioState.updatedAt = Date.now();
+              saveStore();
+              emitWorkspaceRefresh(activeModelId, true);
+            }
+            activeCallEstimateByModel.set(activeModelId, null);
           }
           connectedPeers.delete(authenticatedUid);
           getVisitorQueueMap(activeModelId).delete(authenticatedUid);
@@ -4455,10 +4741,44 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa',
     });
+    app.get('/convite/:inviteId', async (req, res, next) => {
+      try {
+        const rawHtml = fs.readFileSync(
+          path.resolve(__dirname, 'index.html'),
+          'utf8'
+        );
+        const withOg = injectInviteMetaIntoHtml(
+          rawHtml,
+          req,
+          req.params.inviteId
+        );
+        const transformed = await vite.transformIndexHtml(
+          req.originalUrl,
+          withOg
+        );
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(transformed);
+      } catch (err) {
+        next(err);
+      }
+    });
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
+    app.get('/convite/:inviteId', (req, res) => {
+      const indexFile = path.join(distPath, 'index.html');
+      try {
+        const rawHtml = fs.readFileSync(indexFile, 'utf8');
+        const withOg = injectInviteMetaIntoHtml(
+          rawHtml,
+          req,
+          req.params.inviteId
+        );
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(withOg);
+      } catch {
+        res.sendFile(indexFile);
+      }
+    });
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
@@ -4466,7 +4786,7 @@ async function startServer() {
 
   const PORT = Number(process.env.PORT) || 3000;
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Maison Aura server running on http://0.0.0.0:${PORT}`);
+    console.log(`Model Gat Brasil server running on http://0.0.0.0:${PORT}`);
   });
 }
 

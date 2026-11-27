@@ -37,6 +37,100 @@ export interface GeneratedPixPayload {
   usingDemoKey: boolean;
 }
 
+export interface PixFeeCalculationInput {
+  originalAmountCents: number;
+  dueDate?: string;
+  finePercent?: number;
+  interestMonthlyPercent?: number;
+  referenceNowMs?: number;
+}
+
+export interface PixFeeCalculationResult {
+  originalAmountCents: number;
+  totalAmountCents: number;
+  finePercent: number;
+  interestMonthlyPercent: number;
+  fineCents: number;
+  interestCents: number;
+  daysOverdue: number;
+  dueDate?: string;
+  dueAtMs?: number;
+}
+
+export function normalizeDueDateString(raw?: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return undefined;
+  const [y, m, d] = trimmed.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() + 1 !== m ||
+    dt.getUTCDate() !== d
+  ) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+export function dueDateToEndOfDayBrtMs(dueDate: string): number {
+  return Date.parse(`${dueDate}T23:59:59.999-03:00`);
+}
+
+export function calculatePixChargeWithFees(
+  input: PixFeeCalculationInput
+): PixFeeCalculationResult {
+  const originalAmountCents = Math.max(
+    100,
+    Math.min(10000000, Math.round(input.originalAmountCents || 0))
+  );
+  const finePercent =
+    typeof input.finePercent === 'number' && Number.isFinite(input.finePercent)
+      ? Math.max(0, Math.min(10, Number(input.finePercent.toFixed(2))))
+      : 2;
+  const interestMonthlyPercent =
+    typeof input.interestMonthlyPercent === 'number' &&
+    Number.isFinite(input.interestMonthlyPercent)
+      ? Math.max(0, Math.min(10, Number(input.interestMonthlyPercent.toFixed(2))))
+      : 1;
+
+  const dueDate = normalizeDueDateString(input.dueDate);
+  const dueAtMs = dueDate ? dueDateToEndOfDayBrtMs(dueDate) : undefined;
+  const nowMs =
+    typeof input.referenceNowMs === 'number' && Number.isFinite(input.referenceNowMs)
+      ? input.referenceNowMs
+      : Date.now();
+
+  let daysOverdue = 0;
+  if (dueAtMs && nowMs > dueAtMs) {
+    daysOverdue = Math.max(1, Math.ceil((nowMs - dueAtMs) / 86400000));
+  }
+
+  const fineCents =
+    daysOverdue > 0 ? Math.round(originalAmountCents * (finePercent / 100)) : 0;
+  const interestCents =
+    daysOverdue > 0
+      ? Math.round(
+          originalAmountCents *
+            (interestMonthlyPercent / 100) *
+            (daysOverdue / 30)
+        )
+      : 0;
+  const totalAmountCents = originalAmountCents + fineCents + interestCents;
+
+  return {
+    originalAmountCents,
+    totalAmountCents,
+    finePercent,
+    interestMonthlyPercent,
+    fineCents,
+    interestCents,
+    daysOverdue,
+    ...(dueDate ? { dueDate } : {}),
+    ...(dueAtMs ? { dueAtMs } : {}),
+  };
+}
+
 export function isMercadoPagoConfigured(): boolean {
   return Boolean(process.env.MERCADOPAGO_ACCESS_TOKEN?.trim());
 }
@@ -418,6 +512,24 @@ async function createMercadoPagoCheckoutPreference(params: {
   }
 }
 
+function formatMercadoPagoExpirationIso(expiresAtMs?: number): string | undefined {
+  if (typeof expiresAtMs !== 'number' || !Number.isFinite(expiresAtMs)) {
+    return undefined;
+  }
+  const nowMs = Date.now();
+  const minFutureMs = nowMs + 30 * 60 * 1000;
+  const maxFutureMs = nowMs + 29 * 24 * 60 * 60 * 1000;
+  const clampedMs = Math.max(minFutureMs, Math.min(maxFutureMs, expiresAtMs));
+  const brtDate = new Date(clampedMs - 3 * 60 * 60 * 1000);
+  const yyyy = brtDate.getUTCFullYear();
+  const mm = String(brtDate.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(brtDate.getUTCDate()).padStart(2, '0');
+  const hh = String(brtDate.getUTCHours()).padStart(2, '0');
+  const mi = String(brtDate.getUTCMinutes()).padStart(2, '0');
+  const ss = String(brtDate.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.000-03:00`;
+}
+
 async function createMercadoPagoPixCharge(params: {
   amountCents: number;
   description: string;
@@ -425,6 +537,7 @@ async function createMercadoPagoPixCharge(params: {
   payerName: string;
   externalReference: string;
   publicOrigin?: string;
+  expiresAtMs?: number;
 }): Promise<{
   paymentId: string;
   brCode: string;
@@ -440,6 +553,7 @@ async function createMercadoPagoPixCharge(params: {
     .split(/\s+/);
   const lastName = restName.join(' ') || 'Cliente';
   const appOrigin = getPublicHttpsAppUrl(params.publicOrigin);
+  const dateOfExpiration = formatMercadoPagoExpirationIso(params.expiresAtMs);
 
   try {
     const [paymentRes, prefRes] = await Promise.all([
@@ -456,6 +570,7 @@ async function createMercadoPagoPixCharge(params: {
           description: params.description.slice(0, 120),
           payment_method_id: 'pix',
           external_reference: params.externalReference,
+          ...(dateOfExpiration ? { date_of_expiration: dateOfExpiration } : {}),
           ...(appOrigin
             ? { notification_url: `${appOrigin}/api/webhooks/mercadopago` }
             : {}),
@@ -820,6 +935,7 @@ export async function generatePixChargeAssets(params: {
   payerName?: string;
   preferredPaymentMethod?: MercadoPagoPreferredMethod;
   publicOrigin?: string;
+  expiresAtMs?: number;
 }): Promise<GeneratedPixPayload> {
   const preferredMethod: MercadoPagoPreferredMethod =
     params.preferredPaymentMethod || 'pix';
@@ -889,6 +1005,7 @@ export async function generatePixChargeAssets(params: {
     payerName: params.payerName || 'Participante',
     externalReference: cleanTxid,
     publicOrigin: params.publicOrigin,
+    expiresAtMs: params.expiresAtMs,
   });
 
   if (mpCharge) {

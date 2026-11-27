@@ -150,12 +150,16 @@ function resolveChargeTimestamp(charge: PixChargeRecord): number {
 function resolveChargeCategoryLabel(charge: PixChargeRecord): string {
   if (charge.kind === 'private_album') return 'Álbum Privado';
   if (charge.kind === 'tip') return 'Gorjeta na Meta';
+  if (charge.kind === 'custom_charge') return 'Cobrança Dinâmica';
   return 'Plano de Chamada';
 }
 
 function resolveChargePlanLabel(charge: PixChargeRecord): string {
   if (charge.kind === 'private_album') return 'Álbum Privado';
   if (charge.kind === 'tip') return 'Gorjeta na Meta';
+  if (charge.kind === 'custom_charge') {
+    return charge.description?.trim() || 'Cobrança PIX Dinâmica';
+  }
   return charge.planName?.trim() || 'Plano de Videochamada';
 }
 

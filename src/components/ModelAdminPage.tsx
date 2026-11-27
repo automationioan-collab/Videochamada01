@@ -6,7 +6,9 @@ import {
   CalendarClock,
   CalendarRange,
   Camera,
+  Check,
   CheckCircle2,
+  Copy,
   CreditCard,
   Crown,
   Eye,
@@ -23,6 +25,7 @@ import {
   PhoneIncoming,
   PhoneOff,
   QrCode,
+  RefreshCw,
   Save,
   Search,
   ShieldCheck,
@@ -85,6 +88,7 @@ import { FinancialEarningsDashboard } from './FinancialEarningsDashboard';
 import { InterestMessagesPanel } from './InterestMessagesPanel';
 import { MediaManagementPanel } from './MediaManagementPanel';
 import { OperatingSchedulePanel } from './OperatingSchedulePanel';
+import { PixDynamicBillingPanel } from './PixDynamicBillingPanel';
 import { PixSalesAnalyticsPanel } from './PixSalesAnalyticsPanel';
 import { TechVideoCallButton } from './TechEffects';
 import { TipGoalManagerCard } from './TipGoalManagerCard';
@@ -295,6 +299,23 @@ interface ModelAdminPageProps {
   onCancelModelPixCharge?: (
     chargeId: string
   ) => Promise<{ ok: boolean; error?: string }>;
+  onCreateModelPixCharge?: (input: {
+    amountCents: number;
+    description: string;
+    recipientName?: string;
+    dueDate?: string;
+    finePercent?: number;
+    interestMonthlyPercent?: number;
+    expiresAfterDueDays?: number;
+  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+  onRecalculateModelPixCharge?: (
+    chargeId: string
+  ) => Promise<{
+    ok: boolean;
+    updated?: boolean;
+    charge?: PixChargeRecord;
+    error?: string;
+  }>;
   whatsappInvites?: WhatsappInviteRecord[];
   onCreateWhatsappInvite?: (input: {
     recipientName?: string;
@@ -400,6 +421,8 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   pixCharges = [],
   onConfirmModelPixCharge,
   onCancelModelPixCharge,
+  onCreateModelPixCharge,
+  onRecalculateModelPixCharge,
   whatsappInvites = [],
   onCreateWhatsappInvite,
   onDeleteWhatsappInvite,
@@ -414,6 +437,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
   const [rateSavedMsg, setRateSavedMsg] = useState<string | null>(null);
   const [pixActionId, setPixActionId] = useState<string | null>(null);
   const [pixAdminMsg, setPixAdminMsg] = useState<string | null>(null);
+  const [expandedPixChargeId, setExpandedPixChargeId] = useState<string | null>(
+    null
+  );
+  const [copiedPixChargeId, setCopiedPixChargeId] = useState<string | null>(
+    null
+  );
 
   // Own isolated account credentials state
   const [accountLoginDraft, setAccountLoginDraft] = useState(
@@ -1707,6 +1736,13 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
               onUpdateStudioState={onUpdateStudioState}
             />
 
+            <PixDynamicBillingPanel
+              modelName={modelName}
+              studioConfig={studioConfig}
+              onSaveStudioConfig={onSaveStudioConfig}
+              onCreateModelPixCharge={onCreateModelPixCharge}
+            />
+
             {/* Mercado Pago & PIX Payments Verification Card */}
             <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl overflow-hidden">
               <div className="px-6 py-5 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1752,7 +1788,9 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                         ? 'Álbum Privativo'
                         : charge.kind === 'tip'
                           ? 'Gorjeta na Meta'
-                          : charge.planName || 'Plano de Videochamada';
+                          : charge.kind === 'custom_charge'
+                            ? `PIX Dinâmico · ${charge.description}`
+                            : charge.planName || 'Plano de Videochamada';
                     const statusMap: Record<
                       PixChargeStatus,
                       { label: string; cls: string }
@@ -1767,83 +1805,220 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                     };
                     const statusUi = statusMap[charge.status];
                     const busy = pixActionId === charge.id;
+                    const isExpanded = expandedPixChargeId === charge.id;
+                    const isCopied = copiedPixChargeId === charge.id;
+                    const formattedDue =
+                      charge.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(charge.dueDate)
+                        ? `${charge.dueDate.slice(8, 10)}/${charge.dueDate.slice(
+                            5,
+                            7
+                          )}/${charge.dueDate.slice(0, 4)}`
+                        : null;
+                    const isPastDuePending =
+                      charge.status === 'pending' &&
+                      typeof charge.dueAtMs === 'number' &&
+                      Date.now() > charge.dueAtMs;
 
                     return (
-                      <div
-                        key={charge.id}
-                        className="px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
-                      >
-                        <div className="space-y-1 min-w-0">
-                          <div className="flex flex-wrap items-center gap-2 text-xs">
-                            <span className="font-semibold text-[#FAF4F7]">
-                              {charge.userName}
-                            </span>
-                            <span className="text-[#938291]">·</span>
-                            <span className="text-[#C9BAC4]">{kindLabel}</span>
-                            <span className="text-[#938291]">·</span>
-                            <span className={`font-medium ${statusUi.cls}`}>
-                              {statusUi.label}
-                            </span>
-                          </div>
-                          {charge.status === 'pending' &&
-                            charge.visitorReportedPaidAt && (
-                              <p className="text-[11px] font-medium text-[#38BDF8]">
-                                Internauta sinalizou pagamento · Confira seu banco e confirme abaixo
+                      <div key={charge.id} className="px-6 py-4 space-y-3">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="font-semibold text-[#FAF4F7]">
+                                {charge.userName}
+                              </span>
+                              <span className="text-[#938291]">·</span>
+                              <span className="text-[#C9BAC4]">{kindLabel}</span>
+                              <span className="text-[#938291]">·</span>
+                              <span className={`font-medium ${statusUi.cls}`}>
+                                {statusUi.label}
+                              </span>
+                            </div>
+                            {charge.status === 'pending' &&
+                              charge.visitorReportedPaidAt && (
+                                <p className="text-[11px] font-medium text-[#38BDF8]">
+                                  Internauta sinalizou pagamento · Confira seu banco e confirme abaixo
+                                </p>
+                              )}
+                            <p className="text-[11px] font-mono tabular-nums text-[#938291]">
+                              {BRL_FORMATTER.format(charge.amountCents / 100)} ·
+                              Chave: {charge.pixKeyMasked} · TXID: {charge.txid}
+                            </p>
+                            {formattedDue && (
+                              <p className="text-[11px] font-mono tabular-nums text-[#C9BAC4]">
+                                Vencimento: {formattedDue} · Multa{' '}
+                                {charge.finePercent ?? 2}% · Juros{' '}
+                                {charge.interestMonthlyPercent ?? 1}% a.m.
+                                {(charge.daysOverdue ?? 0) > 0 && (
+                                  <span className="text-[#FCD34D]">
+                                    {' '}
+                                    · Atraso {charge.daysOverdue}d (+
+                                    {BRL_FORMATTER.format(
+                                      ((charge.fineCents ?? 0) +
+                                        (charge.interestCents ?? 0)) /
+                                        100
+                                    )}
+                                    )
+                                  </span>
+                                )}
                               </p>
                             )}
-                          <p className="text-[11px] font-mono tabular-nums text-[#938291]">
-                            {BRL_FORMATTER.format(charge.amountCents / 100)} ·
-                            Chave: {charge.pixKeyMasked} · TXID: {charge.txid}
-                          </p>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedPixChargeId(
+                                  isExpanded ? null : charge.id
+                                )
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-[#150D1D] border border-[#38BDF8]/30 text-[#E0F2FE] hover:border-[#38BDF8] cursor-pointer"
+                            >
+                              <QrCode className="w-3.5 h-3.5 text-[#38BDF8]" />
+                              <span>
+                                {isExpanded ? 'Ocultar QR Code' : 'Ver QR / Copia e Cola'}
+                              </span>
+                            </button>
+
+                            {isPastDuePending && onRecalculateModelPixCharge && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setPixActionId(charge.id);
+                                  setPixAdminMsg(null);
+                                  void onRecalculateModelPixCharge(charge.id)
+                                    .then((res) => {
+                                      if (!res.ok) {
+                                        setPixAdminMsg(
+                                          res.error || 'Erro ao recalcular PIX.'
+                                        );
+                                      } else if (res.updated) {
+                                        setPixAdminMsg(
+                                          `QR Code de ${charge.userName} atualizado com multa e juros de mora.`
+                                        );
+                                      } else {
+                                        setPixAdminMsg(
+                                          `Cobrança de ${charge.userName} já está com os encargos atualizados.`
+                                        );
+                                      }
+                                    })
+                                    .finally(() => setPixActionId(null));
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-[#150D1D] border border-[#FCD34D]/35 text-[#FCD34D] hover:border-[#FCD34D] disabled:opacity-45 cursor-pointer"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                <span>Atualizar Atraso</span>
+                              </button>
+                            )}
+
+                            {charge.status === 'pending' &&
+                              onConfirmModelPixCharge &&
+                              onCancelModelPixCharge && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => {
+                                      setPixActionId(charge.id);
+                                      setPixAdminMsg(null);
+                                      void onConfirmModelPixCharge(charge.id)
+                                        .then((res) => {
+                                          setPixAdminMsg(
+                                            res.ok
+                                              ? `PIX de ${charge.userName} confirmado e acesso liberado.`
+                                              : res.error || 'Erro ao confirmar PIX.'
+                                          );
+                                        })
+                                        .finally(() => setPixActionId(null));
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-45 cursor-pointer"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>Confirmar Recebimento PIX</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => {
+                                      setPixActionId(charge.id);
+                                      setPixAdminMsg(null);
+                                      void onCancelModelPixCharge(charge.id)
+                                        .then((res) => {
+                                          setPixAdminMsg(
+                                            res.ok
+                                              ? `Cobrança PIX de ${charge.userName} cancelada.`
+                                              : res.error || 'Erro ao cancelar PIX.'
+                                          );
+                                        })
+                                        .finally(() => setPixActionId(null));
+                                    }}
+                                    className="px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 disabled:opacity-45 cursor-pointer"
+                                  >
+                                    Cancelar
+                                  </button>
+                                </>
+                              )}
+                          </div>
                         </div>
 
-                        {charge.status === 'pending' &&
-                          onConfirmModelPixCharge &&
-                          onCancelModelPixCharge && (
-                            <div className="flex flex-wrap items-center gap-2 shrink-0">
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  setPixActionId(charge.id);
-                                  setPixAdminMsg(null);
-                                  void onConfirmModelPixCharge(charge.id)
-                                    .then((res) => {
-                                      setPixAdminMsg(
-                                        res.ok
-                                          ? `PIX de ${charge.userName} confirmado e acesso liberado.`
-                                          : res.error || 'Erro ao confirmar PIX.'
-                                      );
-                                    })
-                                    .finally(() => setPixActionId(null));
-                                }}
-                                className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold rounded-full luxury-rose-cta disabled:opacity-45 cursor-pointer"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>Confirmar Recebimento PIX</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => {
-                                  setPixActionId(charge.id);
-                                  setPixAdminMsg(null);
-                                  void onCancelModelPixCharge(charge.id)
-                                    .then((res) => {
-                                      setPixAdminMsg(
-                                        res.ok
-                                          ? `Cobrança PIX de ${charge.userName} cancelada.`
-                                          : res.error || 'Erro ao cancelar PIX.'
-                                      );
-                                    })
-                                    .finally(() => setPixActionId(null));
-                                }}
-                                className="px-3.5 py-1.5 text-xs font-medium rounded-full bg-[#1A1024] border border-[#F4C2D7]/20 text-[#C9BAC4] hover:text-red-300 disabled:opacity-45 cursor-pointer"
-                              >
-                                Cancelar
-                              </button>
+                        {isExpanded && (
+                          <div className="p-4 rounded-xl bg-[#0B060F]/90 border border-[#38BDF8]/25 flex flex-col sm:flex-row items-center gap-4">
+                            <div className="p-2 rounded-xl bg-white shrink-0">
+                              <img
+                                src={charge.qrCodeDataUrl}
+                                alt={`QR Code PIX TXID ${charge.txid}`}
+                                className="w-28 h-28 object-contain"
+                              />
                             </div>
-                          )}
+                            <div className="flex-1 w-full space-y-2 min-w-0">
+                              <p className="text-[11px] font-medium text-[#C9BAC4]">
+                                PIX Copia e Cola (Dinâmico · {BRL_FORMATTER.format(charge.amountCents / 100)}):
+                              </p>
+                              <div className="flex flex-col sm:flex-row gap-2">
+                                <input
+                                  type="text"
+                                  readOnly
+                                  value={charge.brCode}
+                                  onFocus={(e) => e.currentTarget.select()}
+                                  aria-label={`Código PIX Copia e Cola ${charge.txid}`}
+                                  className="flex-1 bg-[#150D1D] border border-[#818CF8]/25 rounded-xl px-3 py-2 text-[11px] font-mono text-[#E2E8F0] focus:outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void navigator.clipboard
+                                      .writeText(charge.brCode)
+                                      .then(() => {
+                                        setCopiedPixChargeId(charge.id);
+                                        window.setTimeout(
+                                          () =>
+                                            setCopiedPixChargeId((prev) =>
+                                              prev === charge.id ? null : prev
+                                            ),
+                                          2500
+                                        );
+                                      });
+                                  }}
+                                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl bg-[#131C42] border border-[#38BDF8]/40 text-[#F8FAFC] hover:border-[#38BDF8] cursor-pointer shrink-0"
+                                >
+                                  {isCopied ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-[#86EFAC]" />
+                                      <span className="text-[#86EFAC]">Copiado!</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5 text-[#38BDF8]" />
+                                      <span>Copiar Código</span>
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}

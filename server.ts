@@ -53,12 +53,14 @@ import {
   type StoredWhatsappInvite,
 } from './server/modelStore.js';
 import {
+  calculatePixChargeWithFees,
   formatEmvMerchantCity,
   formatEmvMerchantName,
   generatePixChargeAssets,
   isMercadoPagoConfigured,
   isValidPixKey,
   maskPixKeyForDisplay,
+  normalizeDueDateString,
   normalizePixKey,
   sanitizePixTxid,
   verifyMercadoPagoChargeByReferenceOrId,
@@ -642,6 +644,25 @@ function serializePixChargeForClient(charge: StoredPixCharge) {
     userName: charge.userName,
     kind: charge.kind,
     amountCents: charge.amountCents,
+    ...(charge.originalAmountCents !== undefined
+      ? { originalAmountCents: charge.originalAmountCents }
+      : {}),
+    ...(charge.dueDate ? { dueDate: charge.dueDate } : {}),
+    ...(charge.dueAtMs !== undefined ? { dueAtMs: charge.dueAtMs } : {}),
+    ...(charge.finePercent !== undefined
+      ? { finePercent: charge.finePercent }
+      : {}),
+    ...(charge.interestMonthlyPercent !== undefined
+      ? { interestMonthlyPercent: charge.interestMonthlyPercent }
+      : {}),
+    ...(charge.fineCents !== undefined ? { fineCents: charge.fineCents } : {}),
+    ...(charge.interestCents !== undefined
+      ? { interestCents: charge.interestCents }
+      : {}),
+    ...(charge.daysOverdue !== undefined
+      ? { daysOverdue: charge.daysOverdue }
+      : {}),
+    ...(charge.createdByModel ? { createdByModel: true } : {}),
     description: charge.description,
     ...(charge.planId ? { planId: charge.planId } : {}),
     ...(charge.planName ? { planName: charge.planName } : {}),
@@ -911,6 +932,29 @@ function fulfillPixCharge(
     };
   }
 
+  if (charge.kind === 'custom_charge') {
+    if (!charge.fulfilledAt) {
+      workspace.callHistory.push({
+        id: `hist_pix_${nowMs}_${charge.userId.slice(0, 6)}`,
+        callId: `custom_pix_${charge.txid}`,
+        userId: charge.userId,
+        userName: charge.userName,
+        modelUid: workspace.studioConfig.modelUid || getModelActorUid(modelId),
+        durationSeconds: 0,
+        amountCents: charge.amountCents,
+        currency: 'BRL',
+        status: 'completed',
+        planId: 'custom_pix_charge',
+        planName: `PIX Dinâmico · ${(charge.description || 'Cobrança').slice(0, 40)}`,
+        planDurationMinutes: 0,
+        endedAt: nowMs,
+        createdAt: nowMs,
+      });
+      charge.fulfilledAt = nowMs;
+    }
+    return {};
+  }
+
   // call_plan
   if (!charge.fulfilledAt || !charge.callRequestId) {
     const reqId = `call_${nowMs}_${charge.userId.slice(0, 8)}`;
@@ -952,6 +996,93 @@ function fulfillPixCharge(
   return {
     callRequestId: charge.callRequestId,
   };
+}
+
+function getTodayBrtDateString(offsetDays = 0, referenceNowMs = Date.now()): string {
+  const brtMs = referenceNowMs - 3 * 60 * 60 * 1000 + offsetDays * 86400000;
+  const d = new Date(brtMs);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function refreshOverduePixChargeIfNeeded(
+  modelId: string,
+  workspace: ModelWorkspaceData,
+  charge: StoredPixCharge,
+  publicOrigin?: string
+): Promise<boolean> {
+  const nowMs = Date.now();
+  if (
+    charge.status !== 'pending' ||
+    !charge.dueDate ||
+    !charge.dueAtMs ||
+    nowMs <= charge.dueAtMs ||
+    charge.expiresAt <= nowMs ||
+    (charge.preferredPaymentMethod && charge.preferredPaymentMethod !== 'pix')
+  ) {
+    return false;
+  }
+
+  const calc = calculatePixChargeWithFees({
+    originalAmountCents: charge.originalAmountCents ?? charge.amountCents,
+    dueDate: charge.dueDate,
+    finePercent:
+      typeof charge.finePercent === 'number'
+        ? charge.finePercent
+        : workspace.studioConfig.pixFinePercent ?? 2,
+    interestMonthlyPercent:
+      typeof charge.interestMonthlyPercent === 'number'
+        ? charge.interestMonthlyPercent
+        : workspace.studioConfig.pixInterestMonthlyPercent ?? 1,
+    referenceNowMs: nowMs,
+  });
+
+  if (
+    calc.totalAmountCents === charge.amountCents &&
+    calc.daysOverdue === (charge.daysOverdue ?? 0)
+  ) {
+    return false;
+  }
+
+  const nextTxid = sanitizePixTxid(
+    `MA${nowMs.toString(36).toUpperCase()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`
+  );
+  const assets = await generatePixChargeAssets({
+    modelId,
+    configuredPixKey: workspace.studioConfig.pixKey,
+    configuredPixKeyType: workspace.studioConfig.pixKeyType,
+    merchantName:
+      workspace.studioConfig.pixMerchantName ||
+      workspace.studioConfig.modelName ||
+      charge.merchantName,
+    merchantCity: workspace.studioConfig.pixMerchantCity || charge.merchantCity,
+    amountCents: calc.totalAmountCents,
+    txid: nextTxid,
+    description: `${charge.description} (Atraso ${calc.daysOverdue}d)`,
+    payerName: charge.userName,
+    preferredPaymentMethod: 'pix',
+    publicOrigin,
+    expiresAtMs: charge.expiresAt,
+  });
+
+  charge.originalAmountCents = calc.originalAmountCents;
+  charge.amountCents = calc.totalAmountCents;
+  charge.finePercent = calc.finePercent;
+  charge.interestMonthlyPercent = calc.interestMonthlyPercent;
+  charge.fineCents = calc.fineCents;
+  charge.interestCents = calc.interestCents;
+  charge.daysOverdue = calc.daysOverdue;
+  charge.txid = assets.txid;
+  charge.provider = assets.provider;
+  charge.brCode = assets.brCode;
+  charge.qrCodeDataUrl = assets.qrCodeDataUrl;
+  charge.externalPaymentId = assets.externalPaymentId;
+  charge.checkoutUrl = assets.checkoutUrl;
+  saveStore();
+  emitWorkspaceRefresh(modelId, false);
+  return true;
 }
 
 const inFlightPaymentVerifications = new Map<string, Promise<unknown>>();
@@ -2321,6 +2452,33 @@ async function startServer() {
     if (typeof patch.pixMerchantCity === 'string') {
       cfg.pixMerchantCity = formatEmvMerchantCity(
         patch.pixMerchantCity || 'SAO PAULO'
+      );
+    }
+    if (
+      typeof patch.pixFinePercent === 'number' &&
+      Number.isFinite(patch.pixFinePercent)
+    ) {
+      cfg.pixFinePercent = Math.max(
+        0,
+        Math.min(10, Number(patch.pixFinePercent.toFixed(2)))
+      );
+    }
+    if (
+      typeof patch.pixInterestMonthlyPercent === 'number' &&
+      Number.isFinite(patch.pixInterestMonthlyPercent)
+    ) {
+      cfg.pixInterestMonthlyPercent = Math.max(
+        0,
+        Math.min(10, Number(patch.pixInterestMonthlyPercent.toFixed(2)))
+      );
+    }
+    if (
+      typeof patch.pixDefaultDueDays === 'number' &&
+      Number.isFinite(patch.pixDefaultDueDays)
+    ) {
+      cfg.pixDefaultDueDays = Math.max(
+        0,
+        Math.min(90, Math.round(patch.pixDefaultDueDays))
       );
     }
     if (typeof patch.whatsappInvitePhotoUrl === 'string') {
@@ -3975,6 +4133,41 @@ async function startServer() {
           ? rawPreferred
           : 'pix';
 
+      const defaultDueDays =
+        typeof workspace.studioConfig.pixDefaultDueDays === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixDefaultDueDays)
+          ? Math.max(0, Math.min(90, Math.round(workspace.studioConfig.pixDefaultDueDays)))
+          : 0;
+      const defaultFinePercent =
+        typeof workspace.studioConfig.pixFinePercent === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixFinePercent)
+          ? workspace.studioConfig.pixFinePercent
+          : 2;
+      const defaultInterestPercent =
+        typeof workspace.studioConfig.pixInterestMonthlyPercent === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixInterestMonthlyPercent)
+          ? workspace.studioConfig.pixInterestMonthlyPercent
+          : 1;
+
+      const resolvedDueDate =
+        defaultDueDays > 0
+          ? getTodayBrtDateString(defaultDueDays, nowMs)
+          : undefined;
+      const feeCalc = calculatePixChargeWithFees({
+        originalAmountCents: amountCents,
+        dueDate: resolvedDueDate,
+        finePercent: defaultFinePercent,
+        interestMonthlyPercent: defaultInterestPercent,
+        referenceNowMs: nowMs,
+      });
+
+      const chargeExpiresAtMs = feeCalc.dueAtMs
+        ? Math.min(
+            nowMs + 29 * 24 * 60 * 60 * 1000,
+            Math.max(nowMs + 30 * 60 * 1000, feeCalc.dueAtMs + 5 * 24 * 60 * 60 * 1000)
+          )
+        : nowMs + 30 * 60 * 1000;
+
       const id = `pix_${nowMs}_${crypto.randomBytes(3).toString('hex')}`;
       const txid = sanitizePixTxid(`MA${nowMs.toString(36).toUpperCase()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`);
 
@@ -3988,13 +4181,14 @@ async function startServer() {
             workspace.studioConfig.modelName ||
             ctx.model.displayName,
           merchantCity: workspace.studioConfig.pixMerchantCity || 'SAO PAULO',
-          amountCents,
+          amountCents: feeCalc.totalAmountCents,
           txid,
           description,
           payerEmail: firebaseUser.email,
           payerName: buyerName,
           preferredPaymentMethod,
           publicOrigin: resolvePublicOriginFromRequest(req),
+          expiresAtMs: chargeExpiresAtMs,
         });
 
         const charge: StoredPixCharge = {
@@ -4004,7 +4198,15 @@ async function startServer() {
           userId: firebaseUser.uid,
           userName: buyerName,
           kind,
-          amountCents,
+          amountCents: feeCalc.totalAmountCents,
+          originalAmountCents: feeCalc.originalAmountCents,
+          ...(feeCalc.dueDate ? { dueDate: feeCalc.dueDate } : {}),
+          ...(feeCalc.dueAtMs !== undefined ? { dueAtMs: feeCalc.dueAtMs } : {}),
+          finePercent: feeCalc.finePercent,
+          interestMonthlyPercent: feeCalc.interestMonthlyPercent,
+          fineCents: feeCalc.fineCents,
+          interestCents: feeCalc.interestCents,
+          daysOverdue: feeCalc.daysOverdue,
           description,
           ...(planId ? { planId } : {}),
           ...(planName ? { planName } : {}),
@@ -4029,7 +4231,7 @@ async function startServer() {
           merchantCity: assets.merchantCity,
           usingDemoKey: assets.usingDemoKey,
           createdAt: nowMs,
-          expiresAt: nowMs + 30 * 60 * 1000,
+          expiresAt: chargeExpiresAtMs,
         };
 
         if (!Array.isArray(workspace.pixCharges)) {
@@ -4189,7 +4391,21 @@ async function startServer() {
               verification.rawStatus || verification.status;
             saveStore();
             emitWorkspaceRefresh(modelId, false);
+          } else {
+            await refreshOverduePixChargeIfNeeded(
+              modelId,
+              workspace,
+              charge,
+              resolvePublicOriginFromRequest(req)
+            ).catch(() => false);
           }
+        } else if (charge.status === 'pending') {
+          await refreshOverduePixChargeIfNeeded(
+            modelId,
+            workspace,
+            charge,
+            resolvePublicOriginFromRequest(req)
+          ).catch(() => false);
         } else if (charge.status === 'paid') {
           fulfillment = fulfillPixCharge(modelId, workspace, charge);
         }
@@ -4256,6 +4472,12 @@ async function startServer() {
                 externalReference: charge.txid,
               });
               if (verification.status !== 'approved') {
+                await refreshOverduePixChargeIfNeeded(
+                  modelId,
+                  workspace,
+                  charge,
+                  resolvePublicOriginFromRequest(req)
+                ).catch(() => false);
                 return { kind: 'pending_mp' as const };
               }
               const applied = applyApprovedMercadoPagoVerification({
@@ -4274,6 +4496,12 @@ async function startServer() {
             }
 
             // Static BACEN key cannot be self-verified by the payer; notify the model's private panel to confirm receipt
+            await refreshOverduePixChargeIfNeeded(
+              modelId,
+              workspace,
+              charge,
+              resolvePublicOriginFromRequest(req)
+            ).catch(() => false);
             charge.visitorReportedPaidAt = Date.now();
             saveStore();
             emitWorkspaceRefresh(modelId, false);
@@ -4434,6 +4662,222 @@ async function startServer() {
         emitWorkspaceRefresh(modelId, false);
       }
       res.json({ ok: true, charge: serializePixChargeForClient(charge) });
+    }
+  );
+
+  app.post(
+    '/api/model/pix/charges',
+    requireModelOperator,
+    async (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) {
+        res.status(404).json({ ok: false, error: 'Estúdio não encontrado.' });
+        return;
+      }
+
+      const { model, workspace } = ctx;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawAmount = Number(body.amountCents);
+      if (!Number.isFinite(rawAmount) || rawAmount < 500 || rawAmount > 10000000) {
+        res.status(400).json({
+          ok: false,
+          error: 'Informe um valor entre R$ 5,00 e R$ 100.000,00.',
+        });
+        return;
+      }
+
+      const originalAmountCents = Math.round(rawAmount);
+      const description =
+        typeof body.description === 'string' && body.description.trim()
+          ? body.description.trim().slice(0, 120)
+          : `Cobrança PIX · ${workspace.studioConfig.modelName || model.displayName}`;
+      const recipientName =
+        typeof body.recipientName === 'string' && body.recipientName.trim()
+          ? body.recipientName.trim().slice(0, 80)
+          : 'Cliente Avulso';
+
+      const defaultFine =
+        typeof workspace.studioConfig.pixFinePercent === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixFinePercent)
+          ? workspace.studioConfig.pixFinePercent
+          : 2;
+      const defaultInterest =
+        typeof workspace.studioConfig.pixInterestMonthlyPercent === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixInterestMonthlyPercent)
+          ? workspace.studioConfig.pixInterestMonthlyPercent
+          : 1;
+
+      const finePercent =
+        typeof body.finePercent === 'number' && Number.isFinite(body.finePercent)
+          ? Math.max(0, Math.min(10, Number(body.finePercent.toFixed(2))))
+          : defaultFine;
+      const interestMonthlyPercent =
+        typeof body.interestMonthlyPercent === 'number' &&
+        Number.isFinite(body.interestMonthlyPercent)
+          ? Math.max(0, Math.min(10, Number(body.interestMonthlyPercent.toFixed(2))))
+          : defaultInterest;
+
+      const nowMs = Date.now();
+      const parsedDue = normalizeDueDateString(body.dueDate);
+      if (typeof body.dueDate === 'string' && body.dueDate.trim() && !parsedDue) {
+        res.status(400).json({
+          ok: false,
+          error: 'Data de vencimento inválida. Utilize o formato AAAA-MM-DD.',
+        });
+        return;
+      }
+
+      const defaultDueDays =
+        typeof workspace.studioConfig.pixDefaultDueDays === 'number' &&
+        Number.isFinite(workspace.studioConfig.pixDefaultDueDays)
+          ? workspace.studioConfig.pixDefaultDueDays
+          : 0;
+      const dueDate = parsedDue || getTodayBrtDateString(defaultDueDays, nowMs);
+
+      const calc = calculatePixChargeWithFees({
+        originalAmountCents,
+        dueDate,
+        finePercent,
+        interestMonthlyPercent,
+        referenceNowMs: nowMs,
+      });
+
+      const rawGraceDays = Number(body.expiresAfterDueDays);
+      const graceDays =
+        Number.isFinite(rawGraceDays) && rawGraceDays >= 1
+          ? Math.min(28, Math.round(rawGraceDays))
+          : 7;
+
+      const minValidUntilMs = nowMs + 24 * 60 * 60 * 1000;
+      const targetAnchorMs = calc.dueAtMs ? Math.max(nowMs, calc.dueAtMs) : nowMs;
+      const maxMpValidMs = nowMs + 29 * 24 * 60 * 60 * 1000;
+      const chargeExpiresAtMs = Math.min(
+        maxMpValidMs,
+        Math.max(minValidUntilMs, targetAnchorMs + graceDays * 24 * 60 * 60 * 1000)
+      );
+
+      const id = `pix_${nowMs}_${crypto.randomBytes(3).toString('hex')}`;
+      const txid = sanitizePixTxid(
+        `MD${nowMs.toString(36).toUpperCase()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`
+      );
+
+      try {
+        const assets = await generatePixChargeAssets({
+          modelId,
+          configuredPixKey: workspace.studioConfig.pixKey,
+          configuredPixKeyType: workspace.studioConfig.pixKeyType,
+          merchantName:
+            workspace.studioConfig.pixMerchantName ||
+            workspace.studioConfig.modelName ||
+            model.displayName,
+          merchantCity: workspace.studioConfig.pixMerchantCity || 'SAO PAULO',
+          amountCents: calc.totalAmountCents,
+          txid,
+          description:
+            calc.daysOverdue > 0
+              ? `${description} (Atraso ${calc.daysOverdue}d)`
+              : description,
+          payerName: recipientName,
+          preferredPaymentMethod: 'pix',
+          publicOrigin: resolvePublicOriginFromRequest(req),
+          expiresAtMs: chargeExpiresAtMs,
+        });
+
+        const charge: StoredPixCharge = {
+          id,
+          txid: assets.txid,
+          modelId,
+          userId: getModelActorUid(modelId),
+          userName: recipientName,
+          kind: 'custom_charge',
+          amountCents: calc.totalAmountCents,
+          originalAmountCents: calc.originalAmountCents,
+          ...(calc.dueDate ? { dueDate: calc.dueDate } : {}),
+          ...(calc.dueAtMs !== undefined ? { dueAtMs: calc.dueAtMs } : {}),
+          finePercent: calc.finePercent,
+          interestMonthlyPercent: calc.interestMonthlyPercent,
+          fineCents: calc.fineCents,
+          interestCents: calc.interestCents,
+          daysOverdue: calc.daysOverdue,
+          createdByModel: true,
+          description,
+          status: 'pending',
+          approvalStatus: 'pendente',
+          provider: assets.provider,
+          preferredPaymentMethod: 'pix',
+          ...(assets.externalPaymentId
+            ? { externalPaymentId: assets.externalPaymentId }
+            : {}),
+          ...(assets.checkoutUrl ? { checkoutUrl: assets.checkoutUrl } : {}),
+          brCode: assets.brCode,
+          qrCodeDataUrl: assets.qrCodeDataUrl,
+          pixKeyUsed: assets.pixKeyUsed,
+          pixKeyTypeUsed: assets.pixKeyTypeUsed,
+          merchantName: assets.merchantName,
+          merchantCity: assets.merchantCity,
+          usingDemoKey: assets.usingDemoKey,
+          createdAt: nowMs,
+          expiresAt: chargeExpiresAtMs,
+        };
+
+        if (!Array.isArray(workspace.pixCharges)) {
+          workspace.pixCharges = [];
+        }
+        workspace.pixCharges.push(charge);
+        if (workspace.pixCharges.length > 250) {
+          workspace.pixCharges = workspace.pixCharges.slice(-250);
+        }
+        saveStore();
+        emitWorkspaceRefresh(modelId, false);
+
+        res.status(201).json({
+          ok: true,
+          charge: serializePixChargeForClient(charge),
+        });
+      } catch (err) {
+        console.error('Erro ao gerar cobrança PIX dinâmica pela modelo:', err);
+        res.status(500).json({
+          ok: false,
+          error: 'Não foi possível gerar o QR Code PIX dinâmico.',
+        });
+      }
+    }
+  );
+
+  app.post(
+    '/api/model/pix/charges/:chargeId/recalculate',
+    requireModelOperator,
+    async (req: AuthenticatedRequest, res) => {
+      const modelId = req.resolvedModelId!;
+      const ctx = getModelAndWorkspace(modelId);
+      if (!ctx) return void res.status(404).json({ ok: false });
+      const chargeId = sanitizeId(req.params.chargeId);
+      const charge = (ctx.workspace.pixCharges || []).find(
+        (c) => c.id === chargeId
+      );
+      if (!charge) {
+        res.status(404).json({ ok: false, error: 'Cobrança PIX não encontrada.' });
+        return;
+      }
+      if (charge.status !== 'pending') {
+        res.status(409).json({
+          ok: false,
+          error: 'Somente cobranças pendentes podem ser recalculadas.',
+        });
+        return;
+      }
+      const updated = await refreshOverduePixChargeIfNeeded(
+        modelId,
+        ctx.workspace,
+        charge,
+        resolvePublicOriginFromRequest(req)
+      );
+      res.json({
+        ok: true,
+        updated,
+        charge: serializePixChargeForClient(charge),
+      });
     }
   );
 

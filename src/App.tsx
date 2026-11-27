@@ -179,6 +179,8 @@ export default function App() {
     cancelPixCharge,
     confirmModelPixCharge,
     cancelModelPixCharge,
+    createModelPixCharge,
+    recalculateModelPixCharge,
     createWhatsappInvite,
     deleteWhatsappInvite,
     updateUserControl,
@@ -2532,6 +2534,8 @@ export default function App() {
               pixCharges={pixCharges}
               onConfirmModelPixCharge={confirmModelPixCharge}
               onCancelModelPixCharge={cancelModelPixCharge}
+              onCreateModelPixCharge={createModelPixCharge}
+              onRecalculateModelPixCharge={recalculateModelPixCharge}
               whatsappInvites={whatsappInvites}
               onCreateWhatsappInvite={createWhatsappInvite}
               onDeleteWhatsappInvite={deleteWhatsappInvite}

@@ -288,7 +288,7 @@ export interface PendingGalleryReviewItem {
 }
 
 export type PixKeyType = 'cpf' | 'cnpj' | 'email' | 'phone' | 'evp';
-export type PixChargeKind = 'private_album' | 'tip' | 'call_plan';
+export type PixChargeKind = 'private_album' | 'tip' | 'call_plan' | 'custom_charge';
 export type PixChargeStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
 export type PixApprovalStatus =
   | 'pendente'
@@ -312,6 +312,15 @@ export interface PixChargeRecord {
   userName: string;
   kind: PixChargeKind;
   amountCents: number;
+  originalAmountCents?: number;
+  dueDate?: string;
+  dueAtMs?: number;
+  finePercent?: number;
+  interestMonthlyPercent?: number;
+  fineCents?: number;
+  interestCents?: number;
+  daysOverdue?: number;
+  createdByModel?: boolean;
   description: string;
   planId?: string;
   planName?: string;
@@ -394,6 +403,9 @@ export interface StudioConfig {
   pixKeyType?: PixKeyType;
   pixMerchantName?: string;
   pixMerchantCity?: string;
+  pixFinePercent?: number;
+  pixInterestMonthlyPercent?: number;
+  pixDefaultDueDays?: number;
   pixConfigured?: boolean;
   mercadoPagoConfigured?: boolean;
   whatsappInvitePhotoUrl?: string;

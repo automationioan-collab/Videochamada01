@@ -2165,6 +2165,91 @@ export function useStudioAuth() {
     [isAdmin, refreshWorkspace]
   );
 
+  const createModelPixCharge = useCallback(
+    async (input: {
+      amountCents: number;
+      description: string;
+      recipientName?: string;
+      dueDate?: string;
+      finePercent?: number;
+      interestMonthlyPercent?: number;
+      expiresAfterDueDays?: number;
+    }): Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }> => {
+      if (!isAdmin) return { ok: false, error: 'Sem permissão.' };
+      try {
+        const headers = await authHeaderRef.current();
+        const res = await fetch('/api/model/pix/charges', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify(input),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          charge?: PixChargeRecord;
+          error?: string;
+        };
+        if (res.ok && json.ok && json.charge) {
+          await refreshWorkspace();
+          return { ok: true, charge: json.charge };
+        }
+        return {
+          ok: false,
+          error: json.error || 'Erro ao gerar QR Code PIX dinâmico.',
+        };
+      } catch {
+        return {
+          ok: false,
+          error: 'Falha de conexão ao gerar QR Code PIX dinâmico.',
+        };
+      }
+    },
+    [isAdmin, refreshWorkspace]
+  );
+
+  const recalculateModelPixCharge = useCallback(
+    async (
+      chargeId: string
+    ): Promise<{
+      ok: boolean;
+      updated?: boolean;
+      charge?: PixChargeRecord;
+      error?: string;
+    }> => {
+      if (!isAdmin) return { ok: false, error: 'Sem permissão.' };
+      try {
+        const headers = await authHeaderRef.current();
+        const res = await fetch(
+          `/api/model/pix/charges/${encodeURIComponent(chargeId)}/recalculate`,
+          { method: 'POST', headers }
+        );
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          updated?: boolean;
+          charge?: PixChargeRecord;
+          error?: string;
+        };
+        if (res.ok && json.ok && json.charge) {
+          await refreshWorkspace();
+          return {
+            ok: true,
+            updated: Boolean(json.updated),
+            charge: json.charge,
+          };
+        }
+        return {
+          ok: false,
+          error: json.error || 'Erro ao recalcular encargos do PIX.',
+        };
+      } catch {
+        return {
+          ok: false,
+          error: 'Falha de conexão ao recalcular PIX.',
+        };
+      }
+    },
+    [isAdmin, refreshWorkspace]
+  );
+
   const createWhatsappInvite = useCallback(
     async (input: {
       recipientName?: string;
@@ -2302,6 +2387,8 @@ export function useStudioAuth() {
     cancelPixCharge,
     confirmModelPixCharge,
     cancelModelPixCharge,
+    createModelPixCharge,
+    recalculateModelPixCharge,
     createWhatsappInvite,
     deleteWhatsappInvite,
     updateUserControl,

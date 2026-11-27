@@ -96,14 +96,30 @@ const METHOD_META: Record<
   },
 };
 
+function formatBrDueDate(isoDate?: string): string {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return '';
+  const [y, m, d] = isoDate.split('-');
+  return `${d}/${m}/${y}`;
+}
+
 function formatCountdown(remainingMs: number): string {
   if (remainingMs <= 0) return '00:00';
   const totalSec = Math.ceil(remainingMs / 1000);
-  const mins = Math.floor(totalSec / 60)
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (days > 0) {
+    return `${days}d ${hours.toString().padStart(2, '0')}h`;
+  }
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, '0')}:${mins
+      .toString()
+      .padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins.toString().padStart(2, '0')}:${secs
     .toString()
-    .padStart(2, '0');
-  const secs = (totalSec % 60).toString().padStart(2, '0');
-  return `${mins}:${secs}`;
+    .padStart(2, '0')}`;
 }
 
 export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
@@ -320,29 +336,63 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
 
         <div className="p-6 space-y-5">
           {/* Amount & Countdown */}
-          <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-2xl bg-[#070B1E]/90 border border-[#818CF8]/25">
-            <div>
-              <p className="text-[11px] text-[#94A3B8]">
-                Valor ({methodInfo.shortLabel})
-              </p>
-              <p className="font-display text-2xl font-bold tabular-nums text-[#38BDF8]">
-                {BRL_FORMATTER.format(localCharge.amountCents / 100)}
-              </p>
+          <div className="px-4 py-3 rounded-2xl bg-[#070B1E]/90 border border-[#818CF8]/25 space-y-2">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[11px] text-[#94A3B8]">
+                  Valor ({methodInfo.shortLabel})
+                </p>
+                <p className="font-display text-2xl font-bold tabular-nums text-[#38BDF8]">
+                  {BRL_FORMATTER.format(localCharge.amountCents / 100)}
+                </p>
+              </div>
+
+              <div className="text-right">
+                <p className="text-[11px] text-[#94A3B8] inline-flex items-center gap-1 justify-end">
+                  <Clock3 className="w-3 h-3 text-[#38BDF8]" />
+                  <span>{isExpired ? 'Expirado' : 'Expira em'}</span>
+                </p>
+                <p
+                  className={`font-mono text-lg font-semibold tabular-nums ${
+                    isExpired ? 'text-[#FCA5A5]' : 'text-[#F8FAFC]'
+                  }`}
+                >
+                  {formatCountdown(remainingMs)}
+                </p>
+              </div>
             </div>
 
-            <div className="text-right">
-              <p className="text-[11px] text-[#94A3B8] inline-flex items-center gap-1 justify-end">
-                <Clock3 className="w-3 h-3 text-[#38BDF8]" />
-                <span>{isExpired ? 'Expirado' : 'Expira em'}</span>
-              </p>
-              <p
-                className={`font-mono text-lg font-semibold tabular-nums ${
-                  isExpired ? 'text-[#FCA5A5]' : 'text-[#F8FAFC]'
-                }`}
-              >
-                {formatCountdown(remainingMs)}
-              </p>
-            </div>
+            {(localCharge.dueDate || (localCharge.daysOverdue ?? 0) > 0) && (
+              <div className="pt-2 border-t border-[#818CF8]/15 text-[11px] space-y-1">
+                <div className="flex items-center justify-between text-[#B6C2E2]">
+                  <span>
+                    Vencimento: {formatBrDueDate(localCharge.dueDate) || 'À vista'}
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    Multa {localCharge.finePercent ?? 2}% · Juros{' '}
+                    {localCharge.interestMonthlyPercent ?? 1}% a.m.
+                  </span>
+                </div>
+                {(localCharge.daysOverdue ?? 0) > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[#FCD34D] font-mono tabular-nums">
+                    <span>
+                      Original:{' '}
+                      {BRL_FORMATTER.format(
+                        (localCharge.originalAmountCents ?? localCharge.amountCents) / 100
+                      )}
+                    </span>
+                    <span>
+                      Encargos ({localCharge.daysOverdue}d): +{' '}
+                      {BRL_FORMATTER.format(
+                        ((localCharge.fineCents ?? 0) +
+                          (localCharge.interestCents ?? 0)) /
+                          100
+                      )}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {isPaid ? (

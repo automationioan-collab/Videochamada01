@@ -208,7 +208,7 @@ export function sanitizeModelBasicInfo(
 }
 
 export type PixKeyType = 'cpf' | 'cnpj' | 'email' | 'phone' | 'evp';
-export type PixChargeKind = 'private_album' | 'tip' | 'call_plan';
+export type PixChargeKind = 'private_album' | 'tip' | 'call_plan' | 'custom_charge';
 export type PixChargeStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
 export type PixApprovalStatus =
   | 'pendente'
@@ -232,6 +232,15 @@ export interface StoredPixCharge {
   userName: string;
   kind: PixChargeKind;
   amountCents: number;
+  originalAmountCents?: number;
+  dueDate?: string;
+  dueAtMs?: number;
+  finePercent?: number;
+  interestMonthlyPercent?: number;
+  fineCents?: number;
+  interestCents?: number;
+  daysOverdue?: number;
+  createdByModel?: boolean;
   description: string;
   planId?: string;
   planName?: string;
@@ -309,6 +318,9 @@ export interface StoredStudioConfig {
   pixKeyType?: PixKeyType;
   pixMerchantName?: string;
   pixMerchantCity?: string;
+  pixFinePercent?: number;
+  pixInterestMonthlyPercent?: number;
+  pixDefaultDueDays?: number;
   whatsappInvitePhotoUrl?: string;
   whatsappInviteMessage?: string;
   whatsappInvitePlanId?: string;
@@ -1114,6 +1126,9 @@ export function buildDefaultWorkspace(
       pixKeyType: 'evp',
       pixMerchantName: name.slice(0, 25),
       pixMerchantCity: 'SAO PAULO',
+      pixFinePercent: 2,
+      pixInterestMonthlyPercent: 1,
+      pixDefaultDueDays: 0,
       whatsappInvitePhotoUrl: heroImageUrl,
       whatsappInviteMessage: `Oi! Separei um momento exclusivo para nós dois em videochamada ao vivo. Clique no link abaixo para fazer o pagamento com segurança (PIX ou cartão) e entrar comigo agora!`,
       whatsappInviteCallMode: 'private',
@@ -1232,6 +1247,18 @@ export function getStore(): StudioStoreData {
             }
             if (!Array.isArray(ws.privateAlbumPurchases)) {
               ws.privateAlbumPurchases = [];
+              mutated = true;
+            }
+            if (typeof ws.studioConfig.pixFinePercent !== 'number') {
+              ws.studioConfig.pixFinePercent = 2;
+              mutated = true;
+            }
+            if (typeof ws.studioConfig.pixInterestMonthlyPercent !== 'number') {
+              ws.studioConfig.pixInterestMonthlyPercent = 1;
+              mutated = true;
+            }
+            if (typeof ws.studioConfig.pixDefaultDueDays !== 'number') {
+              ws.studioConfig.pixDefaultDueDays = 0;
               mutated = true;
             }
             if (!Array.isArray(ws.pixCharges)) {

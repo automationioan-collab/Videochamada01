@@ -862,7 +862,7 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
             </div>
           </div>
 
-          {/* PIX Receiving Key & Merchant Details */}
+          {/* PIX Receiving Key & Mercado Pago Status */}
           <div className="p-5 rounded-2xl bg-[#0B060F]/85 border border-[#38BDF8]/25 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#818CF8]/15">
               <div className="flex items-center gap-2.5">
@@ -871,21 +871,29 @@ export const AdminSiteEditor: React.FC<AdminSiteEditorProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-semibold text-[#FAF4F7]">
-                    Recebimento via PIX (Chave & QR Code)
+                    Mercado Pago & Chave PIX de Recebimento
                   </h3>
                   <p className="text-[11px] text-[#C9BAC4]">
-                    Chave usada para gerar o QR Code e o Copia e Cola nos pagamentos desta modelo.
+                    {studioConfig?.mercadoPagoConfigured
+                      ? 'Mercado Pago API Ativo: PIX QR Code, Cartão, Débito, Saldo e confirmação automática em tempo real.'
+                      : 'Chave PIX oficial configurada para QR Code e Copia e Cola. Adicione MERCADOPAGO_ACCESS_TOKEN nos Secrets para ativar Cartão e baixa automática.'}
                   </p>
                 </div>
               </div>
               <span
                 className={`text-[11px] font-medium whitespace-nowrap shrink-0 ${
-                  pixKey.trim() ? 'text-[#86EFAC]' : 'text-[#FCD34D]'
+                  studioConfig?.mercadoPagoConfigured
+                    ? 'text-[#86EFAC]'
+                    : pixKey.trim()
+                      ? 'text-[#38BDF8]'
+                      : 'text-[#FCD34D]'
                 }`}
               >
-                {pixKey.trim()
-                  ? 'Chave personalizada ativa'
-                  : 'Usando QR Code padrão do estúdio'}
+                {studioConfig?.mercadoPagoConfigured
+                  ? 'Mercado Pago API Ativo'
+                  : pixKey.trim()
+                    ? 'Chave PIX EVP Ativa'
+                    : 'Usando chave EVP padrão do estúdio'}
               </span>
             </div>
 

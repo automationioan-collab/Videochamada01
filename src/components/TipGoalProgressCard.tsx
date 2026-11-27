@@ -1,7 +1,16 @@
 import React, { useState } from 'react';
 import { CheckCircle2, Gift, QrCode, Target, Users } from 'lucide-react';
+import {
+  MercadoPagoMethodSelector,
+  getMercadoPagoMethodActionLabel,
+} from './MercadoPagoMethodSelector';
 import { PixPaymentModal, type PixConfirmationResponse } from './PixPaymentModal';
-import type { PixChargeKind, PixChargeRecord, StudioState } from '../types/studio';
+import type {
+  MercadoPagoPaymentMethod,
+  PixChargeKind,
+  PixChargeRecord,
+  StudioState,
+} from '../types/studio';
 
 const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -15,6 +24,7 @@ interface TipGoalProgressCardProps {
   modelName: string;
   studioState: StudioState | null;
   isAuthenticated: boolean;
+  mercadoPagoConfigured?: boolean;
   compact?: boolean;
   onSendTip?: (
     modelId: string,
@@ -32,7 +42,13 @@ interface TipGoalProgressCardProps {
     topic?: string;
     callMode?: 'group' | 'private';
     note?: string;
-  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+    preferredPaymentMethod?: MercadoPagoPaymentMethod;
+  }) => Promise<{
+    ok: boolean;
+    charge?: PixChargeRecord;
+    error?: string;
+    requiresMercadoPagoToken?: boolean;
+  }>;
   onCheckPixCharge?: (
     modelId: string,
     chargeId: string
@@ -50,6 +66,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
   modelName,
   studioState,
   isAuthenticated,
+  mercadoPagoConfigured = false,
   compact = false,
   onSendTip,
   onCreatePixCharge,
@@ -60,7 +77,9 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
 }) => {
   const [selectedCents, setSelectedCents] = useState<number>(2500);
   const [customReais, setCustomReais] = useState<string>('');
-  const paymentMethod = 'pix' as const;
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<MercadoPagoPaymentMethod>('pix');
+  const [requiresTokenFallback, setRequiresTokenFallback] = useState(false);
   const [note, setNote] = useState<string>('');
   const [sending, setSending] = useState(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
@@ -69,6 +88,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
   const [pendingPixTip, setPendingPixTip] = useState<{
     amountCents: number;
     note?: string;
+    preferredPaymentMethod: MercadoPagoPaymentMethod;
   } | null>(null);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
@@ -92,12 +112,16 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
     ? Math.round((Number(customReais.replace(',', '.')) || 0) * 100)
     : selectedCents;
 
-  const handleSubmitTip = async (amountToSendCents: number) => {
+  const handleSubmitTip = async (
+    amountToSendCents: number,
+    methodOverride?: MercadoPagoPaymentMethod
+  ) => {
     if (!isAuthenticated) {
       onRequireAuth?.();
       return;
     }
-    if (!onSendTip && !(paymentMethod === 'pix' && onCreatePixCharge)) return;
+    const methodToUse = methodOverride || selectedPaymentMethod;
+    if (!onSendTip && !onCreatePixCharge) return;
     if (!Number.isFinite(amountToSendCents) || amountToSendCents < 500) {
       setFeedback({
         type: 'error',
@@ -108,23 +132,32 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
 
     const trimmedNote = note.trim() || undefined;
 
-    if (paymentMethod === 'pix' && onCreatePixCharge) {
+    if (onCreatePixCharge) {
       setSending(true);
       setFeedback(null);
+      setRequiresTokenFallback(false);
       try {
         const res = await onCreatePixCharge({
           modelId,
           kind: 'tip',
           amountCents: amountToSendCents,
           note: trimmedNote,
+          preferredPaymentMethod: methodToUse,
         });
         if (res.ok && res.charge) {
-          setPendingPixTip({ amountCents: amountToSendCents, note: trimmedNote });
+          setPendingPixTip({
+            amountCents: amountToSendCents,
+            note: trimmedNote,
+            preferredPaymentMethod: methodToUse,
+          });
           setActivePixCharge(res.charge);
         } else {
+          setRequiresTokenFallback(Boolean(res.requiresMercadoPagoToken));
           setFeedback({
             type: 'error',
-            text: res.error || 'Não foi possível gerar o QR Code PIX.',
+            text:
+              res.error ||
+              'Não foi possível gerar o pagamento no Mercado Pago.',
           });
         }
       } finally {
@@ -138,7 +171,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
     setFeedback(null);
     const res = await onSendTip(modelId, {
       amountCents: amountToSendCents,
-      paymentMethod,
+      paymentMethod: methodToUse === 'pix' ? 'pix' : 'card',
       message: trimmedNote,
     });
     setSending(false);
@@ -167,6 +200,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
       kind: 'tip',
       amountCents: pendingPixTip.amountCents,
       note: pendingPixTip.note,
+      preferredPaymentMethod: pendingPixTip.preferredPaymentMethod,
     });
     if (res.ok && res.charge) {
       setActivePixCharge(res.charge);
@@ -270,7 +304,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
 
       {/* Interactive Contribution Bar */}
       <div className="pt-3 border-t border-[#818CF8]/15 space-y-3">
-        {isAuthenticated && onSendTip ? (
+        {isAuthenticated && (onSendTip || onCreatePixCharge) ? (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -306,12 +340,20 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
                   className="w-24 bg-[#070B1E]/85 border border-[#818CF8]/25 rounded-full px-3 py-1.5 text-xs font-mono tabular-nums text-[#F8FAFC] placeholder:text-[#94A3B8] focus:outline-none focus:border-[#38BDF8]"
                 />
               </div>
-
-              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#070B1E]/85 border border-[#38BDF8]/35 rounded-full text-[11px] font-medium text-[#38BDF8]">
-                <QrCode className="w-3.5 h-3.5" />
-                <span>PIX Verificado</span>
-              </div>
             </div>
+
+            <MercadoPagoMethodSelector
+              value={selectedPaymentMethod}
+              onChange={(next) => {
+                setSelectedPaymentMethod(next);
+                setFeedback(null);
+                setRequiresTokenFallback(false);
+              }}
+              mercadoPagoConfigured={mercadoPagoConfigured}
+              disabled={sending}
+              compact
+              theme="indigo"
+            />
 
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
               {!compact && (
@@ -333,8 +375,8 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
                 <QrCode className="w-3.5 h-3.5" />
                 <span>
                   {sending
-                    ? 'Gerando PIX...'
-                    : `Gerar PIX · ${BRL_FORMATTER.format(
+                    ? 'Preparando pagamento...'
+                    : `${getMercadoPagoMethodActionLabel(selectedPaymentMethod)} · ${BRL_FORMATTER.format(
                         Math.max(0, resolvedAmountCents) / 100
                       )}`}
                 </span>
@@ -363,14 +405,29 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
         {feedback && (
           <div
             role={feedback.type === 'error' ? 'alert' : 'status'}
-            className={`p-3 rounded-xl text-xs border flex items-center gap-2 ${
+            className={`p-3 rounded-xl text-xs border space-y-2 ${
               feedback.type === 'error'
                 ? 'bg-red-950/40 border-red-500/35 text-red-200'
                 : 'bg-[#0EA5E9]/15 border-[#38BDF8]/40 text-[#E0F2FE]'
             }`}
           >
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span>{feedback.text}</span>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{feedback.text}</span>
+            </div>
+            {feedback.type === 'error' && requiresTokenFallback && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPaymentMethod('pix');
+                  void handleSubmitTip(resolvedAmountCents, 'pix');
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full bg-[#0EA5E9]/20 border border-[#38BDF8]/50 text-[#E0F2FE] hover:bg-[#0EA5E9]/30 transition-colors cursor-pointer"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>Pagar agora via PIX QR Code</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -378,9 +435,19 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
       {activePixCharge && onCheckPixCharge && onConfirmPixCharge && (
         <PixPaymentModal
           charge={activePixCharge}
-          title="Pagamento PIX · Meta de Gorjeta"
+          title={
+            activePixCharge.preferredPaymentMethod &&
+            activePixCharge.preferredPaymentMethod !== 'pix'
+              ? 'Checkout Mercado Pago · Meta de Gorjeta'
+              : 'Pagamento PIX · Meta de Gorjeta'
+          }
           subtitle={`Contribuição para a meta de ${modelName}`}
-          confirmLabel="Já Paguei via PIX · Confirmar Gorjeta"
+          confirmLabel={
+            activePixCharge.preferredPaymentMethod &&
+            activePixCharge.preferredPaymentMethod !== 'pix'
+              ? 'Já Paguei no Mercado Pago · Confirmar Gorjeta'
+              : 'Já Paguei via PIX · Confirmar Gorjeta'
+          }
           onClose={() => {
             setActivePixCharge(null);
             setPendingPixTip(null);
@@ -399,7 +466,7 @@ export const TipGoalProgressCard: React.FC<TipGoalProgressCardProps> = ({
               type: 'success',
               text: `Gorjeta de ${BRL_FORMATTER.format(
                 paidAmountCents / 100
-              )} confirmada via PIX para ${modelName}!`,
+              )} confirmada para ${modelName}!`,
             });
           }}
         />

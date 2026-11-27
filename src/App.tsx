@@ -64,6 +64,7 @@ import {
 import type {
   CallPlan,
   CallRequest,
+  MercadoPagoPaymentMethod,
   PixChargeRecord,
   PublicWhatsappInviteData,
 } from './types/studio';
@@ -172,6 +173,7 @@ export default function App() {
     purchasePrivateAlbum,
     unlockPrivateAlbum,
     createPixCharge,
+    reconcileMercadoPagoReturn,
     checkPixChargeStatus,
     confirmPixCharge,
     cancelPixCharge,
@@ -247,12 +249,15 @@ export default function App() {
   const [inviteCheckoutError, setInviteCheckoutError] = useState<string | null>(
     null
   );
+  const [inviteRequiresTokenFallback, setInviteRequiresTokenFallback] =
+    useState<boolean>(false);
   const [invitePixCharge, setInvitePixCharge] =
     useState<PixChargeRecord | null>(null);
   const [pendingInvitePixMeta, setPendingInvitePixMeta] = useState<{
     plan: CallPlan;
     topic: string;
     inviteId: string;
+    preferredPaymentMethod: MercadoPagoPaymentMethod;
   } | null>(null);
   const pendingInviteAutoCheckoutRef = useRef<
     (InviteCheckoutSelection & { inviteId: string }) | null
@@ -497,6 +502,47 @@ export default function App() {
       timers.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || authLoading) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const mpStatus = params.get('mp_status');
+      const mpRef = params.get('ref') || undefined;
+      if (!mpStatus) return;
+      if (mpStatus === 'approved') {
+        pushToast(
+          'call_accepted',
+          'Retorno do Mercado Pago',
+          'Pagamento retornado com sucesso. Sincronizando confirmação oficial...'
+        );
+      } else if (mpStatus === 'pending') {
+        pushToast(
+          'info',
+          'Pagamento em processamento',
+          'O Mercado Pago está processando sua transação. Assim que compensar, o acesso será liberado.'
+        );
+      } else if (mpStatus === 'failure') {
+        pushToast(
+          'info',
+          'Pagamento não concluído',
+          'O pagamento no Mercado Pago foi cancelado ou recusado. Você pode gerar uma nova cobrança.'
+        );
+      }
+      if (user && (mpStatus === 'approved' || mpStatus === 'pending' || mpRef)) {
+        void reconcileMercadoPagoReturn(mpRef);
+      } else {
+        void refreshWorkspace();
+      }
+      params.delete('mp_status');
+      params.delete('ref');
+      const nextSearch = params.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}`;
+      window.history.replaceState({}, '', nextUrl);
+    } catch {
+      // Ignore query cleanup errors in sandboxed iframes
+    }
+  }, [authLoading, pushToast, reconcileMercadoPagoReturn, refreshWorkspace, user]);
 
   const hasActiveTimedDnd = Boolean(
     studioState?.dndUntilMs && studioState.dndUntilMs > Date.now()
@@ -1696,6 +1742,7 @@ export default function App() {
 
       setInviteSubmitting(true);
       setInviteCheckoutError(null);
+      setInviteRequiresTokenFallback(false);
       try {
         const pixRes = await createPixCharge({
           modelId: inviteData.model.id,
@@ -1704,10 +1751,13 @@ export default function App() {
           callMode: 'private',
           topic: selection.topic,
           inviteId: inviteData.invite.id,
+          preferredPaymentMethod: selection.paymentMethod,
         });
         if (!pixRes.ok || !pixRes.charge) {
+          setInviteRequiresTokenFallback(Boolean(pixRes.requiresMercadoPagoToken));
           setInviteCheckoutError(
-            pixRes.error || 'Não foi possível gerar o QR Code PIX.'
+            pixRes.error ||
+              'Não foi possível gerar o pagamento no Mercado Pago.'
           );
           return;
         }
@@ -1715,6 +1765,7 @@ export default function App() {
           plan,
           topic: selection.topic,
           inviteId: inviteData.invite.id,
+          preferredPaymentMethod: selection.paymentMethod,
         });
         setInvitePixCharge(pixRes.charge);
       } finally {
@@ -1876,6 +1927,21 @@ export default function App() {
               isAuthenticated={isAuthenticated}
               isAdmin={isAdmin}
               isBlocked={myProfile?.accessStatus === 'blocked'}
+              mercadoPagoConfigured={Boolean(studioConfig?.mercadoPagoConfigured)}
+              requiresTokenFallback={inviteRequiresTokenFallback}
+              onFallbackToPix={() => {
+                const fallbackPlanId =
+                  inviteData.invite.planId ||
+                  activePlans[0]?.id ||
+                  inviteData.callPlans[0]?.id ||
+                  '';
+                void handleInvitePayAndHire({
+                  planId: fallbackPlanId,
+                  paymentMethod: 'pix',
+                  callMode: 'private',
+                  topic: 'Convite WhatsApp · Pagamento via PIX (Sala Privativa 1-para-1)',
+                });
+              }}
               activePlans={activePlans}
               submitting={inviteSubmitting}
               errorMsg={inviteCheckoutError}
@@ -2732,6 +2798,9 @@ export default function App() {
                   <VideoCallStage
                     isAdmin={false}
                     modelId={activeModelId}
+                    mercadoPagoConfigured={Boolean(
+                      studioConfig?.mercadoPagoConfigured
+                    )}
                     myProfile={myProfile}
                     modelProfile={modelProfile}
                     studioState={studioState}
@@ -2885,6 +2954,10 @@ export default function App() {
                     modelName={activeModelDisplayName}
                     summary={privateAlbumSummary}
                     isAuthenticated={Boolean(user)}
+                    mercadoPagoConfigured={Boolean(
+                      studioConfig?.mercadoPagoConfigured
+                    )}
+                    authError={authError}
                     initialUnlockedItems={visitorUnlockedPrivateItems}
                     onPurchaseAlbum={purchasePrivateAlbum}
                     onCreatePixCharge={createPixCharge}
@@ -2955,6 +3028,10 @@ export default function App() {
                     modelName={activeModelDisplayName}
                     summary={privateAlbumSummary}
                     isAuthenticated={Boolean(user)}
+                    mercadoPagoConfigured={Boolean(
+                      studioConfig?.mercadoPagoConfigured
+                    )}
+                    authError={authError}
                     initialUnlockedItems={visitorUnlockedPrivateItems}
                     onPurchaseAlbum={purchasePrivateAlbum}
                     onCreatePixCharge={createPixCharge}
@@ -2993,6 +3070,10 @@ export default function App() {
                 modelName={activeModelDisplayName}
                 summary={privateAlbumSummary}
                 isAuthenticated={Boolean(user)}
+                mercadoPagoConfigured={Boolean(
+                  studioConfig?.mercadoPagoConfigured
+                )}
+                authError={authError}
                 initialUnlockedItems={visitorUnlockedPrivateItems}
                 onPurchaseAlbum={purchasePrivateAlbum}
                 onCreatePixCharge={createPixCharge}
@@ -3012,11 +3093,21 @@ export default function App() {
       {invitePixCharge && pendingInvitePixMeta && (
         <PixPaymentModal
           charge={invitePixCharge}
-          title={`Pagamento PIX · ${pendingInvitePixMeta.plan.name}`}
+          title={
+            invitePixCharge.preferredPaymentMethod &&
+            invitePixCharge.preferredPaymentMethod !== 'pix'
+              ? `Checkout Mercado Pago · ${pendingInvitePixMeta.plan.name}`
+              : `Pagamento PIX · ${pendingInvitePixMeta.plan.name}`
+          }
           subtitle={`Chamada Privativa 1-para-1 · Convite com ${
             inviteData?.model.displayName || activeModelDisplayName
           }`}
-          confirmLabel="Já Paguei via PIX · Liberar Sala Privativa"
+          confirmLabel={
+            invitePixCharge.preferredPaymentMethod &&
+            invitePixCharge.preferredPaymentMethod !== 'pix'
+              ? 'Já Paguei no Mercado Pago · Liberar Sala Privativa'
+              : 'Já Paguei via PIX · Liberar Sala Privativa'
+          }
           onClose={() => {
             setInvitePixCharge(null);
             setPendingInvitePixMeta(null);
@@ -3033,6 +3124,8 @@ export default function App() {
               callMode: 'private',
               topic: pendingInvitePixMeta.topic,
               inviteId: pendingInvitePixMeta.inviteId,
+              preferredPaymentMethod:
+                pendingInvitePixMeta.preferredPaymentMethod,
             });
             if (res.ok && res.charge) {
               setInvitePixCharge(res.charge);
@@ -3068,7 +3161,7 @@ export default function App() {
 
             pushToast(
               'call_accepted',
-              'PIX confirmado!',
+              'Pagamento confirmado!',
               `Sala privativa 1-para-1 com ${modelDisplay} liberada.`
             );
           }}

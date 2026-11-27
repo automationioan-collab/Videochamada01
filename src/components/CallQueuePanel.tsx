@@ -12,6 +12,10 @@ import {
 import { isDndActiveNow } from '../lib/schedule';
 import { DEFAULT_STUDIO_CONFIG } from '../lib/studioDefaults';
 import { GaleriaModelo } from './GaleriaModelo';
+import {
+  MercadoPagoMethodSelector,
+  getMercadoPagoMethodActionLabel,
+} from './MercadoPagoMethodSelector';
 import { PixPaymentModal, type PixConfirmationResponse } from './PixPaymentModal';
 import { SalaDeEspera } from './SalaDeEspera';
 import { TechSpotlightCard } from './TechEffects';
@@ -22,6 +26,7 @@ import type {
   CallRequest,
   CallStatus,
   GalleryItemRecord,
+  MercadoPagoPaymentMethod,
   PixChargeKind,
   PixChargeRecord,
   PresencePeer,
@@ -82,7 +87,13 @@ interface CallQueuePanelProps {
     topic?: string;
     callMode?: 'group' | 'private';
     note?: string;
-  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+    preferredPaymentMethod?: MercadoPagoPaymentMethod;
+  }) => Promise<{
+    ok: boolean;
+    charge?: PixChargeRecord;
+    error?: string;
+    requiresMercadoPagoToken?: boolean;
+  }>;
   onCheckPixCharge?: (
     modelId: string,
     chargeId: string
@@ -143,7 +154,9 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
 }) => {
   const [topic, setTopic] = useState('');
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
-  const paymentMethod = 'pix' as const;
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<MercadoPagoPaymentMethod>('pix');
+  const [requiresTokenFallback, setRequiresTokenFallback] = useState(false);
   const [paymentAuthorized, setPaymentAuthorized] = useState(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
@@ -152,6 +165,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
   const [pendingPixCall, setPendingPixCall] = useState<{
     plan: CallPlan;
     topic: string;
+    preferredPaymentMethod: MercadoPagoPaymentMethod;
   } | null>(null);
   const [pixError, setPixError] = useState<string | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
@@ -215,35 +229,66 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     setLoungeFailed(false);
   }, [loungeSrc]);
 
-  const buildCleanTopic = (plan: CallPlan) => {
+  const methodLabelForTopic = (method: MercadoPagoPaymentMethod) => {
+    switch (method) {
+      case 'credit_card':
+        return 'Cartão de Crédito';
+      case 'debit_card':
+        return 'Cartão de Débito';
+      case 'account_money':
+        return 'Saldo Mercado Pago';
+      case 'ticket':
+        return 'Boleto Mercado Pago';
+      case 'pix':
+      default:
+        return 'PIX';
+    }
+  };
+
+  const buildCleanTopic = (
+    plan: CallPlan,
+    method: MercadoPagoPaymentMethod = selectedPaymentMethod
+  ) => {
     const base =
-      topic.trim() ||
-      `${plan.name} · Pagamento ${paymentMethod === 'pix' ? 'PIX' : 'Cartão'}`;
+      topic.trim() || `${plan.name} · Pagamento ${methodLabelForTopic(method)}`;
     return `[Privativa 1-para-1] ${base}`;
   };
 
   const startCallPlanPixCharge = async (
     plan: CallPlan,
-    cleanTopic: string
+    cleanTopic: string,
+    methodOverride?: MercadoPagoPaymentMethod
   ) => {
     if (!onCreatePixCharge) return;
+    const methodToUse = methodOverride || selectedPaymentMethod;
     setPixError(null);
+    setRequiresTokenFallback(false);
     const res = await onCreatePixCharge({
       modelId: modelId || 'lorena_noir',
       kind: 'call_plan',
       planId: plan.id,
       callMode: 'private',
       topic: cleanTopic,
+      preferredPaymentMethod: methodToUse,
     });
     if (res.ok && res.charge) {
-      setPendingPixCall({ plan, topic: cleanTopic });
+      setPendingPixCall({
+        plan,
+        topic: cleanTopic,
+        preferredPaymentMethod: methodToUse,
+      });
       setActivePixCharge(res.charge);
     } else {
-      setPixError(res.error || 'Não foi possível gerar o QR Code PIX.');
+      setRequiresTokenFallback(Boolean(res.requiresMercadoPagoToken));
+      setPixError(
+        res.error || 'Não foi possível gerar o pagamento no Mercado Pago.'
+      );
     }
   };
 
-  const handlePrivateOneOnOneCall = async () => {
+  const handlePrivateOneOnOneCall = async (
+    methodOverride?: MercadoPagoPaymentMethod
+  ) => {
     if (
       submitting ||
       isBlocked ||
@@ -255,12 +300,14 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
     ) {
       return;
     }
-    const cleanTopic = buildCleanTopic(selectedPlan);
+    const methodToUse = methodOverride || selectedPaymentMethod;
+    const cleanTopic = buildCleanTopic(selectedPlan, methodToUse);
     setSubmitting(true);
     setPixError(null);
+    setRequiresTokenFallback(false);
     try {
-      if (paymentMethod === 'pix' && onCreatePixCharge) {
-        await startCallPlanPixCharge(selectedPlan, cleanTopic);
+      if (onCreatePixCharge) {
+        await startCallPlanPixCharge(selectedPlan, cleanTopic, methodToUse);
         return;
       }
       if (canDirectCallNow) {
@@ -474,6 +521,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
           modelName={displayModelName}
           studioState={studioState}
           isAuthenticated={true}
+          mercadoPagoConfigured={Boolean(studioConfig?.mercadoPagoConfigured)}
           onSendTip={onSendTip}
           onCreatePixCharge={onCreatePixCharge}
           onCheckPixCharge={onCheckPixCharge}
@@ -692,17 +740,20 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             </div>
 
             {/* Step 2: Payment Method & Authorization */}
-            <div className="p-4 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/15 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-xs text-[#FAF4F7]">
-                  <QrCode className="w-4 h-4 text-[#38BDF8] shrink-0" />
-                  <span className="font-medium">Forma de pagamento · PIX Instantâneo</span>
-                </div>
-
-                <span className="px-3 py-1 text-[11px] font-medium rounded-full bg-[#150D1D] border border-[#F4C2D7]/20 text-[#C9BAC4] self-start sm:self-auto">
-                  Cartão em breve
-                </span>
-              </div>
+            <div className="p-4 rounded-xl bg-[#0B060F] border border-[#F4C2D7]/15 space-y-4">
+              <MercadoPagoMethodSelector
+                value={selectedPaymentMethod}
+                onChange={(next) => {
+                  setSelectedPaymentMethod(next);
+                  setPixError(null);
+                  setRequiresTokenFallback(false);
+                }}
+                mercadoPagoConfigured={Boolean(
+                  studioConfig?.mercadoPagoConfigured
+                )}
+                disabled={submitting}
+                theme="rose"
+              />
 
               <label className="flex items-start gap-2.5 text-xs text-[#C9BAC4] cursor-pointer">
                 <input
@@ -712,7 +763,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   className="mt-0.5 accent-[#F4C2D7] cursor-pointer"
                 />
                 <span>
-                  Autorizo a cobrança via PIX de{' '}
+                  Autorizo a cobrança via Mercado Pago de{' '}
                   <strong className="font-mono tabular-nums text-[#F4C2D7]">
                     {selectedPlan
                       ? BRL_FORMATTER.format(selectedPlan.priceCents / 100)
@@ -725,22 +776,27 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                   com {displayModelName}.
                 </span>
               </label>
-
-              <p className="text-[11px] text-[#38BDF8] flex items-center gap-1.5">
-                <QrCode className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  Ao clicar abaixo, geraremos o QR Code PIX + Copia e Cola para
-                  liberação verificada da sua sessão 1-para-1.
-                </span>
-              </p>
             </div>
 
             {pixError && (
               <div
                 role="alert"
-                className="p-3 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200"
+                className="p-3 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200 space-y-2"
               >
-                {pixError}
+                <p>{pixError}</p>
+                {requiresTokenFallback && selectedPlan && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPaymentMethod('pix');
+                      void handlePrivateOneOnOneCall('pix');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full bg-[#0EA5E9]/20 border border-[#38BDF8]/50 text-[#E0F2FE] hover:bg-[#0EA5E9]/30 transition-colors cursor-pointer"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Pagar agora via PIX QR Code</span>
+                  </button>
+                )}
               </div>
             )}
 
@@ -786,20 +842,12 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
                     : studioState?.callMode === 'paused'
                       ? 'Sala temporariamente fechada'
                       : submitting
-                        ? 'Processando pagamento...'
+                        ? 'Preparando pagamento Mercado Pago...'
                         : !selectedPlan
                           ? 'Selecione um plano'
-                          : paymentMethod === 'pix'
-                            ? `Pagar via PIX (${BRL_FORMATTER.format(
-                                selectedPlan.priceCents / 100
-                              )}) e Liberar Sala Privativa`
-                            : canDirectCallNow
-                              ? `Pagar ${BRL_FORMATTER.format(
-                                  selectedPlan.priceCents / 100
-                                )} e Entrar na Sala Privativa (1-para-1)`
-                              : `Pagar ${BRL_FORMATTER.format(
-                                  selectedPlan.priceCents / 100
-                                )} e Entrar na Fila Privativa (1-para-1)`}
+                          : `${getMercadoPagoMethodActionLabel(selectedPaymentMethod)} (${BRL_FORMATTER.format(
+                              selectedPlan.priceCents / 100
+                            )}) e Liberar Sala Privativa`}
                 </span>
               </button>
             </div>
@@ -841,6 +889,7 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         modelName={displayModelName}
         studioState={studioState}
         isAuthenticated={true}
+        mercadoPagoConfigured={Boolean(studioConfig?.mercadoPagoConfigured)}
         onSendTip={onSendTip}
         onCreatePixCharge={onCreatePixCharge}
         onCheckPixCharge={onCheckPixCharge}
@@ -874,9 +923,19 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
         onConfirmPixCharge && (
           <PixPaymentModal
             charge={activePixCharge}
-            title={`Pagamento PIX · ${pendingPixCall.plan.name}`}
+            title={
+              activePixCharge.preferredPaymentMethod &&
+              activePixCharge.preferredPaymentMethod !== 'pix'
+                ? `Checkout Mercado Pago · ${pendingPixCall.plan.name}`
+                : `Pagamento PIX · ${pendingPixCall.plan.name}`
+            }
             subtitle={`Chamada Privativa 1-para-1 com ${displayModelName}`}
-            confirmLabel="Já Paguei via PIX · Liberar Sala Privativa"
+            confirmLabel={
+              activePixCharge.preferredPaymentMethod &&
+              activePixCharge.preferredPaymentMethod !== 'pix'
+                ? 'Já Paguei no Mercado Pago · Liberar Sala Privativa'
+                : 'Já Paguei via PIX · Liberar Sala Privativa'
+            }
             onClose={() => {
               setActivePixCharge(null);
               setPendingPixCall(null);
@@ -887,7 +946,8 @@ export const CallQueuePanel: React.FC<CallQueuePanelProps> = ({
             onRegenerate={async () => {
               await startCallPlanPixCharge(
                 pendingPixCall.plan,
-                pendingPixCall.topic
+                pendingPixCall.topic,
+                pendingPixCall.preferredPaymentMethod
               );
             }}
             onPaid={async (res) => {

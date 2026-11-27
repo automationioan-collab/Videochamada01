@@ -53,15 +53,21 @@ import {
   type StoredWhatsappInvite,
 } from './server/modelStore.js';
 import {
-  checkMercadoPagoPaymentStatus,
   formatEmvMerchantCity,
   formatEmvMerchantName,
   generatePixChargeAssets,
+  isMercadoPagoConfigured,
   isValidPixKey,
   maskPixKeyForDisplay,
   normalizePixKey,
   sanitizePixTxid,
+  verifyMercadoPagoChargeByReferenceOrId,
+  type MercadoPagoPreferredMethod,
 } from './server/pix.js';
+import {
+  isMercadoPagoPaymentAmountValid,
+  processMercadoPagoWebhookEvent,
+} from './server/mercadopagoWebhook.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -623,6 +629,7 @@ function sanitizePublicStudioConfig(cfg: StoredStudioConfig) {
   return {
     ...rest,
     pixConfigured: Boolean(cfg.pixKey && isValidPixKey(cfg.pixKey, cfg.pixKeyType)),
+    mercadoPagoConfigured: isMercadoPagoConfigured(),
   };
 }
 
@@ -645,7 +652,29 @@ function serializePixChargeForClient(charge: StoredPixCharge) {
     ...(charge.callMode ? { callMode: charge.callMode } : {}),
     ...(charge.note ? { note: charge.note } : {}),
     status: charge.status,
+    approvalStatus:
+      charge.approvalStatus ||
+      (charge.status === 'paid'
+        ? 'aprovado'
+        : charge.status === 'expired'
+          ? 'expirado'
+          : charge.status === 'cancelled'
+            ? 'cancelado'
+            : 'pendente'),
+    ...(charge.mercadoPagoStatus
+      ? { mercadoPagoStatus: charge.mercadoPagoStatus }
+      : {}),
+    ...(charge.webhookVerifiedAt
+      ? { webhookVerifiedAt: charge.webhookVerifiedAt }
+      : {}),
     provider: charge.provider,
+    preferredPaymentMethod: charge.preferredPaymentMethod || 'pix',
+    ...(charge.checkoutUrl && charge.checkoutUrl.startsWith('https://')
+      ? { checkoutUrl: charge.checkoutUrl }
+      : {}),
+    ...(charge.paymentMethodUsed
+      ? { paymentMethodUsed: charge.paymentMethodUsed }
+      : {}),
     brCode: charge.brCode,
     qrCodeDataUrl: charge.qrCodeDataUrl,
     pixKeyMasked: maskPixKeyForDisplay(charge.pixKeyUsed, charge.pixKeyTypeUsed),
@@ -793,6 +822,7 @@ function fulfillPixCharge(
 } {
   const nowMs = Date.now();
   charge.status = 'paid';
+  charge.approvalStatus = 'aprovado';
   if (!charge.paidAt) {
     charge.paidAt = nowMs;
   }
@@ -924,6 +954,258 @@ function fulfillPixCharge(
   };
 }
 
+const inFlightPaymentVerifications = new Map<string, Promise<unknown>>();
+
+async function withPaymentVerificationLock<T>(
+  lockKey: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prev = inFlightPaymentVerifications.get(lockKey);
+  const run = (prev ? prev.catch(() => undefined) : Promise.resolve()).then(fn);
+  inFlightPaymentVerifications.set(lockKey, run);
+  try {
+    return await run;
+  } finally {
+    if (inFlightPaymentVerifications.get(lockKey) === run) {
+      inFlightPaymentVerifications.delete(lockKey);
+    }
+  }
+}
+
+function resolvePublicOriginFromRequest(req: Request): string | undefined {
+  const envOrigin = process.env.APP_URL?.trim();
+  if (envOrigin) {
+    try {
+      const parsed = new URL(envOrigin);
+      const host = parsed.hostname.toLowerCase();
+      if (
+        parsed.protocol === 'https:' &&
+        host &&
+        host !== 'localhost' &&
+        host !== '127.0.0.1' &&
+        host !== '0.0.0.0'
+      ) {
+        return parsed.origin;
+      }
+    } catch {
+      // Fallback to request headers
+    }
+  }
+
+  const forwardedProto = String(req.header('x-forwarded-proto') || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const isHttps = req.secure || forwardedProto === 'https';
+  if (!isHttps) return undefined;
+
+  const rawHost = String(
+    req.header('x-forwarded-host') || req.header('host') || ''
+  )
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+
+  if (
+    !rawHost ||
+    !/^[a-z0-9.-]+(?::\d+)?$/.test(rawHost) ||
+    rawHost.startsWith('localhost') ||
+    rawHost.startsWith('127.0.0.1') ||
+    rawHost.startsWith('0.0.0.0')
+  ) {
+    return undefined;
+  }
+
+  return `https://${rawHost}`;
+}
+
+function findPixChargeAcrossModels(params: {
+  externalReference?: string;
+  externalPaymentId?: string;
+}): {
+  model: StoredModelAccount;
+  workspace: ModelWorkspaceData;
+  charge: StoredPixCharge;
+} | null {
+  const store = getStore();
+  const extRef = params.externalReference?.trim();
+  const payId = params.externalPaymentId?.trim();
+  if (!extRef && !payId) return null;
+
+  const orderedModels = Object.values(store.models).sort(
+    (a, b) => Number(b.active) - Number(a.active)
+  );
+  for (const model of orderedModels) {
+    const workspace = store.workspaces[model.id];
+    if (!workspace || !Array.isArray(workspace.pixCharges)) continue;
+    const matchByRef = extRef
+      ? workspace.pixCharges.find((c) => c.txid === extRef)
+      : undefined;
+    if (matchByRef) {
+      return { model, workspace, charge: matchByRef };
+    }
+    const matchByPayment = payId
+      ? workspace.pixCharges.find((c) => c.externalPaymentId === payId)
+      : undefined;
+    if (matchByPayment) {
+      return { model, workspace, charge: matchByPayment };
+    }
+  }
+  return null;
+}
+
+function applyApprovedMercadoPagoVerification(params: {
+  modelId: string;
+  workspace: ModelWorkspaceData;
+  charge: StoredPixCharge;
+  verifiedPaymentId?: string;
+  paymentMethodId?: string;
+  transactionAmount?: number;
+  currencyId?: string;
+  mercadoPagoStatus?: string;
+  webhookNotificationId?: string;
+}): {
+  ok: boolean;
+  newlyPaid: boolean;
+  amountMismatch: boolean;
+  fulfillment: ReturnType<typeof fulfillPixCharge> | null;
+} {
+  const { modelId, workspace, charge } = params;
+  if (charge.status === 'cancelled') {
+    return {
+      ok: false,
+      newlyPaid: false,
+      amountMismatch: false,
+      fulfillment: null,
+    };
+  }
+
+  if (
+    !isMercadoPagoPaymentAmountValid(
+      charge,
+      params.transactionAmount,
+      params.currencyId
+    )
+  ) {
+    return {
+      ok: false,
+      newlyPaid: false,
+      amountMismatch: true,
+      fulfillment: null,
+    };
+  }
+
+  const wasAlreadyFulfilled =
+    charge.status === 'paid' &&
+    charge.approvalStatus === 'aprovado' &&
+    Boolean(charge.fulfilledAt);
+
+  if (params.verifiedPaymentId) {
+    charge.externalPaymentId = params.verifiedPaymentId;
+  }
+  if (params.paymentMethodId) {
+    charge.paymentMethodUsed = params.paymentMethodId;
+  }
+  if (typeof params.transactionAmount === 'number') {
+    charge.verifiedAmountCents = Math.round(params.transactionAmount * 100);
+  }
+  charge.mercadoPagoStatus = params.mercadoPagoStatus || 'approved';
+  charge.approvalStatus = 'aprovado';
+  charge.webhookVerifiedAt = charge.webhookVerifiedAt || Date.now();
+  if (params.webhookNotificationId) {
+    charge.webhookNotificationId = params.webhookNotificationId;
+  }
+
+  const fulfillment = fulfillPixCharge(modelId, workspace, charge);
+
+  if (!wasAlreadyFulfilled) {
+    saveStore();
+    emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+    if (charge.kind === 'call_plan') {
+      broadcastQueueSyncForModel(modelId);
+    }
+    sendToUserInModel(modelId, charge.userId, {
+      type: 'pix:charge_paid',
+      modelId,
+      chargeId: charge.id,
+      kind: charge.kind,
+      approvalStatus: charge.approvalStatus,
+      ...(fulfillment.callRequestId
+        ? { callRequestId: fulfillment.callRequestId }
+        : {}),
+    });
+  }
+
+  return {
+    ok: true,
+    newlyPaid: !wasAlreadyFulfilled,
+    amountMismatch: false,
+    fulfillment,
+  };
+}
+
+function revokeRefundedMercadoPagoCharge(params: {
+  modelId: string;
+  workspace: ModelWorkspaceData;
+  charge: StoredPixCharge;
+  mercadoPagoStatus?: string;
+  webhookNotificationId?: string;
+}): boolean {
+  const { modelId, workspace, charge } = params;
+  if (charge.status === 'cancelled' && charge.approvalStatus === 'estornado') {
+    return false;
+  }
+
+  const wasPaid = charge.status === 'paid';
+  charge.status = 'cancelled';
+  charge.approvalStatus = 'estornado';
+  charge.mercadoPagoStatus = params.mercadoPagoStatus || 'refunded';
+  charge.webhookVerifiedAt = Date.now();
+  if (params.webhookNotificationId) {
+    charge.webhookNotificationId = params.webhookNotificationId;
+  }
+
+  if (wasPaid) {
+    if (charge.kind === 'call_plan' && charge.callRequestId) {
+      const qEntry = workspace.callQueue.find(
+        (q) => q.id === charge.callRequestId
+      );
+      if (qEntry && (qEntry.status === 'waiting' || qEntry.status === 'accepted')) {
+        qEntry.status = 'cancelled';
+        qEntry.paymentStatus = 'refunded';
+        qEntry.updatedAt = Date.now();
+      }
+      if (charge.inviteId && Array.isArray(workspace.whatsappInvites)) {
+        const inv = workspace.whatsappInvites.find(
+          (i) => i.id === charge.inviteId && i.pixChargeId === charge.id
+        );
+        if (inv && inv.status === 'paid') {
+          inv.status = 'viewed';
+        }
+      }
+    } else if (
+      charge.kind === 'private_album' &&
+      Array.isArray(workspace.privateAlbumPurchases)
+    ) {
+      workspace.privateAlbumPurchases = workspace.privateAlbumPurchases.filter(
+        (p) =>
+          !(
+            p.userId === charge.userId &&
+            charge.paidAt &&
+            Math.abs(p.purchasedAt - charge.paidAt) < 15000
+          )
+      );
+    }
+  }
+
+  saveStore();
+  emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+  if (charge.kind === 'call_plan') {
+    broadcastQueueSyncForModel(modelId);
+  }
+  return true;
+}
+
 function createSlidingWindowRateLimiter(options: {
   windowMs: number;
   maxRequests: number;
@@ -975,6 +1257,12 @@ const albumUnlockRateLimiter = createSlidingWindowRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 20,
   message: 'Muitas tentativas de desbloqueio. Aguarde um minuto antes de tentar novamente.',
+});
+
+const webhookRateLimiter = createSlidingWindowRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 120,
+  message: 'Muitas notificações de webhook em sequência.',
 });
 
 async function startServer() {
@@ -1697,7 +1985,10 @@ async function startServer() {
       modelProfile: modelSelfProfile,
       allProfiles: [modelSelfProfile, ...visitorProfiles],
       studioState: workspace.studioState,
-      studioConfig: workspace.studioConfig,
+      studioConfig: {
+        ...workspace.studioConfig,
+        mercadoPagoConfigured: isMercadoPagoConfigured(),
+      },
       galleryItems: [...workspace.galleryItems].sort(
         (a, b) => a.sortOrder - b.sortOrder
       ),
@@ -1722,7 +2013,7 @@ async function startServer() {
       ),
       pixCharges: [...(workspace.pixCharges || [])]
         .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, 50)
+        .slice(0, 250)
         .map(serializePixChargeForClient),
       whatsappInvites: [...(workspace.whatsappInvites || [])]
         .sort((a, b) => b.createdAt - a.createdAt)
@@ -2053,7 +2344,13 @@ async function startServer() {
     model.updatedAt = new Date().toISOString();
     saveStore();
     emitWorkspaceRefresh(modelId, true);
-    res.json({ ok: true, studioConfig: cfg });
+    res.json({
+      ok: true,
+      studioConfig: {
+        ...cfg,
+        mercadoPagoConfigured: isMercadoPagoConfigured(),
+      },
+    });
   });
 
   app.post(
@@ -2069,8 +2366,22 @@ async function startServer() {
       const { model, workspace } = ctx;
       const body = (req.body || {}) as Record<string, unknown>;
 
+      const hasExplicitPhoto =
+        typeof body.photoUrl === 'string' && body.photoUrl.trim().length > 0;
+      const sanitizedExplicitPhoto = hasExplicitPhoto
+        ? sanitizeMediaUrl(body.photoUrl)
+        : '';
+      if (hasExplicitPhoto && !sanitizedExplicitPhoto) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'URL de foto do convite inválida. Utilize uma URL https:// ou envie uma imagem válida.',
+        });
+        return;
+      }
+
       const photoUrl =
-        sanitizeMediaUrl(body.photoUrl) ||
+        sanitizedExplicitPhoto ||
         workspace.studioConfig.whatsappInvitePhotoUrl ||
         workspace.studioConfig.heroImageUrl ||
         workspace.studioConfig.modelAvatarUrl ||
@@ -3652,6 +3963,18 @@ async function startServer() {
         firebaseUser.email?.split('@')[0] ||
         'Internauta';
 
+      const rawPreferred =
+        typeof body.preferredPaymentMethod === 'string'
+          ? body.preferredPaymentMethod.trim()
+          : 'pix';
+      const preferredPaymentMethod: MercadoPagoPreferredMethod =
+        rawPreferred === 'credit_card' ||
+        rawPreferred === 'debit_card' ||
+        rawPreferred === 'account_money' ||
+        rawPreferred === 'ticket'
+          ? rawPreferred
+          : 'pix';
+
       const id = `pix_${nowMs}_${crypto.randomBytes(3).toString('hex')}`;
       const txid = sanitizePixTxid(`MA${nowMs.toString(36).toUpperCase()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`);
 
@@ -3670,6 +3993,8 @@ async function startServer() {
           description,
           payerEmail: firebaseUser.email,
           payerName: buyerName,
+          preferredPaymentMethod,
+          publicOrigin: resolvePublicOriginFromRequest(req),
         });
 
         const charge: StoredPixCharge = {
@@ -3689,10 +4014,13 @@ async function startServer() {
           ...(note ? { note } : {}),
           ...(inviteId ? { inviteId } : {}),
           status: 'pending',
+          approvalStatus: 'pendente',
           provider: assets.provider,
+          preferredPaymentMethod: assets.preferredPaymentMethod,
           ...(assets.externalPaymentId
             ? { externalPaymentId: assets.externalPaymentId }
             : {}),
+          ...(assets.checkoutUrl ? { checkoutUrl: assets.checkoutUrl } : {}),
           brCode: assets.brCode,
           qrCodeDataUrl: assets.qrCodeDataUrl,
           pixKeyUsed: assets.pixKeyUsed,
@@ -3719,12 +4047,82 @@ async function startServer() {
           charge: serializePixChargeForClient(charge),
         });
       } catch (err) {
-        console.error('Erro ao gerar QR Code PIX:', err);
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.startsWith('MERCADOPAGO_TOKEN_REQUIRED:')) {
+          res.status(400).json({
+            ok: false,
+            requiresMercadoPagoToken: true,
+            error: msg.replace('MERCADOPAGO_TOKEN_REQUIRED: ', ''),
+          });
+          return;
+        }
+        if (msg.startsWith('MERCADOPAGO_PREFERENCE_FAILED:')) {
+          res.status(502).json({
+            ok: false,
+            requiresMercadoPagoToken: true,
+            error: msg.replace('MERCADOPAGO_PREFERENCE_FAILED: ', ''),
+          });
+          return;
+        }
+        console.error('Erro ao gerar cobrança Mercado Pago / PIX:', err);
         res.status(500).json({
           ok: false,
           error: 'Não foi possível gerar o QR Code PIX neste momento.',
         });
       }
+    }
+  );
+
+  app.post(
+    '/api/visitor/pix/reconcile',
+    requireVisitor,
+    async (req: AuthenticatedRequest, res) => {
+      const firebaseUser = req.firebaseUser!;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const ref = typeof body.ref === 'string' ? sanitizePixTxid(body.ref) : '';
+      if (!isMercadoPagoConfigured()) {
+        res.json({ ok: true, reconciledCount: 0 });
+        return;
+      }
+
+      const store = getStore();
+      let reconciledCount = 0;
+      for (const model of Object.values(store.models)) {
+        if (!model.active) continue;
+        const workspace = store.workspaces[model.id];
+        if (!workspace || !Array.isArray(workspace.pixCharges)) continue;
+        const targets = workspace.pixCharges.filter(
+          (c) =>
+            c.userId === firebaseUser.uid &&
+            c.status === 'pending' &&
+            c.expiresAt > Date.now() &&
+            (!ref || c.txid === ref)
+        );
+        for (const charge of targets.slice(-5)) {
+          await withPaymentVerificationLock(`charge:${charge.txid}`, async () => {
+            if (charge.status !== 'pending') return;
+            const verification = await verifyMercadoPagoChargeByReferenceOrId({
+              paymentId: charge.externalPaymentId,
+              externalReference: charge.txid,
+            });
+            if (verification.status === 'approved') {
+              const applied = applyApprovedMercadoPagoVerification({
+                modelId: model.id,
+                workspace,
+                charge,
+                verifiedPaymentId: verification.verifiedPaymentId,
+                paymentMethodId: verification.paymentMethodId,
+                transactionAmount: verification.transactionAmount,
+                currencyId: verification.currencyId,
+              });
+              if (applied.newlyPaid) {
+                reconciledCount += 1;
+              }
+            }
+          });
+        }
+      }
+      res.json({ ok: true, reconciledCount });
     }
   );
 
@@ -3749,36 +4147,53 @@ async function startServer() {
         return;
       }
 
-      const nowMs = Date.now();
       let fulfillment: ReturnType<typeof fulfillPixCharge> | null = null;
-      let mutated = false;
 
-      if (charge.status === 'pending' && charge.expiresAt <= nowMs) {
-        charge.status = 'expired';
-        mutated = true;
-      } else if (
-        charge.status === 'pending' &&
-        charge.provider === 'mercadopago' &&
-        charge.externalPaymentId
-      ) {
-        const mpStatus = await checkMercadoPagoPaymentStatus(
-          charge.externalPaymentId
-        );
-        if (mpStatus === 'approved') {
+      await withPaymentVerificationLock(`charge:${charge.txid}`, async () => {
+        const nowMs = Date.now();
+        if (charge.status === 'pending' && charge.expiresAt <= nowMs) {
+          charge.status = 'expired';
+          charge.approvalStatus = 'expirado';
+          saveStore();
+          emitWorkspaceRefresh(modelId, false);
+        } else if (
+          charge.status === 'pending' &&
+          (charge.provider === 'mercadopago' || isMercadoPagoConfigured())
+        ) {
+          const verification = await verifyMercadoPagoChargeByReferenceOrId({
+            paymentId: charge.externalPaymentId,
+            externalReference: charge.txid,
+          });
+          if (verification.status === 'approved') {
+            const applied = applyApprovedMercadoPagoVerification({
+              modelId,
+              workspace,
+              charge,
+              verifiedPaymentId: verification.verifiedPaymentId,
+              paymentMethodId: verification.paymentMethodId,
+              transactionAmount: verification.transactionAmount,
+              currencyId: verification.currencyId,
+              mercadoPagoStatus: verification.rawStatus || 'approved',
+            });
+            fulfillment = applied.fulfillment;
+          } else if (
+            (verification.status === 'cancelled' ||
+              verification.status === 'rejected') &&
+            charge.externalPaymentId &&
+            verification.verifiedPaymentId === charge.externalPaymentId
+          ) {
+            charge.status = 'cancelled';
+            charge.approvalStatus =
+              verification.status === 'rejected' ? 'rejeitado' : 'cancelado';
+            charge.mercadoPagoStatus =
+              verification.rawStatus || verification.status;
+            saveStore();
+            emitWorkspaceRefresh(modelId, false);
+          }
+        } else if (charge.status === 'paid') {
           fulfillment = fulfillPixCharge(modelId, workspace, charge);
-          mutated = true;
-        } else if (mpStatus === 'cancelled' || mpStatus === 'rejected') {
-          charge.status = 'cancelled';
-          mutated = true;
         }
-      } else if (charge.status === 'paid') {
-        fulfillment = fulfillPixCharge(modelId, workspace, charge);
-      }
-
-      if (mutated) {
-        saveStore();
-        emitWorkspaceRefresh(modelId, charge.kind === 'tip');
-      }
+      });
 
       res.json({
         ok: true,
@@ -3822,6 +4237,7 @@ async function startServer() {
       }
       if (charge.status === 'expired' || charge.expiresAt <= Date.now()) {
         charge.status = 'expired';
+        charge.approvalStatus = 'expirado';
         saveStore();
         res.status(410).json({
           ok: false,
@@ -3830,45 +4246,81 @@ async function startServer() {
         return;
       }
 
-      if (charge.status !== 'paid') {
-        if (charge.provider === 'mercadopago') {
-          const mpStatus = charge.externalPaymentId
-            ? await checkMercadoPagoPaymentStatus(charge.externalPaymentId)
-            : 'pending';
-          if (mpStatus !== 'approved') {
-            res.status(202).json({
-              ok: false,
-              pending: true,
-              charge: serializePixChargeForClient(charge),
-              error:
-                'Pagamento PIX ainda aguardando compensação bancária. Se já pagou, aguarde alguns segundos e tente confirmar novamente.',
-            });
-            return;
-          }
-        } else {
-          // Static BACEN key cannot be self-verified by the payer; notify the model's private panel to confirm receipt
-          charge.visitorReportedPaidAt = Date.now();
-          saveStore();
-          emitWorkspaceRefresh(modelId, false);
-          res.status(202).json({
-            ok: false,
-            pending: true,
-            charge: serializePixChargeForClient(charge),
-            error:
-              'Pagamento sinalizado! A modelo recebeu seu aviso e liberará seu acesso assim que confirmar o PIX no painel privativo dela.',
-          });
-          return;
-        }
-      }
+      const result = await withPaymentVerificationLock(
+        `charge:${charge.txid}`,
+        async () => {
+          if (charge.status !== 'paid') {
+            if (charge.provider === 'mercadopago' || isMercadoPagoConfigured()) {
+              const verification = await verifyMercadoPagoChargeByReferenceOrId({
+                paymentId: charge.externalPaymentId,
+                externalReference: charge.txid,
+              });
+              if (verification.status !== 'approved') {
+                return { kind: 'pending_mp' as const };
+              }
+              const applied = applyApprovedMercadoPagoVerification({
+                modelId,
+                workspace,
+                charge,
+                verifiedPaymentId: verification.verifiedPaymentId,
+                paymentMethodId: verification.paymentMethodId,
+                transactionAmount: verification.transactionAmount,
+                currencyId: verification.currencyId,
+              });
+              if (applied.amountMismatch || !applied.ok) {
+                return { kind: 'amount_mismatch' as const };
+              }
+              return { kind: 'paid' as const, fulfillment: applied.fulfillment };
+            }
 
-      const fulfillment = fulfillPixCharge(modelId, workspace, charge);
-      saveStore();
-      emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+            // Static BACEN key cannot be self-verified by the payer; notify the model's private panel to confirm receipt
+            charge.visitorReportedPaidAt = Date.now();
+            saveStore();
+            emitWorkspaceRefresh(modelId, false);
+            return { kind: 'pending_manual' as const };
+          }
+
+          return {
+            kind: 'paid' as const,
+            fulfillment: fulfillPixCharge(modelId, workspace, charge),
+          };
+        }
+      );
+
+      if (result.kind === 'pending_mp') {
+        res.status(202).json({
+          ok: false,
+          pending: true,
+          charge: serializePixChargeForClient(charge),
+          error:
+            'Pagamento ainda aguardando compensação no Mercado Pago. Se já concluiu o PIX ou Checkout, aguarde alguns segundos e tente confirmar novamente.',
+        });
+        return;
+      }
+      if (result.kind === 'amount_mismatch') {
+        res.status(409).json({
+          ok: false,
+          charge: serializePixChargeForClient(charge),
+          error:
+            'Valor ou moeda divergente da cobrança gerada no estúdio. Entre em contato com a modelo.',
+        });
+        return;
+      }
+      if (result.kind === 'pending_manual') {
+        res.status(202).json({
+          ok: false,
+          pending: true,
+          charge: serializePixChargeForClient(charge),
+          error:
+            'Pagamento sinalizado! A modelo recebeu seu aviso e liberará seu acesso assim que confirmar o PIX no painel privativo dela.',
+        });
+        return;
+      }
 
       res.json({
         ok: true,
         charge: serializePixChargeForClient(charge),
-        ...fulfillment,
+        ...(result.fulfillment || {}),
       });
     }
   );
@@ -3892,6 +4344,7 @@ async function startServer() {
       if (!charge) return void res.status(404).json({ ok: false });
       if (charge.status === 'pending') {
         charge.status = 'cancelled';
+        charge.approvalStatus = 'cancelado';
         saveStore();
         emitWorkspaceRefresh(modelId, false);
       }
@@ -3921,18 +4374,36 @@ async function startServer() {
         });
         return;
       }
-      if (charge.status === 'expired' || (charge.status === 'pending' && charge.expiresAt <= Date.now())) {
+      if (
+        charge.status === 'expired' ||
+        (charge.status === 'pending' && charge.expiresAt <= Date.now())
+      ) {
         charge.status = 'expired';
+        charge.approvalStatus = 'expirado';
         saveStore();
         res.status(410).json({
           ok: false,
-          error: 'Este QR Code PIX já expirou. Solicite um novo pagamento ao internauta.',
+          error:
+            'Este QR Code PIX já expirou. Solicite um novo pagamento ao internauta.',
         });
         return;
       }
       const fulfillment = fulfillPixCharge(modelId, ctx.workspace, charge);
       saveStore();
       emitWorkspaceRefresh(modelId, charge.kind === 'tip');
+      if (charge.kind === 'call_plan') {
+        broadcastQueueSyncForModel(modelId);
+      }
+      sendToUserInModel(modelId, charge.userId, {
+        type: 'pix:charge_paid',
+        modelId,
+        chargeId: charge.id,
+        kind: charge.kind,
+        approvalStatus: charge.approvalStatus,
+        ...(fulfillment.callRequestId
+          ? { callRequestId: fulfillment.callRequestId }
+          : {}),
+      });
       res.json({
         ok: true,
         charge: serializePixChargeForClient(charge),
@@ -3958,10 +4429,47 @@ async function startServer() {
       }
       if (charge.status === 'pending') {
         charge.status = 'cancelled';
+        charge.approvalStatus = 'cancelado';
         saveStore();
         emitWorkspaceRefresh(modelId, false);
       }
       res.json({ ok: true, charge: serializePixChargeForClient(charge) });
+    }
+  );
+
+  // Mercado Pago Webhook health/verification ping
+  app.get('/api/webhooks/mercadopago', webhookRateLimiter, (_req, res) => {
+    res.status(200).json({
+      ok: true,
+      webhook: 'mercadopago',
+      configured: isMercadoPagoConfigured(),
+      hmacEnforced: Boolean(process.env.MERCADOPAGO_WEBHOOK_SECRET?.trim()),
+    });
+  });
+
+  // Mercado Pago Webhook & IPN (HMAC verification + authoritative server-to-server lookup + automatic 'aprovado' update)
+  app.post(
+    '/api/webhooks/mercadopago',
+    webhookRateLimiter,
+    async (req: Request, res: Response) => {
+      try {
+        const result = await processMercadoPagoWebhookEvent(req, {
+          withVerificationLock: withPaymentVerificationLock,
+          findCharge: findPixChargeAcrossModels,
+          applyApprovedPayment: applyApprovedMercadoPagoVerification,
+          revokeRefundedCharge: revokeRefundedMercadoPagoCharge,
+          saveStore,
+          emitWorkspaceRefresh,
+        });
+        const { httpStatus, ...payload } = result;
+        res.status(httpStatus).json(payload);
+      } catch (err) {
+        console.error('Erro ao processar webhook do Mercado Pago:', err);
+        res.status(500).json({
+          ok: false,
+          error: 'Erro temporário ao processar notificação do Mercado Pago.',
+        });
+      }
     }
   );
 
@@ -4733,6 +5241,26 @@ async function startServer() {
         }
       }
     });
+  });
+
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'Rota da API não encontrada.' });
+  });
+
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    if (req.path.startsWith('/api/')) {
+      console.error('Erro inesperado na API:', err);
+      res.status(500).json({
+        ok: false,
+        error: 'Erro interno temporário ao processar sua solicitação.',
+      });
+      return;
+    }
+    next(err);
   });
 
   if (process.env.NODE_ENV !== 'production') {

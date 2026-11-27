@@ -9,9 +9,14 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react';
+import {
+  MercadoPagoMethodSelector,
+  getMercadoPagoMethodActionLabel,
+} from './MercadoPagoMethodSelector';
 import type {
   CallEntryIntent,
   CallPlan,
+  MercadoPagoPaymentMethod,
   PublicWhatsappInviteData,
 } from '../types/studio';
 
@@ -22,7 +27,7 @@ const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {
 
 export interface InviteCheckoutSelection {
   planId: string;
-  paymentMethod: 'pix' | 'card';
+  paymentMethod: MercadoPagoPaymentMethod;
   callMode: CallEntryIntent;
   topic: string;
 }
@@ -32,6 +37,9 @@ interface WhatsappInviteCheckoutViewProps {
   isAuthenticated: boolean;
   isAdmin: boolean;
   isBlocked?: boolean;
+  mercadoPagoConfigured?: boolean;
+  requiresTokenFallback?: boolean;
+  onFallbackToPix?: () => void;
   activePlans: CallPlan[];
   submitting: boolean;
   errorMsg: string | null;
@@ -49,6 +57,9 @@ export const WhatsappInviteCheckoutView: React.FC<
   isAuthenticated,
   isAdmin,
   isBlocked = false,
+  mercadoPagoConfigured = false,
+  requiresTokenFallback = false,
+  onFallbackToPix,
   activePlans,
   submitting,
   errorMsg,
@@ -75,7 +86,8 @@ export const WhatsappInviteCheckoutView: React.FC<
     return plans[0]?.id || '';
   });
   const [callMode] = useState<CallEntryIntent>('private');
-  const paymentMethod = 'pix' as const;
+  const [paymentMethod, setPaymentMethod] =
+    useState<MercadoPagoPaymentMethod>('pix');
   const [topic, setTopic] = useState<string>('');
   const [photoFailed, setPhotoFailed] = useState(false);
 
@@ -226,7 +238,7 @@ export const WhatsappInviteCheckoutView: React.FC<
               Pagamento e Contratação da Videochamada
             </h2>
             <p className="text-sm text-[#C9BAC4]">
-              Confirme o pacote desejado e conclua o pagamento via PIX QR Code ou Cartão para iniciar sua videochamada com {displayName}.
+              Confirme o pacote desejado e conclua o pagamento exclusivo pelo Mercado Pago (PIX QR Code, Cartão, Débito ou Saldo) para iniciar sua videochamada com {displayName}.
             </p>
           </div>
 
@@ -326,23 +338,13 @@ export const WhatsappInviteCheckoutView: React.FC<
 
           {/* Payment Method */}
           <div className="p-4 rounded-2xl bg-[#0B060F] border border-[#F4C2D7]/15 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-xs text-[#FAF4F7]">
-                <QrCode className="w-4 h-4 text-[#38BDF8] shrink-0" />
-                <span className="font-medium">3. Pagamento via PIX QR Code</span>
-              </div>
-
-              <span className="px-3 py-1 text-[11px] font-medium rounded-full bg-[#150D1D] border border-[#F4C2D7]/20 text-[#C9BAC4] self-start sm:self-auto">
-                Cartão em breve
-              </span>
-            </div>
-
-            <p className="text-xs text-[#38BDF8] flex items-center gap-2">
-              <QrCode className="w-4 h-4 shrink-0" />
-              <span>
-                Geramos seu QR Code PIX + Copia e Cola na hora. Após a confirmação do pagamento, sua videochamada com {displayName} é liberada.
-              </span>
-            </p>
+            <MercadoPagoMethodSelector
+              value={paymentMethod}
+              onChange={setPaymentMethod}
+              mercadoPagoConfigured={mercadoPagoConfigured}
+              disabled={submitting}
+              theme="rose"
+            />
           </div>
 
           {/* Optional Note */}
@@ -367,9 +369,22 @@ export const WhatsappInviteCheckoutView: React.FC<
           {(errorMsg || authError) && (
             <div
               role="alert"
-              className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200"
+              className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200 space-y-2"
             >
-              {errorMsg || authError}
+              <p>{errorMsg || authError}</p>
+              {requiresTokenFallback && onFallbackToPix && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentMethod('pix');
+                    onFallbackToPix();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full bg-[#0EA5E9]/20 border border-[#38BDF8]/50 text-[#E0F2FE] hover:bg-[#0EA5E9]/30 transition-colors cursor-pointer"
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  <span>Pagar agora via PIX QR Code</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -384,14 +399,14 @@ export const WhatsappInviteCheckoutView: React.FC<
               <QrCode className="w-4 h-4 shrink-0" />
               <span>
                 {submitting
-                  ? 'Preparando QR Code PIX...'
+                  ? 'Preparando pagamento Mercado Pago...'
                   : !isAuthenticated
-                    ? `Entrar com Google e Gerar PIX · ${
+                    ? `Entrar com Google e Pagar · ${
                         selectedPlan
                           ? BRL_FORMATTER.format(selectedPlan.priceCents / 100)
                           : ''
                       }`
-                    : `Gerar QR Code PIX e Contratar · ${
+                    : `${getMercadoPagoMethodActionLabel(paymentMethod)} e Contratar · ${
                         selectedPlan
                           ? BRL_FORMATTER.format(selectedPlan.priceCents / 100)
                           : ''
@@ -403,7 +418,7 @@ export const WhatsappInviteCheckoutView: React.FC<
               <ShieldCheck className="w-3.5 h-3.5 text-[#86EFAC] shrink-0" />
               <span>
                 {!isAuthenticated
-                  ? 'Ao entrar com sua conta Google, o checkout PIX abre automaticamente para você concluir a videochamada.'
+                  ? 'Ao entrar com sua conta Google, o checkout Mercado Pago abre automaticamente para você concluir a videochamada.'
                   : 'Sessão segura com criptografia de vídeo em tempo real.'}
               </span>
             </p>

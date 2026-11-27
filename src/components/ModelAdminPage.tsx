@@ -85,6 +85,7 @@ import { FinancialEarningsDashboard } from './FinancialEarningsDashboard';
 import { InterestMessagesPanel } from './InterestMessagesPanel';
 import { MediaManagementPanel } from './MediaManagementPanel';
 import { OperatingSchedulePanel } from './OperatingSchedulePanel';
+import { PixSalesAnalyticsPanel } from './PixSalesAnalyticsPanel';
 import { TechVideoCallButton } from './TechEffects';
 import { TipGoalManagerCard } from './TipGoalManagerCard';
 import { UserControlPanel } from './UserControlPanel';
@@ -1687,9 +1688,18 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                 Dashboard Financeiro e Histórico de Sessões
               </h2>
               <p className="text-sm text-[#C9BAC4]">
-                Visualize seus ganhos diários e mensais com base nas chamadas concluídas e gerencie todo o histórico financeiro.
+                Visualize o volume de vendas via PIX com filtros por data, modelo e plano de chamada, além de seus ganhos diários e mensais.
               </p>
             </section>
+
+            <PixSalesAnalyticsPanel
+              pixCharges={pixCharges}
+              callPlans={callPlans}
+              activeModelId={activeModelId}
+              modelName={modelName}
+              themeAccentColor="#38BDF8"
+              themeAccentSoftColor="#E0F2FE"
+            />
 
             <TipGoalManagerCard
               studioState={studioState}
@@ -1697,7 +1707,7 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
               onUpdateStudioState={onUpdateStudioState}
             />
 
-            {/* PIX Payments & QR Code Verification Card */}
+            {/* Mercado Pago & PIX Payments Verification Card */}
             <section className="luxury-card border border-[#F4C2D7]/15 rounded-2xl overflow-hidden">
               <div className="px-6 py-5 border-b border-[#F4C2D7]/15 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
@@ -1706,10 +1716,12 @@ export const ModelAdminPage: React.FC<ModelAdminPageProps> = ({
                   </div>
                   <div>
                     <h3 className="font-display text-xl font-semibold text-[#FAF4F7]">
-                      Pagamentos PIX (QR Code & Confirmação)
+                      Pagamentos Mercado Pago & PIX
                     </h3>
                     <p className="text-xs text-[#C9BAC4]">
-                      Acompanhe QR Codes gerados e confirme manualmente caso o internauta já tenha concluído o PIX.
+                      {studioConfig?.mercadoPagoConfigured
+                        ? 'Mercado Pago API Ativo (Confirmação Automática via Webhook + Checkout Pro).'
+                        : 'PIX Direto Ativo (Chave EVP · Adicione MERCADOPAGO_ACCESS_TOKEN nos Secrets para Cartão e confirmação instantânea).'}
                     </p>
                   </div>
                 </div>

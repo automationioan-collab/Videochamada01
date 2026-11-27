@@ -1694,6 +1694,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   modelName={modelName}
                   summary={privateAlbumSummary}
                   isAuthenticated={false}
+                  mercadoPagoConfigured={Boolean(
+                    studioConfig?.mercadoPagoConfigured
+                  )}
+                  authError={authError}
                   onRequireAuth={onRequirePrivateAlbumAuth || onEnterVideoCall}
                   onUnlock={onUnlockPrivateAlbum}
                 />
@@ -1709,6 +1713,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   modelName={modelName}
                   studioState={liveStudioState}
                   isAuthenticated={false}
+                  mercadoPagoConfigured={Boolean(
+                    studioConfig?.mercadoPagoConfigured
+                  )}
                   onRequireAuth={onRequirePrivateAlbumAuth || onEnterVideoCall}
                 />
               </div>

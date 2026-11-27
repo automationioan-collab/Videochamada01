@@ -36,6 +36,7 @@ import type {
   InterestMessageStatus,
   MediaAssetType,
   MediaVisibility,
+  MercadoPagoPaymentMethod,
   ModelAccountSummary,
   PixChargeKind,
   PixChargeRecord,
@@ -1741,40 +1742,160 @@ export function useStudioAuth() {
       callMode?: 'group' | 'private';
       note?: string;
       inviteId?: string;
-    }): Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }> => {
+      preferredPaymentMethod?: MercadoPagoPaymentMethod;
+    }): Promise<{
+      ok: boolean;
+      charge?: PixChargeRecord;
+      error?: string;
+      requiresMercadoPagoToken?: boolean;
+    }> => {
       if (!user) {
         return {
           ok: false,
-          error: 'Entre com sua conta Google para gerar o QR Code PIX.',
+          error: 'Entre com sua conta Google para concluir o pagamento via Mercado Pago.',
         };
       }
+
+      let headers: Record<string, string>;
       try {
-        const headers = await getVisitorHeaders();
-        const res = await fetch('/api/visitor/pix/charges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify(input),
-        });
-        const json = (await res.json()) as {
+        headers = await getVisitorHeaders();
+      } catch {
+        return {
+          ok: false,
+          error:
+            'Sua sessão Google precisa ser atualizada. Clique em Sair e entre novamente com o Google.',
+        };
+      }
+
+      const payloadText = JSON.stringify(input);
+
+      const postViaXhr = (reqHeaders: Record<string, string>) =>
+        new Promise<{ status: number; ok: boolean; text: string }>(
+          (resolve, reject) => {
+            try {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', '/api/visitor/pix/charges', true);
+              xhr.timeout = 20000;
+              xhr.setRequestHeader('Content-Type', 'application/json');
+              xhr.setRequestHeader('Accept', 'application/json');
+              Object.entries(reqHeaders).forEach(([k, v]) => {
+                if (v) xhr.setRequestHeader(k, v);
+              });
+              xhr.onload = () => {
+                resolve({
+                  status: xhr.status,
+                  ok: xhr.status >= 200 && xhr.status < 300,
+                  text: xhr.responseText || '',
+                });
+              };
+              xhr.onerror = () => reject(new Error('XHR network error'));
+              xhr.ontimeout = () => reject(new Error('XHR timeout'));
+              xhr.send(payloadText);
+            } catch (err) {
+              reject(err);
+            }
+          }
+        );
+
+      const requestCharge = async (
+        reqHeaders: Record<string, string>
+      ): Promise<{
+        status: number;
+        ok: boolean;
+        text: string;
+      }> => {
+        try {
+          const res = await fetch('/api/visitor/pix/charges', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              ...reqHeaders,
+            },
+            body: payloadText,
+          });
+          const text = await res.text();
+          return { status: res.status, ok: res.ok, text };
+        } catch {
+          await new Promise((r) => window.setTimeout(r, 400));
+          return await postViaXhr(reqHeaders);
+        }
+      };
+
+      try {
+        let result = await requestCharge(headers);
+        if (result.status === 401) {
+          try {
+            const freshToken = await user.getIdToken(true);
+            result = await requestCharge({
+              Authorization: `Bearer ${freshToken}`,
+            });
+          } catch {
+            // Keep original 401 result if token refresh fails
+          }
+        }
+        let json: {
           ok?: boolean;
           charge?: PixChargeRecord;
           error?: string;
-        };
-        if (res.ok && json.ok && json.charge) {
+          requiresMercadoPagoToken?: boolean;
+        } = {};
+        if (result.text) {
+          try {
+            json = JSON.parse(result.text) as typeof json;
+          } catch {
+            return {
+              ok: false,
+              error: `Resposta inesperada do servidor de pagamentos (HTTP ${result.status || 502}). Tente novamente em instantes.`,
+            };
+          }
+        }
+        if (result.ok && json.ok && json.charge) {
           return { ok: true, charge: json.charge };
         }
         return {
           ok: false,
-          error: json.error || 'Não foi possível gerar o QR Code PIX.',
+          requiresMercadoPagoToken: Boolean(json.requiresMercadoPagoToken),
+          error:
+            json.error ||
+            `Não foi possível gerar a cobrança no Mercado Pago (HTTP ${result.status || 500}).`,
         };
       } catch {
         return {
           ok: false,
-          error: 'Falha de conexão ao gerar o QR Code PIX.',
+          error:
+            'Falha de conexão com o servidor de pagamentos. Recarregue a página e tente novamente.',
         };
       }
     },
     [getVisitorHeaders, user]
+  );
+
+  const reconcileMercadoPagoReturn = useCallback(
+    async (ref?: string): Promise<number> => {
+      if (!user) return 0;
+      try {
+        const headers = await getVisitorHeaders();
+        const res = await fetch('/api/visitor/pix/reconcile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ ref: ref || '' }),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          reconciledCount?: number;
+        };
+        const count = Number(json.reconciledCount || 0);
+        if (count > 0) {
+          await refreshWorkspace();
+          await refreshPublicModels();
+        }
+        return count;
+      } catch {
+        return 0;
+      }
+    },
+    [getVisitorHeaders, refreshPublicModels, refreshWorkspace, user]
   );
 
   const applyPixFulfillmentSideEffects = useCallback(
@@ -1806,15 +1927,49 @@ export function useStudioAuth() {
       if (!user) {
         return { ok: false, error: 'Autenticação necessária.' };
       }
+      const url = `/api/visitor/pix/charges/${encodeURIComponent(
+        chargeId
+      )}?modelId=${encodeURIComponent(modelId)}`;
       try {
         const headers = await getVisitorHeaders();
-        const res = await fetch(
-          `/api/visitor/pix/charges/${encodeURIComponent(
-            chargeId
-          )}?modelId=${encodeURIComponent(modelId)}`,
-          { headers }
-        );
-        const json = (await res.json()) as {
+        let status = 0;
+        let ok = false;
+        let text = '';
+        try {
+          const res = await fetch(url, {
+            headers: { Accept: 'application/json', ...headers },
+          });
+          status = res.status;
+          ok = res.ok;
+          text = await res.text();
+        } catch {
+          const xhrRes = await new Promise<{
+            status: number;
+            ok: boolean;
+            text: string;
+          }>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.timeout = 15000;
+            xhr.setRequestHeader('Accept', 'application/json');
+            Object.entries(headers).forEach(([k, v]) => {
+              if (v) xhr.setRequestHeader(k, v);
+            });
+            xhr.onload = () =>
+              resolve({
+                status: xhr.status,
+                ok: xhr.status >= 200 && xhr.status < 300,
+                text: xhr.responseText || '',
+              });
+            xhr.onerror = () => reject(new Error('XHR error'));
+            xhr.ontimeout = () => reject(new Error('XHR timeout'));
+            xhr.send();
+          });
+          status = xhrRes.status;
+          ok = xhrRes.ok;
+          text = xhrRes.text;
+        }
+        const json = (text ? JSON.parse(text) : {}) as {
           ok?: boolean;
           charge?: PixChargeRecord;
           albumToken?: string;
@@ -1828,17 +1983,18 @@ export function useStudioAuth() {
           await applyPixFulfillmentSideEffects(json);
         }
         return {
-          ok: Boolean(res.ok && json.ok),
+          ok: Boolean(ok && json.ok),
           charge: json.charge,
           albumToken: json.albumToken,
           items: json.items,
           summary: json.summary,
           studioState: json.studioState,
           callRequestId: json.callRequestId,
-          error: json.error,
+          error:
+            json.error || (!ok ? `HTTP ${status} ao consultar pagamento.` : undefined),
         };
       } catch {
-        return { ok: false, error: 'Falha ao consultar status do PIX.' };
+        return { ok: false, error: 'Falha ao consultar status do pagamento.' };
       }
     },
     [applyPixFulfillmentSideEffects, getVisitorHeaders, user]
@@ -1849,17 +2005,63 @@ export function useStudioAuth() {
       if (!user) {
         return { ok: false, error: 'Autenticação necessária.' };
       }
+      const url = `/api/visitor/pix/charges/${encodeURIComponent(
+        chargeId
+      )}/confirm`;
+      const payloadText = JSON.stringify({ modelId });
       try {
-        const headers = await getVisitorHeaders();
-        const res = await fetch(
-          `/api/visitor/pix/charges/${encodeURIComponent(chargeId)}/confirm`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...headers },
-            body: JSON.stringify({ modelId }),
+        let headers = await getVisitorHeaders();
+        const sendConfirm = async (reqHeaders: Record<string, string>) => {
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                ...reqHeaders,
+              },
+              body: payloadText,
+            });
+            return { status: res.status, ok: res.ok, text: await res.text() };
+          } catch {
+            return await new Promise<{
+              status: number;
+              ok: boolean;
+              text: string;
+            }>((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', url, true);
+              xhr.timeout = 18000;
+              xhr.setRequestHeader('Content-Type', 'application/json');
+              xhr.setRequestHeader('Accept', 'application/json');
+              Object.entries(reqHeaders).forEach(([k, v]) => {
+                if (v) xhr.setRequestHeader(k, v);
+              });
+              xhr.onload = () =>
+                resolve({
+                  status: xhr.status,
+                  ok: xhr.status >= 200 && xhr.status < 300,
+                  text: xhr.responseText || '',
+                });
+              xhr.onerror = () => reject(new Error('XHR error'));
+              xhr.ontimeout = () => reject(new Error('XHR timeout'));
+              xhr.send(payloadText);
+            });
           }
-        );
-        const json = (await res.json()) as {
+        };
+
+        let result = await sendConfirm(headers);
+        if (result.status === 401) {
+          try {
+            const freshToken = await user.getIdToken(true);
+            headers = { Authorization: `Bearer ${freshToken}` };
+            result = await sendConfirm(headers);
+          } catch {
+            // Keep 401 result
+          }
+        }
+
+        const json = (result.text ? JSON.parse(result.text) : {}) as {
           ok?: boolean;
           pending?: boolean;
           charge?: PixChargeRecord;
@@ -1870,7 +2072,7 @@ export function useStudioAuth() {
           callRequestId?: string;
           error?: string;
         };
-        if (res.ok && json.ok) {
+        if (result.ok && json.ok) {
           await applyPixFulfillmentSideEffects(json);
           return {
             ok: true,
@@ -1886,12 +2088,12 @@ export function useStudioAuth() {
           ok: false,
           pending: Boolean(json.pending),
           charge: json.charge,
-          error: json.error || 'Pagamento PIX ainda não confirmado.',
+          error: json.error || 'Pagamento ainda não confirmado.',
         };
       } catch {
         return {
           ok: false,
-          error: 'Falha de conexão ao confirmar o pagamento PIX.',
+          error: 'Falha de conexão ao confirmar o pagamento.',
         };
       }
     },
@@ -2094,6 +2296,7 @@ export function useStudioAuth() {
     fetchPrivateAlbumItems,
     purchasePrivateAlbum,
     createPixCharge,
+    reconcileMercadoPagoReturn,
     checkPixChargeStatus,
     confirmPixCharge,
     cancelPixCharge,

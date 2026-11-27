@@ -15,8 +15,13 @@ import {
   Unlock,
   X,
 } from 'lucide-react';
+import {
+  MercadoPagoMethodSelector,
+  getMercadoPagoMethodActionLabel,
+} from './MercadoPagoMethodSelector';
 import { PixPaymentModal, type PixConfirmationResponse } from './PixPaymentModal';
 import type {
+  MercadoPagoPaymentMethod,
   PixChargeKind,
   PixChargeRecord,
   PrivateAlbumItemRecord,
@@ -33,6 +38,8 @@ interface PrivateAlbumViewerProps {
   modelName: string;
   summary: PrivateAlbumSummary | null;
   isAuthenticated?: boolean;
+  mercadoPagoConfigured?: boolean;
+  authError?: string | null;
   initialUnlockedItems?: PrivateAlbumItemRecord[];
   onPurchaseAlbum?: (
     modelId: string,
@@ -52,7 +59,13 @@ interface PrivateAlbumViewerProps {
     topic?: string;
     callMode?: 'group' | 'private';
     note?: string;
-  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+    preferredPaymentMethod?: MercadoPagoPaymentMethod;
+  }) => Promise<{
+    ok: boolean;
+    charge?: PixChargeRecord;
+    error?: string;
+    requiresMercadoPagoToken?: boolean;
+  }>;
   onCheckPixCharge?: (
     modelId: string,
     chargeId: string
@@ -107,6 +120,8 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
   modelName,
   summary,
   isAuthenticated = false,
+  mercadoPagoConfigured = false,
+  authError = null,
   initialUnlockedItems,
   onPurchaseAlbum,
   onCreatePixCharge,
@@ -116,11 +131,13 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
   onRequireAuth,
   onUnlock,
 }) => {
-  const paymentMethod = 'pix' as const;
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<MercadoPagoPaymentMethod>('pix');
   const [purchasing, setPurchasing] = useState(false);
   const [activePixCharge, setActivePixCharge] = useState<PixChargeRecord | null>(
     null
   );
+  const [requiresTokenFallback, setRequiresTokenFallback] = useState(false);
   const [showPasswordFallback, setShowPasswordFallback] = useState(false);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -136,33 +153,49 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
 
-  // Sync unlocked vault whenever model changes or visitor paid state refreshes from server
+  // Reset modal & local selection ONLY when switching models (not on workspace background refreshes!)
+  useEffect(() => {
+    setActivePixCharge(null);
+    setRequiresTokenFallback(false);
+    setPassword('');
+    setSelectedIndex(null);
+    setUnlockError(null);
+  }, [modelId]);
+
+  // Sync unlocked vault whenever paid access is granted or refreshed from server
   useEffect(() => {
     if (summary?.hasPaidAccess && initialUnlockedItems) {
       setUnlockedItems(initialUnlockedItems);
       setUnlockError(null);
-    } else {
-      setUnlockedItems(null);
+      setActivePixCharge(null);
+    } else if (!summary?.hasPaidAccess) {
+      setUnlockedItems((prev) => (prev !== null && summary ? null : prev));
     }
-    setActivePixCharge(null);
-    setPassword('');
-    setSelectedIndex(null);
-  }, [initialUnlockedItems, modelId, summary?.hasPaidAccess]);
+  }, [initialUnlockedItems, summary, summary?.hasPaidAccess]);
 
-  const generateAlbumPixCharge = async () => {
-    if (!onCreatePixCharge) return;
+  const generateAlbumCharge = async (
+    methodOverride?: MercadoPagoPaymentMethod
+  ) => {
+    if (!onCreatePixCharge) {
+      setUnlockError('Serviço de pagamento temporariamente indisponível.');
+      return;
+    }
+    const methodToUse = methodOverride || selectedPaymentMethod;
     setPurchasing(true);
     setUnlockError(null);
+    setRequiresTokenFallback(false);
     try {
       const res = await onCreatePixCharge({
         modelId,
         kind: 'private_album',
+        preferredPaymentMethod: methodToUse,
       });
       if (res.ok && res.charge) {
         setActivePixCharge(res.charge);
       } else {
+        setRequiresTokenFallback(Boolean(res.requiresMercadoPagoToken));
         setUnlockError(
-          res.error || 'Não foi possível gerar o QR Code PIX para o álbum.'
+          res.error || 'Não foi possível gerar o pagamento no Mercado Pago.'
         );
       }
     } finally {
@@ -177,16 +210,19 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
     }
     if (purchasing) return;
 
-    if (paymentMethod === 'pix' && onCreatePixCharge) {
-      await generateAlbumPixCharge();
+    if (onCreatePixCharge) {
+      await generateAlbumCharge(selectedPaymentMethod);
       return;
     }
 
-    if (!onPurchaseAlbum) return;
+    if (!onPurchaseAlbum) {
+      setUnlockError('Serviço de pagamento indisponível no momento.');
+      return;
+    }
     setPurchasing(true);
     setUnlockError(null);
     try {
-      const res = await onPurchaseAlbum(modelId, paymentMethod);
+      const res = await onPurchaseAlbum(modelId, 'pix');
       if (res.ok) {
         setUnlockedItems(res.items || []);
       } else {
@@ -343,20 +379,39 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
             </div>
 
             <div className="lg:col-span-5 rounded-2xl bg-[#070B1E]/90 border border-[#818CF8]/25 p-5 space-y-4">
-              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-[#161F49]/80 border border-[#38BDF8]/40 text-xs text-[#F8FAFC]">
-                <span className="inline-flex items-center gap-2 font-medium">
-                  <QrCode className="w-4 h-4 text-[#38BDF8]" />
-                  <span>PIX QR Code · Liberação Verificada</span>
-                </span>
-                <span className="text-[11px] text-[#B6C2E2]">
-                  Cartão em breve
-                </span>
-              </div>
+              <MercadoPagoMethodSelector
+                value={selectedPaymentMethod}
+                onChange={(next) => {
+                  setSelectedPaymentMethod(next);
+                  setUnlockError(null);
+                  setRequiresTokenFallback(false);
+                }}
+                mercadoPagoConfigured={mercadoPagoConfigured}
+                disabled={purchasing}
+                compact
+                theme="indigo"
+              />
 
-              {unlockError && (
-                <p role="alert" className="text-xs text-red-300">
-                  {unlockError}
-                </p>
+              {(unlockError || authError) && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-xl bg-red-950/40 border border-red-500/35 text-xs text-red-200 space-y-2"
+                >
+                  <p>{unlockError || authError}</p>
+                  {requiresTokenFallback && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPaymentMethod('pix');
+                        void generateAlbumCharge('pix');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-full bg-[#0EA5E9]/20 border border-[#38BDF8]/50 text-[#E0F2FE] hover:bg-[#0EA5E9]/30 transition-colors cursor-pointer"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Pagar agora via PIX QR Code</span>
+                    </button>
+                  )}
+                </div>
               )}
 
               <button
@@ -372,10 +427,10 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
                 )}
                 <span>
                   {purchasing
-                    ? 'Gerando QR Code PIX...'
+                    ? 'Preparando pagamento Mercado Pago...'
                     : !isAuthenticated
-                      ? `Entrar e Pagar ${BRL_FORMATTER.format(priceCents / 100)} via PIX`
-                      : `Gerar QR Code PIX · ${BRL_FORMATTER.format(priceCents / 100)}`}
+                      ? `Entrar com Google e Pagar ${BRL_FORMATTER.format(priceCents / 100)}`
+                      : `${getMercadoPagoMethodActionLabel(selectedPaymentMethod)} · ${BRL_FORMATTER.format(priceCents / 100)}`}
                 </span>
               </button>
 
@@ -649,14 +704,26 @@ export const PrivateAlbumViewer: React.FC<PrivateAlbumViewerProps> = ({
       {activePixCharge && onCheckPixCharge && onConfirmPixCharge && (
         <PixPaymentModal
           charge={activePixCharge}
-          title="Pagamento PIX · Álbum Privativo"
+          title={
+            activePixCharge.preferredPaymentMethod &&
+            activePixCharge.preferredPaymentMethod !== 'pix'
+              ? 'Checkout Mercado Pago · Álbum Privativo'
+              : 'Pagamento PIX · Álbum Privativo'
+          }
           subtitle={`Desbloqueio exclusivo do acervo de ${modelName}`}
-          confirmLabel="Já Paguei via PIX · Liberar Álbum"
+          confirmLabel={
+            activePixCharge.preferredPaymentMethod &&
+            activePixCharge.preferredPaymentMethod !== 'pix'
+              ? 'Já Paguei no Mercado Pago · Liberar Álbum'
+              : 'Já Paguei via PIX · Liberar Álbum'
+          }
           onClose={() => setActivePixCharge(null)}
           onCancelCharge={onCancelPixCharge}
           onCheckStatus={onCheckPixCharge}
           onConfirmPayment={onConfirmPixCharge}
-          onRegenerate={generateAlbumPixCharge}
+          onRegenerate={() =>
+            generateAlbumCharge(activePixCharge.preferredPaymentMethod)
+          }
           onPaid={(res) => {
             setUnlockedItems(res.items || []);
             setActivePixCharge(null);

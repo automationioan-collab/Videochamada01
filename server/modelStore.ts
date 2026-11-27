@@ -210,6 +210,19 @@ export function sanitizeModelBasicInfo(
 export type PixKeyType = 'cpf' | 'cnpj' | 'email' | 'phone' | 'evp';
 export type PixChargeKind = 'private_album' | 'tip' | 'call_plan';
 export type PixChargeStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
+export type PixApprovalStatus =
+  | 'pendente'
+  | 'aprovado'
+  | 'rejeitado'
+  | 'cancelado'
+  | 'expirado'
+  | 'estornado';
+export type MercadoPagoPaymentMethod =
+  | 'pix'
+  | 'credit_card'
+  | 'debit_card'
+  | 'account_money'
+  | 'ticket';
 
 export interface StoredPixCharge {
   id: string;
@@ -227,8 +240,16 @@ export interface StoredPixCharge {
   callMode?: 'group' | 'private';
   note?: string;
   status: PixChargeStatus;
+  approvalStatus?: PixApprovalStatus;
+  mercadoPagoStatus?: string;
   provider: 'bacen' | 'mercadopago';
+  preferredPaymentMethod?: MercadoPagoPaymentMethod;
   externalPaymentId?: string;
+  checkoutUrl?: string;
+  paymentMethodUsed?: string;
+  verifiedAmountCents?: number;
+  webhookVerifiedAt?: number;
+  webhookNotificationId?: string;
   brCode: string;
   qrCodeDataUrl: string;
   pixKeyUsed: string;
@@ -1089,7 +1110,7 @@ export function buildDefaultWorkspace(
         'Chamada Privativa (Só com a Modelo)',
       ratePerMinuteCents: rate,
       privateAlbumPriceCents: 3900,
-      pixKey: '',
+      pixKey: 'eb2663cc-50a4-47d2-b6ae-1bcc86bdae6c',
       pixKeyType: 'evp',
       pixMerchantName: name.slice(0, 25),
       pixMerchantCity: 'SAO PAULO',
@@ -1216,6 +1237,20 @@ export function getStore(): StudioStoreData {
             if (!Array.isArray(ws.pixCharges)) {
               ws.pixCharges = [];
               mutated = true;
+            } else {
+              for (const charge of ws.pixCharges) {
+                if (!charge.approvalStatus) {
+                  charge.approvalStatus =
+                    charge.status === 'paid'
+                      ? 'aprovado'
+                      : charge.status === 'expired'
+                        ? 'expirado'
+                        : charge.status === 'cancelled'
+                          ? 'cancelado'
+                          : 'pendente';
+                  mutated = true;
+                }
+              }
             }
             if (!Array.isArray(ws.whatsappInvites)) {
               ws.whatsappInvites = [];

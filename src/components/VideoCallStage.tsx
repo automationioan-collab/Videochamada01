@@ -12,6 +12,7 @@ import { TipGoalProgressCard } from './TipGoalProgressCard';
 import type { PixConfirmationResponse } from './PixPaymentModal';
 import type {
   CallMessage,
+  MercadoPagoPaymentMethod,
   PixChargeKind,
   PixChargeRecord,
   StudioProfile,
@@ -21,6 +22,7 @@ import type {
 interface VideoCallStageProps {
   isAdmin: boolean;
   modelId?: string;
+  mercadoPagoConfigured?: boolean;
   myProfile: StudioProfile | null;
   modelProfile: StudioProfile | null;
   studioState: StudioState | null;
@@ -62,7 +64,13 @@ interface VideoCallStageProps {
     topic?: string;
     callMode?: 'group' | 'private';
     note?: string;
-  }) => Promise<{ ok: boolean; charge?: PixChargeRecord; error?: string }>;
+    preferredPaymentMethod?: MercadoPagoPaymentMethod;
+  }) => Promise<{
+    ok: boolean;
+    charge?: PixChargeRecord;
+    error?: string;
+    requiresMercadoPagoToken?: boolean;
+  }>;
   onCheckPixCharge?: (
     modelId: string,
     chargeId: string
@@ -90,6 +98,7 @@ function formatDuration(totalSeconds: number) {
 export const VideoCallStage: React.FC<VideoCallStageProps> = ({
   isAdmin,
   modelId,
+  mercadoPagoConfigured = false,
   myProfile,
   modelProfile,
   studioState,
@@ -425,6 +434,7 @@ export const VideoCallStage: React.FC<VideoCallStageProps> = ({
               }
               studioState={studioState}
               isAuthenticated={!isAdmin}
+              mercadoPagoConfigured={mercadoPagoConfigured}
               compact={true}
               onSendTip={isAdmin ? undefined : onSendTip}
               onCreatePixCharge={isAdmin ? undefined : onCreatePixCharge}

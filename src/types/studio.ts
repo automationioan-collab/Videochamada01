@@ -290,6 +290,19 @@ export interface PendingGalleryReviewItem {
 export type PixKeyType = 'cpf' | 'cnpj' | 'email' | 'phone' | 'evp';
 export type PixChargeKind = 'private_album' | 'tip' | 'call_plan';
 export type PixChargeStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
+export type PixApprovalStatus =
+  | 'pendente'
+  | 'aprovado'
+  | 'rejeitado'
+  | 'cancelado'
+  | 'expirado'
+  | 'estornado';
+export type MercadoPagoPaymentMethod =
+  | 'pix'
+  | 'credit_card'
+  | 'debit_card'
+  | 'account_money'
+  | 'ticket';
 
 export interface PixChargeRecord {
   id: string;
@@ -307,7 +320,13 @@ export interface PixChargeRecord {
   callMode?: 'group' | 'private';
   note?: string;
   status: PixChargeStatus;
+  approvalStatus?: PixApprovalStatus;
+  mercadoPagoStatus?: string;
+  webhookVerifiedAt?: number;
   provider: 'bacen' | 'mercadopago';
+  preferredPaymentMethod?: MercadoPagoPaymentMethod;
+  checkoutUrl?: string;
+  paymentMethodUsed?: string;
   brCode: string;
   qrCodeDataUrl: string;
   pixKeyMasked: string;
@@ -375,6 +394,8 @@ export interface StudioConfig {
   pixKeyType?: PixKeyType;
   pixMerchantName?: string;
   pixMerchantCity?: string;
+  pixConfigured?: boolean;
+  mercadoPagoConfigured?: boolean;
   whatsappInvitePhotoUrl?: string;
   whatsappInviteMessage?: string;
   whatsappInvitePlanId?: string;
